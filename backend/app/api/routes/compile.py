@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi.responses import JSONResponse
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from app.core.hooks import (
     compile_admission,
@@ -662,6 +662,26 @@ class CompileResponse(BaseModel):
     # ambiguous_headers, ...). Filled by the compilers from what the overlay's
     # materialiser reported; None on OSS. Recorded with the compile event.
     scope: dict | None = None
+    # A stable class for the failure: missing_library | core_install_failed |
+    # linker_error | syntax_error | compile_error | unknown. Filled in below
+    # from stderr, so every caller gets it without grepping compiler output,
+    # and every construction site gets it without remembering to. None when
+    # the build succeeded.
+    #
+    # It already existed for analytics; agents were the one caller that had to
+    # re-derive the failure class from the log on every retry, which is the
+    # one place where the distinction decides what to do next:
+    # core_install_failed is the build server's problem and rewriting the
+    # sketch cannot fix it.
+    error_kind: str | None = None
+
+    @model_validator(mode="after")
+    def _classify(self) -> "CompileResponse":
+        if self.success:
+            self.error_kind = None
+        elif not self.error_kind:
+            self.error_kind = _classify_compile_error(self.stderr, self.error)
+        return self
 
 
 _SCOPE_RESULT_KEYS = (
@@ -696,7 +716,12 @@ def _scope_of(result: dict) -> dict | None:
 
 
 def _classify_compile_error(stderr: str, error: str | None) -> str:
-    """Map raw compiler output to a stable error_kind for analytics."""
+    """Map raw compiler output to a stable error_kind.
+
+    Rides CompileResponse.error_kind (so every API caller gets it) and the
+    compile analytics event. The vocabulary is closed on purpose: callers
+    branch on it.
+    """
     haystack = f"{error or ''}\n{stderr or ''}".lower()
     if "no such file or directory" in haystack or "fatal error:" in haystack:
         return "missing_library"
@@ -1127,10 +1152,7 @@ async def _compile_job(
         }
         if job_key:
             await _artifact_store(job_key, response.model_dump())
-        error_kind = (
-            None if response.success
-            else _classify_compile_error(response.stderr, response.error)
-        )
+        error_kind = response.error_kind
         await _record_async_metric(
             user_id=user_id,
             project_id=request.project_id,
@@ -1284,7 +1306,7 @@ async def compile_sketch(
         board_fqbn=request.board_fqbn,
         success=response.success,
         duration_ms=duration_ms,
-        error_kind=None if response.success else _classify_compile_error(response.stderr, response.error),
+        error_kind=response.error_kind,
         extra={
             "file_count": len(files),
             "has_wifi": response.has_wifi,
