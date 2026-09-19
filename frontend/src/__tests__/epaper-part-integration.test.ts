@@ -320,3 +320,100 @@ describe('EPaperPart — Web Component pinInfo', () => {
     }
   });
 });
+
+// ── A board whose SPI slot is EMPTY at rest: the Raspberry Pi ────────────────
+//
+// PiBridgeShim exposes the same single-listener adapter as the AVR, but its
+// `onByte` is null until somebody listens (nothing on a Pi's bus by default).
+// The part used to gate its browser path on `typeof spi.onByte === 'function'`
+// and then did `spi.onByte.bind(spi)`, so on a Pi no branch was taken at all:
+// the panel stayed dark, the shim reported "nothing attached on SPI", and the
+// backend answered the guest's spidev transfers with idle bytes without ever
+// asking the canvas. Found on a user's Raspberry Pi 5 + 7.5" e-paper project.
+
+class PiLikeSimulator {
+  spi: { onByte: ((value: number) => void) | null; completeTransfer: (resp: number) => void };
+  completed: number[] = [];
+  pinManager = new FakePinManager();
+  externalPinState = new Map<number, boolean>();
+  constructor() {
+    this.spi = {
+      onByte: null,
+      completeTransfer: (resp: number) => {
+        this.completed.push(resp);
+      },
+    };
+  }
+  setPinState(pin: number, state: boolean) {
+    this.externalPinState.set(pin, state);
+  }
+  isRunning() {
+    return true;
+  }
+}
+
+describe('EPaperPart on a board with an empty SPI slot (Raspberry Pi)', () => {
+  const PIN_DC = 25;
+  const PIN_CS = 8;
+  const PIN_RST = 17;
+  const PIN_BUSY = 24;
+  const getPin = (name: string): number | null =>
+    ({ DC: PIN_DC, CS: PIN_CS, RST: PIN_RST, BUSY: PIN_BUSY } as Record<string, number>)[name] ?? null;
+
+  it('attaches without throwing and takes the slot, so the bus is no longer "nothing attached"', () => {
+    const sim = new PiLikeSimulator();
+    const el = document.createElement('velxio-epaper') as HTMLElement;
+    el.setAttribute('panel-kind', 'epaper-7in5-bw');
+    el.setAttribute('refresh-ms', '1');
+    document.body.appendChild(el);
+
+    expect(sim.spi.onByte).toBeNull();
+    cleanup = PartSimulationRegistry.get('epaper-7in5-bw')!.attachEvents!(
+      el, sim as never, getPin, 'epd-pi',
+    ) as () => void;
+    expect(typeof sim.spi.onByte).toBe('function');
+  });
+
+  it('decodes a UC8179 frame sent the way a Pi sends it, and pulses BUSY', () => {
+    const sim = new PiLikeSimulator();
+    const el = document.createElement('velxio-epaper') as HTMLElement;
+    el.setAttribute('panel-kind', 'epaper-7in5-bw');
+    el.setAttribute('refresh-ms', '1');
+    document.body.appendChild(el);
+    cleanup = PartSimulationRegistry.get('epaper-7in5-bw')!.attachEvents!(
+      el, sim as never, getPin, 'epd-pi',
+    ) as () => void;
+
+    // CE0 low, then: DTM2 (0x13) with a few data bytes, then DISPLAY_REFRESH.
+    sim.pinManager.triggerPinChange(PIN_CS, false);
+    const feed = (value: number, dc: boolean) => {
+      sim.pinManager.triggerPinChange(PIN_DC, dc);
+      sim.spi.onByte!(value);
+    };
+    feed(0x13, false);
+    for (const b of [0x00, 0xff, 0x0f, 0xf0]) feed(b, true);
+    feed(0x12, false);
+
+    // Every byte is answered on MISO, which is what lets the guest's
+    // spidev transfer return.
+    expect(sim.completed.length).toBe(6);
+    expect(sim.completed.every((r) => r === 0xff)).toBe(true);
+    // The refresh drove BUSY through the board's own setPinState, which on a
+    // Pi is what reaches the guest's GPIO.input(BUSY).
+    expect(sim.externalPinState.has(PIN_BUSY)).toBe(true);
+  });
+
+  it('cleanup hands the slot back EMPTY, not as a function that does nothing', () => {
+    const sim = new PiLikeSimulator();
+    const el = document.createElement('velxio-epaper') as HTMLElement;
+    el.setAttribute('panel-kind', 'epaper-7in5-bw');
+    document.body.appendChild(el);
+    const off = PartSimulationRegistry.get('epaper-7in5-bw')!.attachEvents!(
+      el, sim as never, getPin, 'epd-pi',
+    ) as () => void;
+    off();
+    // The shim decides "is anything on SPI?" from this slot. A leftover
+    // function would keep the relay asking a panel that is gone.
+    expect(sim.spi.onByte).toBeNull();
+  });
+});
