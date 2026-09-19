@@ -92,6 +92,8 @@ app.add_middleware(
 )
 
 # Include routers
+from app.api.routes import agent
+app.include_router(agent.router, prefix="/api/agent", tags=["agent"])
 app.include_router(compile.router, prefix="/api/compile", tags=["compilation"])
 app.include_router(compile_chip.router, prefix="/api/compile-chip", tags=["custom-chips"])
 app.include_router(compile_rom.router, prefix="/api/compile-rom", tags=["custom-chips"])

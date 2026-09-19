@@ -37,6 +37,7 @@ import { whenNewsClear } from '../lib/newsGate';
 import { EditorMenuBar } from '../components/editor/EditorMenuBar';
 import type { CompilationLog } from '../utils/compilationLogger';
 import '../App.css';
+import { AgentPanel } from '../components/agent/AgentPanel';
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -609,6 +610,7 @@ export const EditorPage: React.FC = () => {
       )}
 
 
+      <div className="agent-workbench">
       <div className="app-container" ref={containerRef}>
         {/* ── Editor side ── */}
         <div
@@ -799,6 +801,9 @@ export const EditorPage: React.FC = () => {
             </>
           )}
         </div>
+      </div>
+
+      <AgentPanel />
       </div>
 
       {showStarBanner && (
