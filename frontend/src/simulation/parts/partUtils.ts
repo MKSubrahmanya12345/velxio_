@@ -144,3 +144,30 @@ export function setAdcVoltage(simulator: AnySimulator, pin: number, voltage: num
   adc.channelValues[channel] = voltage;
   return true;
 }
+
+/**
+ * The board pin a two-terminal input part drives: the first of `names` that is
+ * wired to a REAL pin.
+ *
+ * A button or a switch has no signal leg and no ground leg, only legs, and the
+ * user decides which goes where. `getArduinoPin(a) ?? getArduinoPin(b)` reads
+ * as "the first one that is wired", but a leg on GND or on a supply rail does
+ * not resolve to null: it resolves to -1 (PinTrace's RAIL). So with GND on the
+ * first leg tried, the part kept -1 for good and drove a pin nobody reads.
+ *
+ * Invisible on the boards whose inputs come from the SPICE solve, because
+ * there the part never pushes a level at all. It bit the boards that do take
+ * the push: a Raspberry Pi's pushbutton wired GND-first sent
+ * `{"type":"gpio_in","data":{"pin":-1,...}}` to the guest, and the gallery
+ * example wired exactly that way never saw its button.
+ */
+export function firstBoardPin(
+  getArduinoPin: (pinName: string) => number | null,
+  names: readonly string[],
+): number | null {
+  for (const name of names) {
+    const pin = getArduinoPin(name);
+    if (pin !== null && pin >= 0) return pin;
+  }
+  return null;
+}
