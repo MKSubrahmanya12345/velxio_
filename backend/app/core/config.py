@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     overlay's config.py instead so the OSS image stays minimal.
     """
 
+    # Explicitly opt-in: shared provider credits must not be exposed anonymously.
+    AGENT_ENABLED: bool = False
+    AGENT_API_KEY: str = ""
+    AGENT_BASE_URL: str = "https://api.openai.com/v1"
+    AGENT_MODEL: str = "gpt-4.1"
+    AGENT_ACCESS_TOKEN: str = ""
+    AGENT_ALLOW_ANONYMOUS: bool = False
+
     # CORS — used by main.py to whitelist the SPA origin during local dev
     # and to build redirect URLs from auth routes in the overlay.
     FRONTEND_URL: str = "http://localhost:5173"

@@ -51,6 +51,14 @@ Their hardware is in the catalog today: the M5Stack Cardputer and Core, the Pimo
 
 ---
 
+## AI circuit workspace
+
+A VS Code-style agent sidebar can turn a prompt into an automatically wired,
+programmed Arduino Uno simulation, then make follow-up edits with checkpoints and
+undo. Supports LEDs, resistors, buttons, potentiometers, and buzzers in this first
+release. Model integration is **opt-in** and server-side; see
+[setup, supported scope, and testing instructions](docs/agent-workspace.md).
+
 ## Try it now
 
 **[https://velxio.dev](https://velxio.dev)** — no installation needed. Open the editor, write your sketch, and simulate directly in the browser.
