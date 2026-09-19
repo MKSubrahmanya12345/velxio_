@@ -1369,8 +1369,16 @@ class ESPIDFCompiler:
         return True
 
     def _is_esp32c3(self, board_fqbn: str) -> bool:
-        """Return True if FQBN targets ESP32-C3 (RISC-V)."""
-        return 'esp32c3' in board_fqbn or 'esp32-c3' in board_fqbn
+        """Return True if FQBN targets ESP32-C3 (RISC-V).
+
+        Lowercased like every sibling below, and for a reason this one learned
+        the hard way: `esp32:esp32:XIAO_ESP32C3` is spelled in capitals, so the
+        case-sensitive test missed it, the target fell through to 'esp32', and
+        a RISC-V board was handed the Xtensa toolchain. It failed loudly here
+        (a missing HWCDCSerial), but the class of bug is the silent one.
+        """
+        f = board_fqbn.lower()
+        return 'esp32c3' in f or 'esp32-c3' in f
 
     def _is_esp32c6(self, board_fqbn: str) -> bool:
         """Return True if FQBN targets ESP32-C6 (RISC-V, IDF v5.x only)."""

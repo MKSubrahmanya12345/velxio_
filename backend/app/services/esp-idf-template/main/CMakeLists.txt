@@ -143,7 +143,15 @@ elseif(DEFINED ENV{ARDUINO_ESP32_PATH})
     # which is a syntax error. A whitelist (instead of the old C3/S3
     # blacklist) keeps new targets safe by default — the ESP32-C6 variant
     # was the first to hit the blacklist gap.
-    if(IDF_TARGET STREQUAL "esp32")
+    #
+    # The test is on the VARIANT, not the target: the clash is with a variant's
+    # pins_arduino.h, and several esp32-target boards ship one. WEMOS LOLIN32
+    # Lite declares `static const uint8_t LED_BUILTIN = 22` and could not be
+    # compiled at all while this read IDF_TARGET — every build of it died on
+    # `expected unqualified-id before numeric constant`. CONFIG_ARDUINO_VARIANT
+    # comes from sdkconfig.defaults.in, which the compiler fills from
+    # arduino-esp32's boards.txt.
+    if(CONFIG_ARDUINO_VARIANT STREQUAL "esp32")
         target_compile_definitions(${COMPONENT_LIB} PRIVATE
             "LED_BUILTIN=2")
     endif()
