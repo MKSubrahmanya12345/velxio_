@@ -26,12 +26,14 @@ import {
 import { Uc8179Decoder } from '../displays/Uc8179Decoder';
 import { PANEL_CONFIGS, getPanelConfig, PANEL_IDS } from '../displays/EPaperPanels';
 import { RP2040Simulator } from '../RP2040Simulator';
-import type { AVRSimulator } from '../AVRSimulator';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface AvrLikeSimulator {
-  spi?: { onByte: (value: number) => void; completeTransfer: (resp: number) => void };
+  // `onByte` is null at rest on a board that has no SPI listener yet (the
+  // Raspberry Pi's adapter, see PiBridgeShim): the channel is a slot, not a
+  // method, and whoever listens assigns it.
+  spi?: { onByte: ((value: number) => void) | null; completeTransfer: (resp: number) => void };
   pinManager?: { onPinChange(pin: number, cb: (p: number, state: boolean) => void): () => void };
 }
 
@@ -65,10 +67,28 @@ function isRP2040(sim: AnySimulator): sim is RP2040Simulator {
   return sim instanceof RP2040Simulator;
 }
 
-function isAvr(sim: AnySimulator): sim is AVRSimulator {
-  // AVR exposes an `spi` member with `onByte`/`completeTransfer`.
+/**
+ * A board whose SPI bus is the single-listener adapter (`spi.onByte` is a
+ * slot, `spi.completeTransfer` answers MISO) and whose pins go through a
+ * PinManager. The AVR is one. So is the Raspberry Pi: its guest's spidev
+ * transfers are replayed byte by byte through the same adapter, with CE0
+ * pulsed around them and DC / RST arriving as ordinary pin changes.
+ *
+ * `isAvr` could not see the Pi because it asks for `typeof onByte ===
+ * 'function'`, and the Pi's slot is null until somebody listens. That is
+ * what kept every e-paper panel dark on a Pi: no branch was taken at all,
+ * the shim reported "nothing attached on SPI", and the backend answered the
+ * guest with idle bytes without ever asking the canvas.
+ */
+function hasSpiAdapter(sim: AnySimulator): boolean {
   const s = sim as AvrLikeSimulator;
-  return !!s.spi && typeof s.spi.onByte === 'function';
+  return (
+    !!s.spi &&
+    typeof s.spi === 'object' &&
+    'onByte' in s.spi &&
+    typeof s.spi.completeTransfer === 'function' &&
+    !!s.pinManager
+  );
 }
 
 function isEsp32Shim(sim: AnySimulator): sim is Esp32LikeSimulator {
@@ -181,15 +201,11 @@ const epaperSimulation = {
       // Drive BUSY pin low (LOW = ready) or high (HIGH = refreshing).
       const busyPin = getArduinoPinHelper(PIN_BUSY);
       if (busyPin === null) return;
-      if (isAvr(simulator)) {
-        (simulator as any).setPinState?.(busyPin, state);
-      } else if (isRP2040(simulator)) {
-        (simulator as any).setPinState?.(busyPin, state);
-      } else if (isEsp32Shim(simulator)) {
-        // ESP32 BUSY is driven by the backend on the same pin via
-        // qemu_picsimlab_set_pin; the shim's setPinState delegates to it.
-        (simulator as any).setPinState?.(busyPin, state);
-      }
+      // Every board that can host a panel takes an external level through
+      // setPinState: the AVR and the RP2040 directly, the ESP32 shim by
+      // delegating to the backend (qemu_picsimlab_set_pin), the Raspberry Pi
+      // by forwarding it to the guest. One call, not a branch per family.
+      (simulator as any).setPinState?.(busyPin, state);
     };
 
     const pulseBusy = (ms: number) => {
@@ -306,9 +322,11 @@ const epaperSimulation = {
             });
           }
         }
-      } else if (isAvr(simulator)) {
+      } else if (hasSpiAdapter(simulator)) {
         const spi = (simulator as AvrLikeSimulator).spi!;
-        const prev = spi.onByte.bind(spi);
+        // The previous listener, or null: never `.bind()` it, the slot is
+        // empty on a board nobody has listened on yet.
+        const prev = spi.onByte;
         spi.onByte = (value: number) => {
           if (csLow || csPin === null) decoder.feed(value, dcHigh);
           spi.completeTransfer(0xff);
@@ -366,7 +384,7 @@ const epaperSimulation = {
     // ── Pick the path ────────────────────────────────────────────────────
     if (isEsp32Shim(simulator)) {
       installEsp32Path();
-    } else if (isAvr(simulator) || isRP2040(simulator)) {
+    } else if (isRP2040(simulator) || hasSpiAdapter(simulator)) {
       installBrowserPath();
     }
     // Other simulators (RiscV, Esp32C3, …) silently no-op for now; the
