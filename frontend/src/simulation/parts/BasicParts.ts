@@ -1,7 +1,7 @@
 import { PartSimulationRegistry } from './PartSimulationRegistry';
 import { useElectricalStore } from '../../store/useElectricalStore';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
-import { emitPropertyChange } from './partUtils';
+import { emitPropertyChange, firstBoardPin } from './partUtils';
 import { releaseLineGap, requestLine } from '../line/requestLine';
 
 /**
@@ -22,11 +22,9 @@ function spiceDriven(sim: unknown): boolean {
  */
 PartSimulationRegistry.register('pushbutton', {
   attachEvents: (element, avrSimulator, getArduinoPinHelper, componentId) => {
-    const arduinoPin =
-      getArduinoPinHelper('1.l') ??
-      getArduinoPinHelper('2.l') ??
-      getArduinoPinHelper('1.r') ??
-      getArduinoPinHelper('2.r');
+    // Whichever leg reaches a real pin: the other one is on GND or a rail,
+    // and a rail is -1, not null (see firstBoardPin).
+    const arduinoPin = firstBoardPin(getArduinoPinHelper, ['1.l', '2.l', '1.r', '2.r']);
 
     // Seed the input pin HIGH so `digitalRead()` returns HIGH while the
     // button is idle.  avr8js does not auto-simulate INPUT_PULLUP — without
@@ -60,11 +58,9 @@ PartSimulationRegistry.register('pushbutton', {
  */
 PartSimulationRegistry.register('pushbutton-6mm', {
   attachEvents: (element, avrSimulator, getArduinoPinHelper, componentId) => {
-    const arduinoPin =
-      getArduinoPinHelper('1.l') ??
-      getArduinoPinHelper('2.l') ??
-      getArduinoPinHelper('1.r') ??
-      getArduinoPinHelper('2.r');
+    // Whichever leg reaches a real pin: the other one is on GND or a rail,
+    // and a rail is -1, not null (see firstBoardPin).
+    const arduinoPin = firstBoardPin(getArduinoPinHelper, ['1.l', '2.l', '1.r', '2.r']);
 
     // Same INPUT_PULLUP seeding as the full-size pushbutton — see comment
     // in `register('pushbutton', ...)` above for why this is required.
@@ -96,7 +92,7 @@ PartSimulationRegistry.register('pushbutton-6mm', {
 PartSimulationRegistry.register('slide-switch', {
   attachEvents: (element, avrSimulator, getArduinoPinHelper, componentId) => {
     // Slide switch has pins: 1, 2, 3 — middle pin (2) is the common output
-    const arduinoPin = getArduinoPinHelper('2') ?? getArduinoPinHelper('1');
+    const arduinoPin = firstBoardPin(getArduinoPinHelper, ['2', '1']);
 
     // Read initial value from element (0 or 1)
     const raw = (element as any).value;
