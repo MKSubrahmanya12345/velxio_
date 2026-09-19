@@ -659,30 +659,54 @@ export class ChipInstance {
       try { return fn(...args); } catch { return 0; }
     };
 
-    let connectPending = true;
+    /* Which phase of a transaction the chip has been told about. A chip is
+       addressed for writing or for reading, and it has to know WHICH — a
+       display waits for its command byte, a memory stages the bytes it is
+       about to hand over.
+       The masters here do not announce that: `I2CBusManager.connectToSlave`
+       picks the device and remembers the direction without telling it, and the
+       engines' buses do the same. So the phase is read off the byte stream,
+       which carries it exactly: the first write after anything else IS the
+       write phase starting, and the first read after a write IS a REPEATED
+       START — the master keeping the bus and turning it around.
+       That last one was silently missing. Only a STOP used to re-arm the
+       announcement, so `Wire.endTransmission(false)` followed by requestFrom()
+       — the idiom Adafruit_BusIO's write_then_read() and half the drivers out
+       there use — never reached the chip's on_connect: the register pointer
+       just written was never applied and the read was served from the
+       PREVIOUS staged buffer. The ST25DV example asked the tag for IC_REF at
+       0x0017 and got the byte at 0x0018, every time. */
+    type Phase = 'idle' | 'write' | 'read';
+    let phase: Phase = 'idle';
+    const enter = (isRead: boolean): void => {
+      if (cfg.on_connect) callFn(cfg.on_connect, cfg.user_data, cfg.address, isRead ? 1 : 0);
+      phase = isRead ? 'read' : 'write';
+    };
     const device = {
       address: cfg.address,
+      /** Masters that DO announce the phase call this; the rest are covered
+       *  by the inference in writeByte / readByte, and this keeps them from
+       *  announcing it twice. */
+      connect: (_addr: number, isRead: boolean): boolean => {
+        enter(!!isRead);
+        this.wasi.flush();
+        return true;
+      },
       writeByte: (value: number): boolean => {
-        if (cfg.on_connect && connectPending) {
-          callFn(cfg.on_connect, cfg.user_data, cfg.address, 0);
-          connectPending = false;
-        }
+        if (phase !== 'write') enter(false);
         const ack = !!callFn(cfg.on_write, cfg.user_data, value);
         this.wasi.flush();
         return ack;
       },
       readByte: (): number => {
-        if (cfg.on_connect && connectPending) {
-          callFn(cfg.on_connect, cfg.user_data, cfg.address, 1);
-          connectPending = false;
-        }
+        if (phase !== 'read') enter(true);
         const b = callFn(cfg.on_read, cfg.user_data) & 0xff;
         this.wasi.flush();
         return b;
       },
       stop: (): void => {
         if (cfg.on_stop) callFn(cfg.on_stop, cfg.user_data);
-        connectPending = true;
+        phase = 'idle';
         this.wasi.flush();
       },
     };
