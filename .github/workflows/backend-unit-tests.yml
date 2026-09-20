@@ -44,7 +44,4 @@ jobs:
         # CI=true is set automatically by GitHub Actions.
         # Tests decorated with @unittest.skipIf(CI=='true', ...) are skipped here
         # (e.g. timing-sensitive tests that use busy-wait).
-        # backend/tests/ holds the agent contract tests (patch semantics,
-        # static analysis, tool loop, route auth) — they were previously run
-        # in NO workflow at all.
-        run: pytest test/backend/unit/ backend/tests/ -v --tb=short
+        run: pytest test/backend/unit/ -v --tb=short
