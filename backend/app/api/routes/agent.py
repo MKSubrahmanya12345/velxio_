@@ -5,7 +5,9 @@ import secrets
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
+from app.agent.feedback import push as push_feedback
 from app.agent.models import AgentRequest
 from app.agent.runlog import snapshot as run_snapshot
 from app.agent.service import ProviderError, run_agent
@@ -76,3 +78,20 @@ async def run(body: AgentRequest, request: Request):
 
     return StreamingResponse(stream(), media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+class FeedbackBody(BaseModel):
+    note: str = Field(min_length=1, max_length=1000)
+
+
+@router.post("/runs/{run_id}/feedback", dependencies=[Depends(authorize)])
+async def feedback(run_id: str, body: FeedbackBody):
+    """Inject a mid-run user note. The running loop folds it into the next turn.
+
+    Returns 404 once the run has finished (its queue is evicted), so a late note
+    is a no-op instead of a crash. Notes are rate-limited by the queue cap (8).
+    """
+    ok = push_feedback(run_id, body.note)
+    if not ok:
+        raise HTTPException(404, "Run is not accepting feedback (it may have finished).")
+    return {"ok": True}

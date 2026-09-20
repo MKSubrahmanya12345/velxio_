@@ -125,7 +125,7 @@ async def test_stream_success(monkeypatch):
     monkeypatch.setattr(service, "propose", AsyncMock(return_value=Proposal(summary="Blink", plan=["Wire LED"], patch=blink_patch())))
     monkeypatch.setattr(service, "compile_project", AsyncMock(return_value={"success": True, "hex_content": ":00000001FF", "stdout": "compiled"}))
     events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project()))]
-    assert [e["type"] for e in events] == ["stage", "plan", "stage", "stage", "compile", "result"]
+    assert [e["type"] for e in events] == ["run_started", "stage", "plan", "stage", "stage", "compile", "result"]
     assert events[-1]["project"]["board"]["id"] == "uno"
     assert events[-1]["attempts"] == 1
 
