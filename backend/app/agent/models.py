@@ -4,13 +4,20 @@ import re
 import json
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StringConstraints, model_validator
 
 Id = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")]
 Coordinate = Annotated[float, Field(ge=-5000, le=5000, allow_inf_nan=False)]
 
 # Pin names from @wokwi/elements 1.9.2 pinInfo. Deliberately a small capability set.
-PINS: dict[str, list[str]] = json.loads(Path(__file__).with_name("catalog.json").read_text())
+# The catalog also carries the board's electrical capabilities (PWM/analog pins,
+# vcc, per-pin current limit) so analysis.py has one source of truth to check
+# analogWrite/analogRead against instead of a second hardcoded table.
+_CATALOG: dict[str, dict] = json.loads(Path(__file__).with_name("catalog.json").read_text())
+PINS: dict[str, list[str]] = {kind: list(spec["pins"]) for kind, spec in _CATALOG.items()}
+BOARD_CAPABILITIES: dict[str, dict] = {
+    kind: {k: v for k, v in spec.items() if k != "pins"} for kind, spec in _CATALOG.items()
+}
 
 PROPERTIES = {
     "led": {"color", "label", "flip", "rotation"},
@@ -18,6 +25,7 @@ PROPERTIES = {
     "pushbutton": {"color", "label", "rotation"},
     "potentiometer": {"value", "rotation"},
     "buzzer": {"rotation"},
+    "servo": {"angle", "horn", "hornColor", "rotation"},
 }
 
 
@@ -33,7 +41,7 @@ class Board(StrictModel):
 
 class Part(StrictModel):
     id: Id
-    metadataId: Literal["led", "resistor", "pushbutton", "potentiometer", "buzzer"]
+    metadataId: Literal["led", "resistor", "pushbutton", "potentiometer", "buzzer", "servo"]
     x: Coordinate
     y: Coordinate
     properties: dict[str, str | float | bool] = Field(default_factory=dict, max_length=8)
@@ -78,6 +86,15 @@ class Source(StrictModel):
 
 
 class Project(StrictModel):
+    # Set by apply_patch: the deterministic analysis findings for THIS candidate.
+    # Private so it never reaches the wire format or the prompt schema.
+    _findings: list = PrivateAttr(default_factory=list)
+
+    @property
+    def findings(self) -> list:
+        """Deterministic analysis findings for this candidate (see analysis.py)."""
+        return self._findings
+
     board: Board | None = None
     components: list[Part] = Field(default_factory=list, max_length=40)
     wires: list[Connection] = Field(default_factory=list, max_length=100)
@@ -117,10 +134,103 @@ class Patch(StrictModel):
     remove_files: list[str] = Field(default_factory=list, max_length=12)
 
 
+class Interaction(StrictModel):
+    """An input the verifier drives on the live simulation before sampling."""
+
+    kind: Literal["press", "pot"]
+    componentId: Id
+    at_ms: int = Field(default=500, ge=0, le=60000)
+    hold_ms: int = Field(default=500, ge=10, le=20000)
+    value: int = Field(default=512, ge=0, le=1023)
+
+
+class PinExpectation(StrictModel):
+    """A falsifiable claim about one board pin, checked against a real run."""
+
+    pin: str = Field(min_length=1, max_length=8)
+    expect: Literal["toggles", "high", "low"]
+    min_transitions: int = Field(default=2, ge=1, le=10000)
+    period_ms: tuple[int, int] | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def sane_period(self):
+        if self.period_ms is not None:
+            low, high = self.period_ms
+            if not 1 <= low <= high <= 120000:
+                raise ValueError("period_ms must be an increasing range within 1..120000")
+        if self.expect != "toggles" and self.min_transitions != 2:
+            raise ValueError("min_transitions only applies to expect='toggles'")
+        return self
+
+
+class SerialExpectation(StrictModel):
+    """A regex the firmware's serial output must match during the observation."""
+
+    matches: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def compiles(self):
+        try:
+            re.compile(self.matches)
+        except re.error as exc:
+            raise ValueError(f"Invalid serial regex: {exc}") from None
+        return self
+
+
+class Expectations(StrictModel):
+    """What 'it works' means for this proposal, in machine-checkable form.
+
+    The browser runs these against the live AVR simulation and feeds every
+    failure back as a repair diagnostic, so a proposal that compiles but does
+    not behave gets another attempt instead of a green tick.
+    """
+
+    observe_ms: int = Field(default=3000, ge=500, le=20000)
+    pins: list[PinExpectation] = Field(default_factory=list, max_length=12)
+    serial: list[SerialExpectation] = Field(default_factory=list, max_length=6)
+    interactions: list[Interaction] = Field(default_factory=list, max_length=8)
+
+
+TOOL_NAMES = (
+    "read_file",
+    "list_files",
+    "board_pinout",
+    "component_info",
+    "check_design",
+    "search_libraries",
+    "library_api",
+)
+ToolName = Literal[TOOL_NAMES]
+
+
+class ToolCall(StrictModel):
+    """A tool the model wants run before it commits to a patch.
+
+    Tool use rides on the same JSON response as the patch rather than the
+    provider's native tool-calling API, so any OpenAI-compatible
+    chat-completions endpoint (the only shape this adapter supports) works.
+    """
+
+    tool: ToolName
+    args: dict[str, str | int | float | bool] = Field(default_factory=dict, max_length=4)
+
+
 class Proposal(StrictModel):
     summary: str = Field(min_length=1, max_length=5000)
     plan: list[str] = Field(default_factory=list, max_length=8)
     patch: Patch | None = None
+    # Attached by the provider adapter (never sent by the model): token usage
+    # of the call that produced this proposal, for run records.
+    _usage: dict | None = PrivateAttr(default=None)
+
+    @property
+    def usage(self) -> dict | None:
+        return self._usage
+    # Falsifiable success criteria for the patch; checked by the live simulator.
+    expectations: Expectations | None = None
+    # When non-empty the run executes these tools and asks again; no patch is
+    # applied on a tool round. Bounded by AGENT_MAX_TOOL_ROUNDS.
+    tool_calls: list[ToolCall] = Field(default_factory=list, max_length=4)
 
 
 class Message(StrictModel):
@@ -145,7 +255,7 @@ def merge_items(old, new, removed, key):
     return list(result.values())
 
 
-def apply_patch(project: Project, patch: Patch) -> Project:
+def apply_patch(project: Project, patch: Patch, expectations=None) -> Project:
     if patch.board and project.board and patch.board.id != project.board.id:
         raise ValueError("Existing board ID must be preserved")
     candidate = Project(
@@ -161,6 +271,14 @@ def apply_patch(project: Project, patch: Patch) -> Project:
     filenames = {f.name for f in candidate.files}
     for source in candidate.files:
         validate_includes(source.content, filenames)
+    # Coherence/short analysis runs BEFORE validate_electrical so a shorted LED
+    # is reported as shorted, not as the vaguer downstream "needs a series
+    # resistor". The compiler cannot see that the sketch drives pin 7 while the
+    # LED sits on pin 13, and the electrical pre-flight cannot either (it
+    # forces every wired GPIO HIGH). This pass can.
+    from app.agent.analysis import assert_clean  # local import: analysis imports models
+
+    candidate._findings = assert_clean(candidate, expectations)
     validate_electrical(candidate)
     return candidate
 
@@ -179,7 +297,9 @@ def validate_includes(content: str, filenames: set[str]):
             raise ValueError("Only literal Arduino core or local file includes are supported")
         system, local = match.groups()
         header = system or local
-        if header not in {"Arduino.h", "math.h", "stdint.h", "string.h"} and not (local and local in filenames):
+        # Servo.h ships with the arduino:avr core (built-in library), so it
+        # compiles without any library installation — same trust level as the core.
+        if header not in {"Arduino.h", "math.h", "stdint.h", "string.h", "Servo.h"} and not (local and local in filenames):
             raise ValueError(f"Unsupported include: {header}; use Arduino core APIs")
 
 

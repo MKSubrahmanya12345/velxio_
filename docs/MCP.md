@@ -295,6 +295,10 @@ Velxio circuits are plain JSON objects:
 
 ```bash
 cd backend
-pip install pytest pytest-asyncio
-python -m pytest tests/test_mcp_tools.py -v
+pip install pytest pytest-asyncio 'mcp>=1.0.0,<2'
+python -m pytest test/backend/unit/test_mcp_tools.py backend/tests/test_agent_mcp.py -v
 ```
+
+(`test_mcp_tools.py` covers the transport and codegen; `test_agent_mcp.py`
+covers `validate_circuit`. Note `mcp` is capped below 2.0 — mcp 2.x removed
+`mcp.server.fastmcp`.)

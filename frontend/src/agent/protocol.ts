@@ -11,7 +11,7 @@ export const projectSchema = z
         z
           .object({
             id,
-            metadataId: z.enum(['led', 'resistor', 'pushbutton', 'potentiometer', 'buzzer']),
+            metadataId: z.enum(['led', 'resistor', 'pushbutton', 'potentiometer', 'buzzer', 'servo']),
             x: coord,
             y: coord,
             properties: z.record(z.union([z.string(), z.number().finite(), z.boolean()])),
@@ -49,29 +49,74 @@ export const projectSchema = z
 export type AgentProject = z.infer<typeof projectSchema>;
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
+/** Mirror of backend Expectations: falsifiable live-simulation checks. */
+export const expectationsSchema = z
+  .object({
+    observe_ms: z.number().int().min(500).max(20000),
+    pins: z
+      .array(
+        z
+          .object({
+            pin: z.string().min(1).max(8),
+            expect: z.enum(['toggles', 'high', 'low']),
+            min_transitions: z.number().int().min(1).max(10000),
+            period_ms: z.tuple([z.number().int(), z.number().int()]).nullable(),
+          })
+          .strict(),
+      )
+      .max(12),
+    serial: z.array(z.object({ matches: z.string().min(1).max(200) }).strict()).max(6),
+    interactions: z
+      .array(
+        z
+          .object({
+            kind: z.enum(['press', 'pot']),
+            componentId: id,
+            at_ms: z.number().int().min(0).max(60000),
+            hold_ms: z.number().int().min(10).max(20000),
+            value: z.number().int().min(0).max(1023),
+          })
+          .strict(),
+      )
+      .max(8),
+  })
+  .strict();
+export type AgentExpectations = z.infer<typeof expectationsSchema>;
+
+const runId = { run_id: z.string().optional() };
+
 export const eventSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('stage'),
-    stage: z.enum(['planning', 'repairing', 'validating', 'compiling']),
+    stage: z.enum(['planning', 'repairing', 'validating', 'compiling', 'research', 'verifying']),
     message: z.string(),
     attempt: z.number().optional(),
+    ...runId,
   }),
-  z.object({ type: z.literal('plan'), plan: z.array(z.string()), summary: z.string() }),
+  z.object({ type: z.literal('plan'), plan: z.array(z.string()), summary: z.string(), ...runId }),
   z.object({
     type: z.literal('compile'),
     success: z.boolean(),
     stdout: z.string(),
     stderr: z.string(),
+    ...runId,
   }),
-  z.object({ type: z.literal('diagnostic'), message: z.string() }),
-  z.object({ type: z.literal('answer'), summary: z.string() }),
-  z.object({ type: z.literal('error'), message: z.string(), diagnostics: z.string().optional() }),
+  z.object({ type: z.literal('diagnostic'), message: z.string(), ...runId }),
+  z.object({ type: z.literal('answer'), summary: z.string(), ...runId }),
+  z.object({ type: z.literal('error'), message: z.string(), diagnostics: z.string().optional(), ...runId }),
+  z.object({
+    type: z.literal('tools'),
+    calls: z.array(z.object({ tool: z.string(), ok: z.boolean() }).strict()),
+    ...runId,
+  }),
   z.object({
     type: z.literal('result'),
     project: projectSchema,
     hex: z.string().min(1).max(1000000),
     summary: z.string(),
     attempts: z.number(),
+    expectations: expectationsSchema.nullable().optional(),
+    ...runId,
   }),
 ]);
 export type AgentEvent = z.infer<typeof eventSchema>;

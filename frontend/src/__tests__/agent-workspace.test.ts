@@ -199,8 +199,8 @@ describe('workspace transactions', () => {
     state.boards[0].boardKind = 'esp32';
     expect(() => toAgentProject(state)).toThrow('Arduino Uno');
     state.boards[0].boardKind = 'arduino-uno';
-    state.components[0].metadataId = 'servo';
-    expect(() => toAgentProject(state)).toThrow('servo');
+    state.components[0].metadataId = 'lcd1602';
+    expect(() => toAgentProject(state)).toThrow('lcd1602');
     expect(mocks.sim.loadProjectState).not.toHaveBeenCalled();
   });
   it('refuses dangling endpoints and board replacement', () => {
