@@ -59,6 +59,32 @@ async function fetchAgentStatus(signal?: AbortSignal): Promise<Status> {
   return response.json();
 }
 
+interface RunRecord {
+  run_id: string;
+  started_at: number;
+  duration_s: number;
+  outcome: string;
+  provider: string;
+  attempts: number;
+  provider_calls: number;
+  tool_calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  provider_ms: number;
+  compile_ms: number;
+  error: string;
+}
+
+/** Recent runs from GET /agent/runs/records (per-worker, in-memory). */
+async function fetchAgentRuns(token: string, signal?: AbortSignal): Promise<RunRecord[]> {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`${getApiBase()}/agent/runs/records`, { signal, headers });
+  if (!response.ok) throw new Error('Could not read the server run log.');
+  const body = await response.json();
+  return body.runs ?? [];
+}
+
 const suggestions = [
   {
     icon: '◉',
@@ -93,6 +119,7 @@ export function AgentPanel() {
   const [stage, setStage] = useState('');
   const [plan, setPlan] = useState<string[]>([]);
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
+  const [runs, setRuns] = useState<RunRecord[]>([]);
   const [notice, setNotice] = useState('');
   const [pendingRestore, setPendingRestore] = useState<Revision | null>(null);
   // Track the last error so the retry button has the prompt handy; we don't
@@ -114,11 +141,22 @@ export function AgentPanel() {
 
   async function checkStatus(signal?: AbortSignal) {
     try {
-      setStatus(await fetchAgentStatus(signal));
+      const s = await fetchAgentStatus(signal);
+      setStatus(s);
       setStatusError('');
+      if (s.configured) void loadRuns();
     } catch (error) {
       if (!signal?.aborted)
         setStatusError(error instanceof Error ? error.message : 'Could not connect to agent.');
+    }
+  }
+
+  /** Refresh the server's recent-run log; degrade silently without a token. */
+  async function loadRuns() {
+    try {
+      setRuns(await fetchAgentRuns(token));
+    } catch {
+      /* The records endpoint shares the workspace token; skip if unavailable. */
     }
   }
   useEffect(() => {
@@ -230,6 +268,7 @@ export function AgentPanel() {
       setBusy(false);
       setStage('');
       setLastRunFailed(failed && !abort.signal.aborted);
+      void loadRuns();
     }
   }
 
@@ -545,6 +584,38 @@ export function AgentPanel() {
                   {busy && <span className="agent-diagnostics-hint">self-repairing…</span>}
                 </summary>
                 <pre>{diagnostics.slice(-6).join('\n\n')}</pre>
+              </details>
+            )}
+            {runs.length > 0 && (
+              <details className="agent-diagnostics">
+                <summary>Server log ({runs.length} run{runs.length === 1 ? '' : 's'})</summary>
+                <table className="agent-run-table">
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>Outcome</th>
+                      <th>Provider</th>
+                      <th>Dur</th>
+                      <th>Calls</th>
+                      <th>Tokens</th>
+                      <th>Prov ms</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {runs.slice(0, 10).map((r) => (
+                      <tr key={r.run_id}>
+                        <td>{new Date(r.started_at * 1000).toLocaleTimeString()}</td>
+                        <td className={`agent-run-outcome ${r.outcome}`}>{r.outcome}</td>
+                        <td>{r.provider}</td>
+                        <td>{r.duration_s}s</td>
+                        <td>{r.provider_calls}</td>
+                        <td>{r.prompt_tokens}→{r.completion_tokens}</td>
+                        <td>{r.provider_ms}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {runs[0]?.error && <pre className="agent-runs-error">{runs[0].error}</pre>}
               </details>
             )}
             {!busy && lastRunFailed && lastUserPrompt && (

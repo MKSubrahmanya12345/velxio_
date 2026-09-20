@@ -1,9 +1,14 @@
 import logging
+import os
 import sys
 import asyncio
 from contextlib import asynccontextmanager
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
+_log_level = getattr(logging, os.getenv("AGENT_LOG_LEVEL", "INFO").upper(), logging.INFO)
+if not isinstance(_log_level, int):
+    _log_level = logging.INFO
+logging.basicConfig(level=_log_level, format='%(levelname)s %(name)s: %(message)s')
+logging.getLogger("velxio.agent").setLevel(_log_level)
 
 # On Windows, asyncio defaults to SelectorEventLoop which does NOT support
 # create_subprocess_exec (raises NotImplementedError). Force ProactorEventLoop.

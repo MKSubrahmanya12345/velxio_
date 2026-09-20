@@ -17,7 +17,8 @@ from dataclasses import dataclass, field, asdict
 @dataclass
 class RunRecord:
     run_id: str
-    started: float = field(default_factory=time.monotonic)
+    monotonic_start: float = field(default_factory=time.monotonic)
+    started_at: float = field(default_factory=time.time)  # wall clock (epoch s)
     finished: float | None = None
     outcome: str = "running"  # compiled | explained | failed | error | cancelled
     provider: str = ""  # which provider spec routed this run (opencode | groq | gemini)
@@ -56,8 +57,8 @@ def snapshot() -> list[dict]:
     out = []
     for r in records:
         data = asdict(r)
-        data["duration_s"] = round((r.finished or now) - r.started, 2)
-        data["started_epoch"] = data.pop("started")
+        data["duration_s"] = round((r.finished or now) - r.monotonic_start, 2)
+        data.pop("monotonic_start", None)
         data["finished_epoch"] = r.finished
         out.append(data)
     return out

@@ -565,6 +565,7 @@ async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec) -> Pr
     on Zen.
     """
     base_url = spec.base_url.rstrip("/")
+    start = time.monotonic()
     labels = {"system": "Instructions", "user": "User", "assistant": "Assistant"}
     turns = [f"<{labels.get(m.get('role', 'user'), 'User')}>\n{m.get('content', '')}\n</block>"
              for m in messages]
@@ -584,6 +585,7 @@ async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec) -> Pr
             session_id = session_resp.json()["id"]
         except (KeyError, ValueError):
             raise ProviderError("OpenCode server returned an invalid session response") from None
+        logger.info("propose opencode session=%s created", session_id)
         try:
             try:
                 msg_resp = await client.post(
@@ -598,6 +600,8 @@ async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec) -> Pr
             if msg_resp.status_code == 429 or msg_resp.status_code >= 500:
                 raise ProviderTransientError(f"OpenCode server returned HTTP {msg_resp.status_code}. Retrying…")
             if msg_resp.status_code >= 400:
+                # Bounded body peek (errors carry no credentials) for a quick server-log crosscheck.
+                logger.warning("propose opencode http=%d body=%s", msg_resp.status_code, msg_resp.text[:200])
                 raise ProviderError(f"OpenCode server rejected the message (HTTP {msg_resp.status_code}). Check the server log.")
             try:
                 payload = msg_resp.json()
@@ -622,10 +626,18 @@ async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec) -> Pr
         proposal._usage = {"prompt_tokens": input_tokens,
                            "completion_tokens": output_tokens,
                            "total_tokens": input_tokens + output_tokens}
+        usage = {"prompt_tokens": input_tokens, "completion_tokens": output_tokens}
+    else:
+        usage = None
+    part_types = ",".join(sorted({p.get("type", "?") for p in parts if isinstance(p, dict)}))
+    _log_proposal_ok(spec, msg_resp.status_code, start, content, usage,
+                     extra=f"session={session_id} parts={{{part_types}}}")
+    _debug_calls(spec, messages, content)
     return proposal
 
 
 async def _propose_once_openai(messages: list[dict], spec: ProviderSpec) -> Proposal:
+    start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=settings.AGENT_PROVIDER_TIMEOUT_S) as client:
             response = await client.post(
@@ -662,6 +674,8 @@ async def _propose_once_openai(messages: list[dict], spec: ProviderSpec) -> Prop
         proposal._usage = {k: usage.get(k) for k in
                            ("prompt_tokens", "completion_tokens", "total_tokens")
                            if isinstance(usage.get(k), int)}
+    _log_proposal_ok(spec, response.status_code, start, content, usage)
+    _debug_calls(spec, messages, content)
     return proposal
 
 
@@ -675,6 +689,26 @@ def _json_from_response(text: str) -> str:
         if match:
             return match.group(1).strip()
     return s
+
+
+def _log_proposal_ok(spec: ProviderSpec, status: int, start: float, content: str,
+                     usage: dict | None, extra: str = "") -> None:
+    """One-line per-call trace: provider, HTTP status, wall time, output size,
+    token usage. Enough to answer "which provider did what and how much."""
+    ms = int((time.monotonic() - start) * 1000)
+    tokens = None
+    if isinstance(usage, dict):
+        tokens = {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens")
+                  if isinstance(usage.get(k), int)}
+    logger.info("propose %s ok http=%d ms=%d out_chars=%d tokens=%s%s",
+                spec.id, status, ms, len(content), tokens, f" {extra}" if extra else "")
+
+
+def _debug_calls(spec: ProviderSpec, messages: list[dict], content: str) -> None:
+    """DEBUG-only payload peek (off by default — set AGENT_LOG_LEVEL=DEBUG)."""
+    last = messages[-1].get("content", "") if messages else ""
+    logger.debug("propose %s prompt-tail: %s", spec.id, last[:400])
+    logger.debug("propose %s reply-head: %s", spec.id, content[:600])
 
 
 async def _propose_once_bedrock(messages: list[dict], spec: ProviderSpec) -> Proposal:

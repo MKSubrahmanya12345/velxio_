@@ -395,6 +395,57 @@
   padding: 0;
   background: none;
 }
+.agent-run-table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 10px/1.6 'SFMono-Regular', Consolas, monospace;
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 5px;
+  overflow: hidden;
+  max-height: 300px;
+  overflow-y: auto;
+  display: block;
+}
+.agent-run-table th,
+.agent-run-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid #262626;
+  white-space: nowrap;
+}
+.agent-run-table th {
+  color: #8b98a9;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  background: #181818;
+}
+.agent-run-outcome {
+  font-weight: 600;
+}
+.agent-run-outcome.compiled,
+.agent-run-outcome.explained {
+  color: #7ee787;
+}
+.agent-run-outcome.failed,
+.agent-run-outcome.error {
+  color: #ff7b72;
+}
+.agent-run-outcome.running {
+  color: #d2a8ff;
+}
+.agent-runs-error {
+  font: 11px/1.7 'SFMono-Regular', Consolas, monospace;
+  background: #111;
+  border: 1px solid #333;
+  padding: 10px;
+  border-radius: 5px;
+  overflow: auto;
+  max-height: 120px;
+  margin-top: 6px;
+  color: #ff7b72;
+}
 .agent-progress {
   margin: 16px;
   border: 1px solid #364354;
