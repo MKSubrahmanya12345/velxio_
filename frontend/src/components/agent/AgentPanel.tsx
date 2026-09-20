@@ -26,7 +26,7 @@ import { useProjectStore } from '../../store/useProjectStore';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
 import { CATALOG_SIZE, PLACEABLE_SIZE } from '../../agent/catalog';
 import { useAgentJournal, type Revision } from '../../agent/journal';
-import { runAgent } from '../../agent/runner';
+import { runAgent, sendFeedback as sendFeedbackApi } from '../../agent/runner';
 import {
   assertFresh,
   captureWorkspace,
@@ -87,9 +87,15 @@ export function AgentPanel() {
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [notice, setNotice] = useState('');
   const [pendingRestore, setPendingRestore] = useState<Revision | null>(null);
+  // Track the last error so the retry button has the prompt handy; we don't
+  // show a dedicated "feedback" card — the same composer you use to start a
+  // run also accepts mid-run notes and retries.
+  const [lastUserPrompt, setLastUserPrompt] = useState('');
+  const [lastRunFailed, setLastRunFailed] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
+  const feedbackSent = useRef<Set<string>>(new Set());
   const journal = useAgentJournal();
   // Re-render on named project/example switches; don't send another project's chat.
   useProjectStore((s) => s.currentProject?.id ?? s.currentExampleId);
@@ -137,7 +143,7 @@ export function AgentPanel() {
   }, []);
 
   async function submit(text = prompt) {
-    if (!text.trim() || busy || controller.current) return;
+    if (!text.trim() || controller.current) return;
     if (!status?.configured || (status.requires_token && !token)) {
       setSettingsOpen(true);
       return;
@@ -146,6 +152,8 @@ export function AgentPanel() {
     const requestScope = scope;
     const context = messages.slice(-12);
     journal.addMessage({ role: 'user', content, scope: requestScope });
+    setLastUserPrompt(content);
+    setLastRunFailed(false);
     setPrompt('');
     setBusy(true);
     setNotice('');
@@ -153,10 +161,11 @@ export function AgentPanel() {
     setDiagnostics([]);
     setTab('chat');
     setStage('Reading current code and circuit');
+    feedbackSent.current = new Set();
     const abort = new AbortController();
     controller.current = abort;
-    // Client bound also handles a hung proxy/stream, not only server work.
     const timeout = setTimeout(() => abort.abort(), 260000);
+    let failed = false;
     try {
       const answer = await runAgent({
         prompt: content,
@@ -173,21 +182,52 @@ export function AgentPanel() {
             );
           if (event.type === 'plan') setPlan(event.plan);
           if (event.type === 'diagnostic') setDiagnostics((v) => [...v, event.message]);
+          if (event.type === 'compile' && !event.success && event.stderr)
+            setDiagnostics((v) => [...v, event.stderr]);
+          if (event.type === 'note') {
+            // The server echoed back a mid-run note the user sent; render it as
+            // a user message so it appears inline with the rest of the chat.
+            // (We de-dupe by content in case the same note races.)
+            if (!feedbackSent.current.has(event.message)) {
+              feedbackSent.current.add(event.message);
+              journal.addMessage({ role: 'user', content: event.message, scope: requestScope });
+            }
+          }
+          if (event.type === 'error' && event.diagnostics)
+            setDiagnostics((v) => [...v, event.diagnostics!]);
         },
       });
       journal.addMessage({ role: 'assistant', content: answer, scope: requestScope });
     } catch (error) {
-      const content = abort.signal.aborted
+      failed = true;
+      const message = abort.signal.aborted
         ? 'Agent stopped. No further edits will be applied. If a compiled checkpoint was already applied, it remains available in Checkpoints for undo.'
         : error instanceof Error
           ? error.message
           : 'Something went wrong. Please retry.';
-      journal.addMessage({ role: 'assistant', content, scope: requestScope, error: true });
+      journal.addMessage({ role: 'assistant', content: message, scope: requestScope, error: true });
     } finally {
       clearTimeout(timeout);
       controller.current = null;
       setBusy(false);
       setStage('');
+      setLastRunFailed(failed && !abort.signal.aborted);
+    }
+  }
+
+  /** Send a mid-run note. Fires-and-forgets: if the run is already past the
+   * repair boundary the note just doesn't get applied, which is fine. */
+  async function sendNote(text: string) {
+    const note = text.trim();
+    if (!note) return;
+    // Render the note optimistically so typing feels instant; the server will
+    // echo it back as a `note` event but we de-dupe by content.
+    feedbackSent.current.add(note);
+    journal.addMessage({ role: 'user', content: note, scope });
+    const ok = await sendFeedbackApi(note);
+    if (!ok && busy) {
+      // Run finished between keypress and POST — nothing to do, the note is
+      // already in chat and will be picked up if the user retries.
     }
   }
 
@@ -273,6 +313,8 @@ export function AgentPanel() {
               setNotice('');
               setPlan([]);
               setDiagnostics([]);
+              setLastRunFailed(false);
+              setLastUserPrompt('');
             }}
           >
             <Plus size={16} />
@@ -459,20 +501,20 @@ export function AgentPanel() {
               </div>
             )}
             {diagnostics.length > 0 && (
-              <details className="agent-diagnostics">
-                <summary>Repair diagnostics ({diagnostics.length})</summary>
-                <pre>{diagnostics.join('\n\n')}</pre>
+              <details className="agent-diagnostics" open={busy}>
+                <summary>
+                  Repair log ({diagnostics.length})
+                  {busy && <span className="agent-diagnostics-hint">self-repairing…</span>}
+                </summary>
+                <pre>{diagnostics.slice(-6).join('\n\n')}</pre>
               </details>
             )}
-            {!busy && messages.at(-1)?.error && (
+            {!busy && lastRunFailed && lastUserPrompt && (
               <button
                 className="agent-retry"
-                onClick={() => {
-                  const last = [...messages].reverse().find((m) => m.role === 'user');
-                  if (last) void submit(last.content);
-                }}
+                onClick={() => void submit(lastUserPrompt)}
               >
-                <RotateCcw size={13} /> Retry with current workspace
+                <RotateCcw size={13} /> Retry last request
               </button>
             )}
           </>
@@ -566,40 +608,62 @@ export function AgentPanel() {
         className="agent-composer"
         onSubmit={(e) => {
           e.preventDefault();
-          void submit();
+          if (busy) void sendNote(prompt);
+          else void submit();
         }}
       >
         <div className={`agent-input-box ${busy ? 'is-busy' : ''}`}>
           <textarea
             ref={input}
-            aria-label="Describe a circuit or request a change"
+            aria-label={busy ? 'Send a note to the running agent' : 'Describe a circuit or request a change'}
             value={prompt}
             maxLength={6000}
-            rows={3}
+            rows={busy ? 2 : 3}
             placeholder={
-              messages.length ? 'What should we change next?' : 'Describe a circuit to build…'
+              busy
+                ? 'Add a note or correction — sent to the agent mid-run…'
+                : messages.length
+                  ? 'What should we change next?'
+                  : 'Describe a circuit to build…'
             }
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
-                void submit();
+                if (busy) {
+                  void sendNote(prompt);
+                  setPrompt('');
+                } else {
+                  void submit();
+                }
               }
             }}
           />
           <div className="agent-input-toolbar">
             <span>
-              <Sparkles size={12} /> Agent <ChevronRight size={11} /> <span>Auto-build</span>
+              <Sparkles size={12} /> Agent <ChevronRight size={11} />{' '}
+              <span>{busy ? 'Steer me' : 'Auto-build'}</span>
             </span>
             {busy ? (
-              <button
-                type="button"
-                className="agent-stop"
-                onClick={() => controller.current?.abort()}
-                title="Stop agent"
-              >
-                <Square size={12} fill="currentColor" /> Stop
-              </button>
+              <div className="agent-busy-actions">
+                <button
+                  type="submit"
+                  className="agent-note-send"
+                  disabled={!prompt.trim()}
+                  aria-label="Send note to agent"
+                  title="Send note (Enter)"
+                >
+                  <Send size={13} /> Note
+                </button>
+                <button
+                  type="button"
+                  className="agent-stop"
+                  onClick={() => controller.current?.abort()}
+                  title="Stop agent"
+                >
+                  <Square size={12} fill="currentColor" /> Stop
+                </button>
+              </div>
             ) : (
               <button
                 type="submit"
@@ -614,7 +678,11 @@ export function AgentPanel() {
           </div>
         </div>
         <div className="agent-composer-hint">
-          <span>Enter to send · Shift+Enter for a new line</span>
+          <span>
+            {busy
+              ? 'Enter to send a note · notes steer the next repair turn'
+              : 'Enter to send · Shift+Enter for a new line'}
+          </span>
           <span>
             {prompt.length > 5000 ? `${prompt.length}/6000` : 'Code + circuit in context'}
           </span>

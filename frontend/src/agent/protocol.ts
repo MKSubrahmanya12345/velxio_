@@ -121,9 +121,11 @@ export type AgentExpectations = z.infer<typeof expectationsSchema>;
 const runId = { run_id: z.string().optional() };
 
 export const eventSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('run_started'), run_id: z.string().min(1) }),
+  z.object({ type: z.literal('note'), message: z.string(), ...runId }),
   z.object({
     type: z.literal('stage'),
-    stage: z.enum(['planning', 'repairing', 'validating', 'compiling', 'research', 'verifying']),
+    stage: z.enum(['planning', 'repairing', 'validating', 'compiling', 'research', 'testing', 'verifying']),
     message: z.string(),
     attempt: z.number().optional(),
     ...runId,
@@ -138,7 +140,14 @@ export const eventSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('diagnostic'), message: z.string(), ...runId }),
   z.object({ type: z.literal('answer'), summary: z.string(), ...runId }),
-  z.object({ type: z.literal('error'), message: z.string(), diagnostics: z.string().optional(), ...runId }),
+  z.object({
+    type: z.literal('error'),
+    message: z.string(),
+    diagnostics: z.string().optional(),
+    /** Lets the UI tailor the retry/feedback UX (e.g. malformed_json vs compile). */
+    category: z.string().optional(),
+    ...runId,
+  }),
   z.object({
     type: z.literal('tools'),
     calls: z.array(z.object({ tool: z.string(), ok: z.boolean() }).strict()),
