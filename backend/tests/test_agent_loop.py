@@ -53,7 +53,7 @@ async def collect(request):
 async def test_tool_round_runs_then_patches(monkeypatch):
     calls = []
 
-    async def llm(messages):
+    async def llm(messages, spec=None):
         calls.append(messages)
         if len(calls) == 1:
             return Proposal(summary="checking", tool_calls=[ToolCall(tool="board_pinout")])
@@ -79,7 +79,7 @@ async def test_tool_budget_is_enforced(monkeypatch):
     def tool_proposal():
         return Proposal(summary="checking", tool_calls=[ToolCall(tool="check_design")])
 
-    async def llm(messages):
+    async def llm(messages, spec=None):
         calls.append(messages)
         if len(calls) <= 2:
             return tool_proposal()
@@ -100,7 +100,7 @@ async def test_tool_budget_is_enforced(monkeypatch):
 async def test_failing_tool_does_not_kill_the_run(monkeypatch):
     calls = []
 
-    async def llm(messages):
+    async def llm(messages, spec=None):
         calls.append(messages)
         if len(calls) == 1:
             return Proposal(summary="hmm", tool_calls=[ToolCall(tool="read_file", args={})])
@@ -136,13 +136,69 @@ async def test_transient_provider_errors_retry_with_backoff(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_permanent_provider_error_is_a_graceful_error_event(monkeypatch):
-    async def llm(messages):
+    async def llm(messages, spec=None):
         raise service.ProviderError("Model provider returned HTTP 401. Check server configuration or quota.")
 
     monkeypatch.setattr(service, "propose", llm)
     events = await collect(AgentRequest(prompt="blink", project=Project()))
     assert events[-1]["type"] == "error"
     assert "HTTP 401" in events[-1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_run_uses_the_requested_provider(monkeypatch):
+    seen = []
+
+    async def fake_propose_once(messages, spec):
+        seen.append(spec)
+        return Proposal(summary="explained")
+
+    monkeypatch.setattr(service, "_propose_once", fake_propose_once)
+    monkeypatch.setattr(service.settings, "AGENT_GEMINI_API_KEY", "gem-key")
+    events = await collect(AgentRequest(prompt="explain", project=Project(), provider="gemini"))
+    assert seen and seen[0].id == "gemini"
+    assert seen[0].model == service.settings.AGENT_GEMINI_MODEL
+    assert events[-1]["type"] == "answer"
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_provider_is_a_graceful_error(monkeypatch):
+    monkeypatch.setattr(service.settings, "AGENT_GEMINI_API_KEY", "")
+    events = await collect(AgentRequest(prompt="blink", project=Project(), provider="gemini"))
+    assert events[-1]["type"] == "error"
+    assert "'gemini' is not configured" in events[-1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_run_defaults_to_groq(monkeypatch):
+    seen = []
+
+    async def fake_propose_once(messages, spec):
+        seen.append(spec)
+        return Proposal(summary="explained")
+
+    monkeypatch.setattr(service, "_propose_once", fake_propose_once)
+    events = await collect(AgentRequest(prompt="explain", project=Project()))
+    assert seen and seen[0].id == "groq"
+    assert events[-1]["type"] == "answer"
+
+
+@pytest.mark.asyncio
+async def test_run_uses_the_requested_bedrock_provider(monkeypatch):
+    seen = []
+
+    async def fake_propose_once(messages, spec):
+        seen.append(spec)
+        return Proposal(summary="explained")
+
+    monkeypatch.setattr(service, "_propose_once", fake_propose_once)
+    monkeypatch.setattr(service.settings, "BEDROCK_MODEL_ID", "moonshotai.kimi-k2.5")
+    monkeypatch.setattr(service.settings, "AWS_REGION", "eu-north-1")
+    events = await collect(AgentRequest(prompt="explain", project=Project(), provider="bedrock"))
+    assert seen and seen[0].id == "bedrock"
+    assert seen[0].kind == "bedrock"
+    assert seen[0].model == "moonshotai.kimi-k2.5"
+    assert events[-1]["type"] == "answer"
 
 
 @pytest.mark.asyncio

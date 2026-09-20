@@ -74,12 +74,27 @@ def test_invalid_patches_are_rejected(patch, message):
     assert before.model_dump_json() == original
 
 
-def test_duplicate_patch_operations_rejected():
+def test_remove_both_and_upsert_same_item_resolves_to_upsert():
     f = Source(name="sketch.ino", content="void setup(){} void loop(){}")
-    with pytest.raises(ValueError, match="conflicting"):
-        apply_patch(project(), Patch(upsert_files=[f, f]))
-    with pytest.raises(ValueError, match="conflicting"):
-        apply_patch(project(), Patch(upsert_files=[f], remove_files=[f.name]))
+    after = apply_patch(project(), Patch(upsert_files=[f], remove_files=[f.name]))
+    assert [x.name for x in after.files] == ["sketch.ino"]
+    assert after.files[0].content == f.content
+
+
+def test_duplicate_upsert_resolves_to_last_occurrence():
+    a = Source(name="sketch.ino", content="void setup(){} void loop(){}")
+    b = Source(name="sketch.ino", content="// updated\nvoid setup(){} void loop(){}")
+    after = apply_patch(project(), Patch(upsert_files=[a, b]))
+    assert [x.name for x in after.files] == ["sketch.ino"]
+    assert after.files[0].content == b.content
+
+
+def test_duplicate_upsert_components_resolves_to_last():
+    p = project()
+    led = Part(id="led1", metadataId="led", x=0, y=0)
+    led_new = Part(id="led1", metadataId="led", x=100, y=200)
+    after = apply_patch(p, Patch(upsert_components=[led_new, led]))
+    assert [x for x in after.components if x.id == "led1"][0].x == 0
 
 
 @pytest.mark.parametrize("name", ["../../secret.ino", "/tmp/x.cpp", "foo.txt", "foo\\bar.h"])

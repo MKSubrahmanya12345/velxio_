@@ -242,16 +242,25 @@ class AgentRequest(StrictModel):
     prompt: str = Field(min_length=1, max_length=6000)
     project: Project
     messages: list[Message] = Field(default_factory=list, max_length=12)
+    # Which server-side provider routes this run. Only ids listed in
+    # Settings.providers() are accepted; the id never carries credentials.
+    provider: Literal["groq", "gemini", "bedrock"] = "groq"
 
 
 def merge_items(old, new, removed, key):
-    keys = [getattr(item, key) for item in new]
-    if len(set(keys)) != len(keys) or set(keys) & set(removed):
-        raise ValueError(f"Duplicate or conflicting patch {key}")
+    # Resolve deterministically instead of rejecting: an upsert is a full
+    # replacement, so it wins over a removal of the same key, and a duplicate
+    # upsert resolves to the last occurrence. Models often express "replace
+    # this part" as remove+upsert or repeat an upsert while repairing; a hard
+    # conflict error would silently burn every repair attempt.
+    upserted = {}
+    for item in new:
+        upserted[getattr(item, key)] = item
     if set(removed) - {getattr(item, key) for item in old}:
         raise ValueError(f"Cannot remove unknown {key}")
+    removed = [k for k in removed if k not in upserted]
     result = {getattr(item, key): item for item in old if getattr(item, key) not in removed}
-    result.update({getattr(item, key): item for item in new})
+    result.update(upserted)
     return list(result.values())
 
 

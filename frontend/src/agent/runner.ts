@@ -42,7 +42,12 @@ async function requestRun(
   prompt: string,
   messages: ChatMessage[],
   project: ReturnType<typeof toAgentProject>,
-  options: { token: string; signal: AbortSignal; onEvent: (event: AgentEvent) => void },
+  options: {
+    token: string;
+    provider: string;
+    signal: AbortSignal;
+    onEvent: (event: AgentEvent) => void;
+  },
 ): Promise<TerminalEvent> {
   const { signal, onEvent } = options;
   const response = await fetch(`${getApiBase()}/agent/runs`, {
@@ -55,6 +60,7 @@ async function requestRun(
     body: JSON.stringify({
       prompt,
       project,
+      provider: options.provider,
       messages: messages
         .slice(-12)
         .map((m) => ({ role: m.role, content: m.content.slice(0, 6000) })),
@@ -103,6 +109,7 @@ export async function runAgent(options: {
   prompt: string;
   messages: ChatMessage[];
   token: string;
+  provider: string;
   signal: AbortSignal;
   onEvent: (event: AgentEvent) => void;
 }): Promise<string> {

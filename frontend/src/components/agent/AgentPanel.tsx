@@ -38,10 +38,17 @@ import type { AgentEvent } from '../../agent/protocol';
 import { triggerDownloadVlx } from '../../utils/vlxFile';
 import './AgentPanel.css';
 
+interface ProviderInfo {
+  id: string;
+  label: string;
+  model: string;
+  configured: boolean;
+}
 interface Status {
   configured: boolean;
   requires_token: boolean;
   model: string | null;
+  providers: ProviderInfo[];
   scope: string;
 }
 async function fetchAgentStatus(signal?: AbortSignal): Promise<Status> {
@@ -77,6 +84,7 @@ export function AgentPanel() {
   const [tab, setTab] = useState<'chat' | 'history'>('chat');
   const [prompt, setPrompt] = useState('');
   const [token, setToken] = useState(''); // Never persist provider or access credentials.
+  const [providerId, setProviderId] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
   const [statusError, setStatusError] = useState('');
@@ -121,6 +129,15 @@ export function AgentPanel() {
       controller.current?.abort();
     };
   }, []);
+  // Keep the selected provider one of the server-configured list, defaulting
+  // to the first one (Groq). Switches are per-session and never persisted.
+  const configuredProviders = (status?.providers ?? []).filter((p) => p.configured);
+  useEffect(() => {
+    if (!configuredProviders.length) return;
+    if (!configuredProviders.some((p) => p.id === providerId)) {
+      setProviderId(configuredProviders[0].id);
+    }
+  }, [status, providerId]);
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [journal.messages.length, stage, tab]);
@@ -161,6 +178,7 @@ export function AgentPanel() {
         prompt: content,
         messages: context,
         token,
+        provider: providerId || 'groq',
         signal: abort.signal,
         onEvent: (event: AgentEvent) => {
           if (event.type === 'stage')
@@ -317,20 +335,38 @@ export function AgentPanel() {
             </label>
           )}
           <p className="agent-muted">
-            Model: {status?.model ?? 'Not configured'} · Token held in memory only.
+            Providers are configured on the server. Pick one in the dropdown
+            next to the composer; the current model is shown in the footer.
+            <span>Token held in memory only.</span>
           </p>
+          {(status?.providers ?? []).length > 0 && (
+            <ul className="agent-provider-list" aria-label="Configured providers">
+              {status!.providers.map((p) => (
+                <li key={p.id} className={p.id === providerId ? 'active' : ''}>
+                  <span>{p.label}</span>
+                  <code>{p.model}</code>
+                  {p.configured ? <em>ready</em> : <em className="off">needs key</em>}
+                </li>
+              ))}
+            </ul>
+          )}
           <button className="agent-secondary" onClick={() => void checkStatus()}>
             Check connection
           </button>
           <details>
             <summary>Server setup</summary>
             <pre>
-              AGENT_ENABLED=true{'\n'}AGENT_API_KEY=your-provider-key{'\n'}AGENT_MODEL=gpt-4.1{'\n'}
+              AGENT_ENABLED=true{'\n'}AGENT_API_KEY=your-groq-api-key{'\n'}AGENT_MODEL=openai/gpt-oss-120b{'\n'}
+              AGENT_GEMINI_API_KEY=your-google-ai-studio-key{'\n'}AGENT_GEMINI_MODEL=gemini-2.5-flash{'\n'}
+              BEDROCK_MODEL_ID=moonshotai.kimi-k2.5{'\n'}AWS_REGION=eu-north-1{'\n'}BEDROCK_API_KEY=your-mantle-key{'\n'}
               AGENT_ACCESS_TOKEN=your-private-token
             </pre>
             <p>
-              Set these in backend/.env and restart the API. See docs/agent-workspace.md. Use an
-              OpenAI-compatible endpoint via AGENT_BASE_URL.
+              Set these in backend/.env and restart the API. Groq and Gemini
+              both expose OpenAI-compatible endpoints; Bedrock uses native
+              Converse (or Bedrock Mantle for Kimi K2.5 — that model needs
+              BEDROCK_API_KEY). Any configured provider appears in the chat
+              dropdown.
             </p>
           </details>
         </section>
@@ -583,7 +619,26 @@ export function AgentPanel() {
           />
           <div className="agent-input-toolbar">
             <span>
-              <Sparkles size={12} /> Agent <ChevronRight size={11} /> <span>Auto-build</span>
+              <Sparkles size={12} /> Agent <ChevronRight size={11} />
+              {configuredProviders.length > 0 ? (
+                <label className="agent-provider-select">
+                  <Cpu size={11} />
+                  <select
+                    value={providerId}
+                    disabled={busy}
+                    aria-label="Model provider"
+                    onChange={(e) => setProviderId(e.target.value)}
+                  >
+                    {configuredProviders.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.label} · {p.model}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <span>Auto-build</span>
+              )}
             </span>
             {busy ? (
               <button
@@ -617,7 +672,10 @@ export function AgentPanel() {
       <footer className="agent-footer">
         <span>
           <Circle size={7} fill="currentColor" className={status?.configured ? 'connected' : ''} />
-          {status?.configured ? status.model : 'Model not connected'}
+          {status?.configured
+            ? configuredProviders.find((p) => p.id === providerId)?.model
+              ?? status.model
+            : 'Model not connected'}
         </span>
         <span>
           {busy ? (

@@ -20,6 +20,7 @@ class RunRecord:
     started: float = field(default_factory=time.monotonic)
     finished: float | None = None
     outcome: str = "running"  # compiled | explained | failed | error | cancelled
+    provider: str = ""  # which provider spec routed this run (groq | gemini)
     attempts: int = 0
     provider_calls: int = 0
     tool_calls: int = 0

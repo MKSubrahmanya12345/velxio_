@@ -46,7 +46,7 @@ def test_scrub_leaves_normal_code_alone():
 def test_prompt_payload_is_scrubbed(monkeypatch):
     captured = {}
 
-    async def llm(messages):
+    async def llm(messages, spec=None):
         captured["user"] = messages[-1]["content"]
         return Proposal(summary="ok")
 

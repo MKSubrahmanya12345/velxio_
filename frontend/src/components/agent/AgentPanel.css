@@ -508,6 +508,73 @@
 .agent-input-toolbar > span > span {
   color: #919191;
 }
+.agent-provider-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.agent-provider-select select {
+  font: 10px/1.6 inherit;
+  background: #262626;
+  color: #cfd6df;
+  border: 1px solid #3d4249;
+  border-radius: 4px;
+  padding: 2px 5px;
+  max-width: 168px;
+  cursor: pointer;
+  outline-color: #429eff;
+}
+.agent-provider-select select:hover {
+  border-color: #577493;
+}
+.agent-provider-list {
+  list-style: none;
+  margin: 4px 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-provider-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  border: 1px solid #3a3a3a;
+  border-radius: 5px;
+  padding: 6px 8px;
+  background: #1a1a1a;
+}
+.agent-provider-list li.active {
+  border-color: #40638a;
+  background: #1d2733;
+}
+.agent-provider-list li > span {
+  font-weight: 500;
+  color: #ddd;
+}
+.agent-provider-list code {
+  font-size: 10px;
+  color: #8fb4dc;
+  overflow-wrap: anywhere;
+}
+.agent-provider-list em {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  color: #73b89a;
+  background: #1d2b24;
+  border: 1px solid #33523f;
+  padding: 0 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.agent-provider-list em.off {
+  color: #c9a86a;
+  background: #2b241a;
+  border-color: #5a4a2e;
+}
 .agent-send {
   width: 29px;
   height: 27px;

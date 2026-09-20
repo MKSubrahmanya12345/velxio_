@@ -16,8 +16,9 @@ _slots = asyncio.Semaphore(2)
 
 
 def configured():
-    return bool(settings.AGENT_ENABLED and settings.AGENT_API_KEY and settings.AGENT_MODEL
-                and (settings.AGENT_ACCESS_TOKEN or settings.AGENT_ALLOW_ANONYMOUS))
+    return (settings.AGENT_ENABLED
+            and any(spec.configured for spec in settings.providers())
+            and bool(settings.AGENT_ACCESS_TOKEN or settings.AGENT_ALLOW_ANONYMOUS))
 
 
 def authorize(authorization: str | None = Header(default=None)):
@@ -31,8 +32,13 @@ def authorize(authorization: str | None = Header(default=None)):
 
 @router.get("/status")
 async def status():
+    # The browser reads model names/ids only; credentials never leave the server.
+    providers = [{"id": p.id, "label": p.label, "model": p.model, "configured": p.configured}
+                 for p in settings.providers()]
+    default = settings.provider("groq")
     return {"configured": configured(), "requires_token": bool(settings.AGENT_ACCESS_TOKEN),
-            "model": settings.AGENT_MODEL if configured() else None,
+            "providers": providers,
+            "model": default.model if configured() else None,
             "scope": "Arduino Uno · LED · resistor · button · potentiometer · buzzer · servo"}
 
 

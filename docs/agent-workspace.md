@@ -40,9 +40,12 @@ Edit `backend/.env` locally (do not commit it):
 
 ```dotenv
 AGENT_ENABLED=true
-AGENT_API_KEY=your-provider-key
-AGENT_BASE_URL=https://api.openai.com/v1
-AGENT_MODEL=gpt-4.1
+AGENT_API_KEY=your-groq-api-key
+AGENT_BASE_URL=https://api.groq.com/openai/v1
+AGENT_MODEL=openai/gpt-oss-120b
+# Second provider (optional, via Google's OpenAI-compatible layer):
+# AGENT_GEMINI_API_KEY=your-google-ai-studio-api-key
+# AGENT_GEMINI_MODEL=gemini-2.5-flash
 AGENT_ACCESS_TOKEN=choose-a-long-random-private-token
 # Optional loop bounds / resilience:
 # AGENT_MAX_ATTEMPTS=3            repair attempts (proposal -> validate/compile)
@@ -52,11 +55,35 @@ AGENT_ACCESS_TOKEN=choose-a-long-random-private-token
 # AGENT_ALLOW_LIBRARY_SEARCH=false  live Arduino library search from the agent
 ```
 
-`AGENT_MODEL` and `AGENT_BASE_URL` can target another **OpenAI-compatible chat
+The defaults point at **Groq** (`openai/gpt-oss-120b` supports JSON Object Mode).
+Groq retired the older `llama-3.1-8b-instant` / `llama-3.3-70b-versatile` IDs on
+2026-08-16 — those now return HTTP 404. Use `openai/gpt-oss-120b`, `openai/gpt-oss-20b`,
+or another live model from Groq's Supported Models page.
+`AGENT_MODEL` and `AGENT_BASE_URL` can target any **OpenAI-compatible chat
 completions** provider that supports `response_format: {type: "json_object"}` and
-`max_tokens`. Native Anthropic/Gemini APIs and providers requiring a different
+`max_tokens` (e.g. `https://api.openai.com/v1` + `gpt-4.1`). Native
+Anthropic APIs and providers requiring a different
 request format are not adapters in this release. Configure those via a compatible
 gateway, not by pointing this adapter at their native endpoint.
+
+**Gemini is a first-class second provider.** Set `AGENT_GEMINI_API_KEY` (a Google
+AI Studio key) and the agent can route requests to Gemini through Google's official
+OpenAI-compatible layer. Both Groq and Gemini are OpenAI-compatible, so the adapter is
+unchanged — Gemini just reads from its own base URL/model/key.
+
+**Amazon Bedrock is a first-class third provider.** Set `BEDROCK_MODEL_ID` and
+`AWS_REGION` (+ optional static `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`;
+otherwise the default credential chain/IAM role is used). Most Bedrock models run through
+native Converse (boto3). `moonshotai.kimi-k2.5` is NOT served by native Converse on this
+account ("Operation not allowed") — it is routed instead to the **Bedrock Mantle Chat
+Completions** endpoint (`https://bedrock-mantle.<region>.api.aws/v1/chat/completions`) and
+therefore needs `BEDROCK_API_KEY`. Tuning knobs: `BEDROCK_MAX_TOKENS`, `BEDROCK_TEMPERATURE`,
+`BEDROCK_TOP_P`, `BEDROCK_TIMEOUT_MS`, `BEDROCK_MAX_RETRIES`.
+
+Any provider with its key/config configured appears in the chat panel's **provider dropdown**
+in the composer; the selection is per-session and sent as a provider id in each run (`groq`,
+`gemini` or `bedrock`, default `groq`). Keys never reach the browser, and the browser cannot
+change provider URLs/keys.
 
 ```sh
 # Terminal 1, from repo root. Start in backend so .env and Python modules resolve.

@@ -29,7 +29,7 @@ from pydantic import ValidationError
 from app.agent.models import AgentRequest, PINS, PROPERTIES, Proposal, apply_patch
 from app.agent.runlog import RunRecord, start as start_run_record
 from app.agent.tools import describe_tools, execute_tool, tool_results_message
-from app.core.config import settings
+from app.core.config import ProviderSpec, settings
 
 logger = logging.getLogger("velxio.agent")
 
@@ -87,13 +87,19 @@ class ProviderTransientError(ProviderError):
     """Retryable provider failure: HTTP 429/5xx, timeouts, transport errors."""
 
 
-async def _propose_once(messages: list[dict]) -> Proposal:
+async def _propose_once(messages: list[dict], spec: ProviderSpec) -> Proposal:
+    if spec.kind == "bedrock":
+        return await _propose_once_bedrock(messages, spec)
+    return await _propose_once_openai(messages, spec)
+
+
+async def _propose_once_openai(messages: list[dict], spec: ProviderSpec) -> Proposal:
     try:
         async with httpx.AsyncClient(timeout=settings.AGENT_PROVIDER_TIMEOUT_S) as client:
             response = await client.post(
-                settings.AGENT_BASE_URL.rstrip("/") + "/chat/completions",
-                headers={"Authorization": f"Bearer {settings.AGENT_API_KEY}"},
-                json={"model": settings.AGENT_MODEL, "messages": messages,
+                spec.base_url.rstrip("/") + "/chat/completions",
+                headers={"Authorization": f"Bearer {spec.api_key}"},
+                json={"model": spec.model, "messages": messages,
                       "response_format": {"type": "json_object"}, "max_tokens": 10000},
             )
     except httpx.HTTPError:
@@ -117,12 +123,177 @@ async def _propose_once(messages: list[dict]) -> Proposal:
     return proposal
 
 
-async def propose(messages: list[dict]) -> Proposal:
+def _json_from_response(text: str) -> str:
+    """Bare JSON from model output. OpenAI-compatible providers are pinned to
+    response_format json_object; Bedrock is not, so strip one fenced block if
+    the model wrapped the object in markdown."""
+    s = text.strip()
+    if s.startswith("```"):
+        match = re.search(r"```(?:json)?\s*\n([\s\S]*?)(?:\r?\n)?```", s)
+        if match:
+            return match.group(1).strip()
+    return s
+
+
+async def _propose_once_bedrock(messages: list[dict], spec: ProviderSpec) -> Proposal:
+    model = spec.model.strip().lower()
+    if model == "moonshotai.kimi-k2.5":
+        # Kimi K2.5 is NOT served by native Bedrock Converse on this account
+        # ("Operation not allowed"); wireup routes it through the Bedrock
+        # Mantle Chat Completions endpoint, which is OpenAI-compatible.
+        return await _propose_once_mantle(messages, spec)
+    return await _propose_once_converse(messages, spec)
+
+
+def _mantle_headers(url: str, body: bytes, region: str) -> dict:
+    """Headers for the Bedrock Mantle endpoint. The stored BEDROCK_API_KEY
+    (wireup-mvp env) is rejected as invalid_api_key; Mantle also accepts
+    SigV4 with service 'bedrock-mantle' using AWS credentials, so prefer
+    static IAM creds from settings, falling back to the bearer key."""
+    import boto3
+    from botocore.awsrequest import AWSRequest
+    from botocore.auth import SigV4Auth
+    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
+        session = boto3.Session(
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            aws_session_token=settings.AWS_SESSION_TOKEN or None,
+            region_name=region,
+        )
+        aws_request = AWSRequest(method="POST", url=url, data=body,
+                                 headers={"Content-Type": "application/json"})
+        SigV4Auth(session.get_credentials(), "bedrock-mantle", region).add_auth(aws_request)
+        return dict(aws_request.headers)
+    return {}
+
+
+async def _propose_once_mantle(messages: list[dict], spec: ProviderSpec) -> Proposal:
+    if not spec.region:
+        raise ProviderError("Bedrock needs a region. Ask an administrator to set AWS_REGION in backend/.env.")
+    body = json.dumps({
+        "model": spec.model, "messages": messages,
+        "max_tokens": settings.BEDROCK_MAX_TOKENS,
+        "temperature": settings.BEDROCK_TEMPERATURE,
+        "top_p": settings.BEDROCK_TOP_P,
+    }).encode()
+    url = f"https://bedrock-mantle.{spec.region}.api.aws/v1/chat/completions"
+    headers = _mantle_headers(url, body, spec.region)
+    if not headers.get("Authorization"):
+        if not spec.api_key:
+            raise ProviderError("Bedrock Mantle needs AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) or BEDROCK_API_KEY in backend/.env.")
+        headers["Authorization"] = f"Bearer {spec.api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=settings.AGENT_PROVIDER_TIMEOUT_S) as client:
+            response = await client.post(
+                url,
+                headers=headers,
+                content=body,
+            )
+    except httpx.HTTPError:
+        raise ProviderTransientError("Bedrock is unreachable. Retrying…") from None
+    if response.status_code == 429 or response.status_code >= 500:
+        raise ProviderTransientError(f"Bedrock returned HTTP {response.status_code}. Retrying…")
+    if response.status_code >= 400:
+        raise ProviderError(f"Bedrock returned HTTP {response.status_code}. Check server configuration or quota.")
+    try:
+        payload = response.json()
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ProviderError("Bedrock returned an invalid response") from None
+    proposal = Proposal.model_validate_json(_json_from_response(content))
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        proposal._usage = {k: usage.get(k) for k in
+                           ("prompt_tokens", "completion_tokens", "total_tokens")
+                           if isinstance(usage.get(k), int)}
+    return proposal
+
+
+def _bedrock_converse_blocking(messages: list[dict], spec: ProviderSpec) -> tuple[str, dict]:
+    """Native Bedrock Converse. Runs in a worker thread (boto3 is blocking)."""
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    client_kwargs: dict = {"region_name": spec.region}
+    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
+        client_kwargs.update(
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            aws_session_token=settings.AWS_SESSION_TOKEN or None,
+        )
+    timeout = max(1.0, settings.BEDROCK_TIMEOUT_MS / 1000.0)
+    config = Config(retries={"max_attempts": max(1, settings.BEDROCK_MAX_RETRIES + 1)},
+                    connect_timeout=min(10.0, timeout), read_timeout=timeout)
+    client = boto3.client("bedrock-runtime", config=config, **client_kwargs)
+    system = [{"text": m["content"]} for m in messages if m["role"] == "system"]
+    conversation = [{"role": m["role"], "content": [{"text": m["content"]}]}
+                    for m in messages if m["role"] != "system"]
+    response = client.converse(
+        modelId=spec.model,
+        messages=conversation,
+        system=system,
+        inferenceConfig={"maxTokens": settings.BEDROCK_MAX_TOKENS,
+                         "temperature": settings.BEDROCK_TEMPERATURE,
+                         "topP": settings.BEDROCK_TOP_P},
+    )
+    try:
+        content = "".join(block.get("text", "") for block in
+                          response["output"]["message"]["content"] if block.get("type") == "text")
+    except (KeyError, TypeError):
+        raise ProviderError("Bedrock returned a malformed Converse response") from None
+    raw_usage = response.get("usage") or {}
+    usage = {
+        "prompt_tokens": raw_usage.get("inputTokens") or 0,
+        "completion_tokens": raw_usage.get("outputTokens") or 0,
+        "total_tokens": raw_usage.get("totalTokens")
+        or (raw_usage.get("inputTokens") or 0) + (raw_usage.get("outputTokens") or 0),
+    }
+    return content, usage
+
+
+async def _propose_once_converse(messages: list[dict], spec: ProviderSpec) -> Proposal:
+    if not spec.region:
+        raise ProviderError("Bedrock needs a region. Ask an administrator to set AWS_REGION in backend/.env.")
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    try:
+        content, usage = await asyncio.to_thread(_bedrock_converse_blocking, messages, spec)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in {"ThrottlingException", "ServiceQuotaExceededException",
+                    "InternalServerException", "ServiceUnavailableException"}:
+            raise ProviderTransientError(f"Bedrock is rate-limited or unavailable ({code}). Retrying…") from None
+        raise ProviderError(f"Bedrock denied the request ({code or 'error'}). Check region, model access and quota.") from None
+    except BotoCoreError:
+        raise ProviderTransientError("Bedrock transport error. Retrying…") from None
+    if not content.strip():
+        raise ProviderError("Bedrock returned an empty response") from None
+    proposal = Proposal.model_validate_json(_json_from_response(content))
+    proposal._usage = usage
+    return proposal
+
+
+def _resolve_provider(provider_id: str) -> ProviderSpec:
+    """The configured provider for a request, or a user-safe error."""
+    spec = settings.provider(provider_id)
+    if spec is None:
+        raise ProviderError(
+            f"Provider '{provider_id}' is not configured on this server. Ask an administrator "
+            "to add its API key to backend/.env, or pick a provider from the list."
+        )
+    return spec
+
+
+async def propose(messages: list[dict], spec: ProviderSpec | None = None) -> Proposal:
     """One provider call with bounded retry/backoff on transient failures."""
+    if spec is None:
+        spec = _resolve_provider("groq")
     last: ProviderTransientError | None = None
     for try_index in range(settings.AGENT_PROVIDER_RETRIES + 1):
         try:
-            return await _propose_once(messages)
+            return await _propose_once(messages, spec)
         except ProviderTransientError as exc:
             last = exc
             if try_index < settings.AGENT_PROVIDER_RETRIES:
@@ -197,10 +368,19 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
     def event(payload: dict) -> dict:
         return {"run_id": run_id, **payload}
 
+    try:
+        spec = _resolve_provider(request.provider)
+    except ProviderError as exc:
+        logger.error("run %s: %s", run_id, exc)
+        record.finish("error", str(exc))
+        yield event({"type": "error", "message": str(exc)})
+        return
+    record.provider = spec.id
+
     async def propose_counted(messages: list[dict]) -> Proposal:
         """One provider call, counted for the run record (retries included)."""
         t0 = time.monotonic()
-        proposal = await propose(messages)
+        proposal = await propose(messages, spec)
         record.provider_calls += 1
         record.provider_ms += int((time.monotonic() - t0) * 1000)
         usage = proposal.usage
