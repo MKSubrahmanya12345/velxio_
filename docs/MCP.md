@@ -20,6 +20,11 @@ Velxio exposes a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP
 | `create_circuit` | Create a new circuit definition |
 | `update_circuit` | Merge changes into an existing circuit |
 | `generate_code_files` | Generate starter `.ino` code from a circuit |
+| `validate_circuit` | Check a circuit with the same rules the in-editor agent uses |
+| `simulate_firmware` | Run a compiled sketch on the AVR emulator and return pin transitions and serial output (optionally driven by scheduled `interactions` / `analog_events`) |
+| `list_components` | The component catalog: ids, names, pins, properties, whether the canvas can simulate them |
+| `component_info` | Pins, properties and wiring notes for one component |
+| `board_pinout` | Board pins with their capabilities (PWM/ADC/I2C/SPI) |
 
 ---
 
@@ -271,15 +276,25 @@ Velxio circuits are plain JSON objects:
 | Raspberry Pi Pico | `rp2040:rp2040:rpipico` |
 | ESP32 DevKit | `esp32:esp32:esp32` |
 
-### Common Component Types (Wokwi element names)
+### Component Types
 
-- `wokwi-led` — LED (attrs: `color`)
-- `wokwi-resistor` — Resistor (attrs: `value` in Ω)
-- `wokwi-pushbutton` — Push button
-- `wokwi-buzzer` — Passive buzzer
-- `wokwi-servo` — Servo motor
-- `wokwi-lcd1602` — 16×2 LCD display
-- `wokwi-neopixel` — NeoPixel RGB LED
+`create_circuit` / `update_circuit` / `validate_circuit` accept **every component the
+canvas can place** — 148 placeable parts — and the MCP tools resolve the Wokwi spelling
+to the catalog id (`wokwi-led`, `wokwi_lcd1602`, `led`, `wokwi-arduino-uno` all work).
+Call `list_components` for the live list, `component_info` for one part's pins and
+wiring notes, `board_pinout` for the Uno's capabilities. A part outside the catalog is
+reported as a note rather than silently dropped, and it is not covered by the checks.
+
+The catalog itself is generated: `scripts/generate-agent-catalog.mjs` merges
+`frontend/public/components-metadata.json`, `scripts/agent-pins.json` (pin names
+measured from the live custom elements) and `scripts/agent-part-rules.json` (per-family
+wiring rules) into `backend/app/agent/catalog.json` + `frontend/src/agent/catalog.json`.
+Adding a component to the canvas and re-running the generator adds it here too.
+
+Common ids: `led`, `resistor` (attrs: `value` in Ω), `pushbutton`, `buzzer`, `servo`,
+`lcd1602` / `lcd1602-i2c`, `ssd1306-i2c-4pin`, `neopixel`, `dht22`, `hc-sr04`,
+`potentiometer`, `relay`, `motor-driver-l293d`, `a4988` — plus every 74HC logic IC,
+flip-flop, op-amp, transistor, diode, sensor and display in the canvas menu.
 
 ---
 

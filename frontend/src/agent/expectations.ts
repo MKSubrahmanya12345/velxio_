@@ -14,9 +14,11 @@
  */
 import { getBoardPinManager, getBoardSimulator, useSimulatorStore } from '../store/useSimulatorStore';
 import { traceBoardGpio } from '../simulation/PinTrace';
+import { dispatchSensorUpdate } from '../simulation/SensorUpdateRegistry';
 import { setAdcVoltage } from '../simulation/parts/partUtils';
 import { AVRSimulator } from '../simulation/AVRSimulator';
 import { boardPinToNumber } from '../utils/boardPinMapping';
+import { partSpec, pinsFor } from './catalog';
 import type { AgentExpectations } from './protocol';
 
 export interface ExpectationResult {
@@ -49,6 +51,130 @@ interface ExpectationDeps {
     pinName: string,
     boardId: string,
   ) => number | null;
+  /** Push a sensor-model value into the live simulation (default: the registry). */
+  dispatchSensor?: (componentId: string, values: Record<string, number | boolean>) => void;
+}
+
+/** Actions the run loop applies at a simulated time. */
+type Action =
+  | { atMs: number; kind: 'level'; pin: number; high: boolean }
+  | { atMs: number; kind: 'pot'; pin: number; volts: number }
+  | { atMs: number; kind: 'sensor'; componentId: string; values: Record<string, number | boolean> };
+
+/**
+ * Which part pin an interaction acts on when the model did not name one.
+ * Ordered by "most likely to be the pin a human would touch".
+ */
+const INTERACTION_PINS: Record<string, string[]> = {
+  press: ['1.l', '2.l', '1', 'SW', 'SEL', 'OUT', 'A'],
+  pot: ['SIG', 'VERT', 'HORZ', 'AO', 'OUT', 'A'],
+  switch: ['2', '1', 'OUT', 'A'],
+  rotary: ['CLK', 'PULSE', 'A', 'DT'],
+};
+
+function componentPins(
+  state: ReturnType<typeof useSimulatorStore.getState>,
+  componentId: string,
+): string[] {
+  const component = state.components.find((c) => c.id === componentId);
+  if (!component) return [];
+  return pinsFor(component.metadataId, component.properties ?? {});
+}
+
+/**
+ * The part pin an interaction should drive, given the request and the circuit.
+ * Returns null (and the caller reports why) when the part is unknown or has no
+ * usable pin — never a silent no-op, because a verification that skipped its
+ * own stimulus would report "verified" for behaviour that never happened.
+ */
+function pickPin(
+  state: ReturnType<typeof useSimulatorStore.getState>,
+  componentId: string,
+  kind: string,
+  requested: string | null | undefined,
+  resolve: ExpectationDeps['resolvePin'],
+  boardId: string,
+): { pinName: string; pin: number } | null {
+  const component = state.components.find((c) => c.id === componentId);
+  const pins = componentPins(state, componentId);
+  const spec = component
+    ? partSpec(component.metadataId)
+    : undefined;
+  const preferred = requested ? [requested] : (INTERACTION_PINS[kind] ?? []);
+  if (pins.length) {
+    // Known part: only its real pins are candidates, preferred ones first.
+    for (const candidate of INTERACTION_PINS[kind] ?? []) {
+      if (pins.includes(candidate) && !preferred.includes(candidate)) preferred.push(candidate);
+    }
+    if (kind === 'rotary' && spec?.rotary && !requested) {
+      for (const candidate of Object.values(spec.rotary as Record<string, string>)) {
+        if (pins.includes(candidate) && !preferred.includes(candidate)) preferred.push(candidate);
+      }
+    }
+  }
+  const ordered = [...preferred, ...pins];
+  for (const candidate of ordered) {
+    const pin = (resolve ?? traceBoardGpio)(state, componentId, candidate, boardId);
+    if (pin !== null && pin !== undefined) return { pinName: candidate, pin };
+  }
+  return null;
+}
+
+/** Union-find over the wire graph: every pin name on the same net as (id, pin). */
+function netOf(
+  state: ReturnType<typeof useSimulatorStore.getState>,
+  componentId: string,
+  pinName: string,
+): Set<string> {
+  const parent = new Map<string, string>();
+  const find = (key: string): string => {
+    if (!parent.has(key)) parent.set(key, key);
+    let root = key;
+    while (parent.get(root) !== root) root = parent.get(root) as string;
+    parent.set(key, root);
+    return root;
+  };
+  const union = (a: string, b: string) => {
+    parent.set(find(a), find(b));
+  };
+  for (const wire of state.wires) {
+    union(`${wire.start.componentId}:${wire.start.pinName}`, `${wire.end.componentId}:${wire.end.pinName}`);
+  }
+  const root = find(`${componentId}:${pinName}`);
+  return new Set([...parent.keys()].filter((key) => find(key) === root));
+}
+
+/**
+ * Whether closing a switch pulls its signal low: a switch wired to GND closes to
+ * LOW, one wired to 5V closes to HIGH. When the other contact does not reach a
+ * rail, the caller falls back to toggling the pin.
+ */
+function closesLow(
+  state: ReturnType<typeof useSimulatorStore.getState>,
+  componentId: string,
+  pinName: string,
+  boardId: string,
+): boolean | null {
+  const component = state.components.find((c) => c.id === componentId);
+  const spec = component ? partSpec(component.metadataId) : undefined;
+  if (!component || !spec) return null;
+  const pairs = (spec.tracePairs as Array<[string, string]> | undefined) ?? [];
+  const pins = pinsFor(component.metadataId, component.properties ?? {});
+  for (const [a, b] of pairs) {
+    if (!pins.includes(a) || !pins.includes(b)) continue;
+    const other = pinName === a ? b : pinName === b ? a : null;
+    if (!other) continue;
+    const net = netOf(state, componentId, other);
+    if ([...net].some((key) => key.startsWith(`${boardId}:GND`))) return true;
+    if (
+      [...net].some((key) => {
+        const pin = key.split(':')[1] ?? '';
+        return key.startsWith(`${boardId}:`) && /^(5V|3\.3V|VIN|VCC)$/.test(pin);
+      })
+    )
+      return false;
+  }
+  return null;
 }
 
 const POLL_MS = 30;
@@ -166,27 +292,87 @@ export async function runExpectations(
     };
   }
 
-  // Resolve interactions to board pins BEFORE the window opens, so wiring the
-  // trace cannot see fails loudly instead of silently doing nothing.
-  const driven: Array<{ atMs: number; kind: 'press' | 'release' | 'pot'; pin: number; volts?: number }> = [];
+  // Resolve interactions to board pins BEFORE the window opens, so a wiring
+  // mistake fails loudly instead of silently doing nothing.
+  const driven: Action[] = [];
   const resolve = deps.resolvePin ?? traceBoardGpio;
+  const dispatchSensor = deps.dispatchSensor ?? dispatchSensorUpdate;
   for (const interaction of expectations.interactions) {
-    const pinName = interaction.kind === 'press' ? '1.l' : 'SIG';
-    const pin = resolve(state, interaction.componentId, pinName, boardId);
-    if (pin === null) {
+    const label = `interaction ${interaction.kind} ${interaction.componentId}`;
+    const atMs = interaction.at_ms ?? 500;
+    if (interaction.kind === 'stimulus') {
+      const values = Object.entries(interaction.values ?? {});
+      if (!values.length) {
+        results.push({ label, passed: false, detail: 'A stimulus needs at least one sensor value.' });
+        continue;
+      }
+      driven.push({
+        atMs,
+        kind: 'sensor',
+        componentId: interaction.componentId,
+        values: Object.fromEntries(values),
+      });
+      continue;
+    }
+    const hit = pickPin(
+      state,
+      interaction.componentId,
+      interaction.kind,
+      interaction.pin,
+      resolve,
+      boardId,
+    );
+    if (!hit) {
+      const pins = componentPins(state, interaction.componentId);
       results.push({
-        label: `interaction ${interaction.kind} ${interaction.componentId}`,
+        label,
         passed: false,
-        detail: `Could not trace ${interaction.componentId}.${pinName} to a board GPIO; the interaction never happened electrically.`,
+        detail: `Could not trace ${interaction.componentId}${
+          interaction.pin ? `.${interaction.pin}` : ''
+        } (pins: ${pins.join(', ') || 'unknown'}) to a board GPIO; the interaction never happened electrically. The part is probably not wired to the board.`,
       });
       continue;
     }
     if (interaction.kind === 'press') {
-      // Pushbuttons are active LOW (see the pushbutton part registration).
-      driven.push({ atMs: interaction.at_ms, kind: 'press', pin });
-      driven.push({ atMs: interaction.at_ms + interaction.hold_ms, kind: 'release', pin });
+      // Momentary switches are active LOW in this canvas (see the pushbutton
+      // registration): pressed pulls the pin down, release lets it float up.
+      driven.push({ atMs, kind: 'level', pin: hit.pin, high: false });
+      driven.push({
+        atMs: atMs + (interaction.hold_ms ?? 500),
+        kind: 'level',
+        pin: hit.pin,
+        high: true,
+      });
+    } else if (interaction.kind === 'switch') {
+      const low = closesLow(state, interaction.componentId, hit.pinName, boardId);
+      if (low === null) {
+        results.push({
+          label,
+          passed: false,
+          detail: `${interaction.componentId}.${hit.pinName} is not wired to a rail, so toggling it has no defined electrical effect and was not attempted.`,
+        });
+        continue;
+      }
+      driven.push({
+        atMs,
+        kind: 'level',
+        pin: hit.pin,
+        high: (interaction.closed ?? true) ? !low : low,
+      });
+    } else if (interaction.kind === 'rotary') {
+      const delta = interaction.delta ?? 1;
+      const steps = Math.min(40, Math.abs(delta));
+      for (let step = 0; step < steps; step += 1) {
+        driven.push({ atMs: atMs + step * 2, kind: 'level', pin: hit.pin, high: true });
+        driven.push({ atMs: atMs + step * 2 + 1, kind: 'level', pin: hit.pin, high: false });
+      }
     } else {
-      driven.push({ atMs: interaction.at_ms, kind: 'pot', pin, volts: (interaction.value / 1023) * 5 });
+      driven.push({
+        atMs,
+        kind: 'pot',
+        pin: hit.pin,
+        volts: ((interaction.value ?? 512) / 1023) * 5,
+      });
     }
   }
   driven.sort((a, b) => a.atMs - b.atMs);
@@ -213,8 +399,9 @@ export async function runExpectations(
       const elapsed = Date.now() - started;
       while (next < driven.length && driven[next].atMs <= elapsed) {
         const action = driven[next++];
-        if (action.kind === 'pot') setAdcVoltage(sim, action.pin, action.volts ?? 0);
-        else sim.setPinState(action.pin, action.kind !== 'press');
+        if (action.kind === 'pot') setAdcVoltage(sim, action.pin, action.volts);
+        else if (action.kind === 'sensor') dispatchSensor(action.componentId, action.values);
+        else sim.setPinState(action.pin, action.high);
       }
       await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     }

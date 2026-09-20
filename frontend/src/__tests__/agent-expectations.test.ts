@@ -11,6 +11,7 @@ import { AVRSimulator } from '../simulation/AVRSimulator';
 import { PinManager } from '../simulation/PinManager';
 import { evaluateExpectations, runExpectations, type Transition } from '../agent/expectations';
 import type { AgentExpectations } from '../agent/protocol';
+import type { SimulatorState } from '../store/useSimulatorStore';
 
 // ─── Minimal Intel HEX builder (words → records with checksums) ──────────────
 function record(type: number, addr: number, data: number[]): string {
@@ -119,6 +120,8 @@ describe('runExpectations — against a real AVR runtime', () => {
     vi.restoreAllMocks();
   });
 
+  // A minimal store: runExpectations only reads `boards[].serialOutput`,
+  // `components` and `wires`, so the fixture carries exactly those.
   const deps = () => ({
     getSim: () => sim,
     getState: () =>
@@ -126,7 +129,7 @@ describe('runExpectations — against a real AVR runtime', () => {
         boards: [{ id: 'agent-board', serialOutput: '' }],
         components: [],
         wires: [],
-      }) as unknown as ReturnType<(typeof import('../store/useSimulatorStore'))['useSimulatorStore']>['getState'] extends () => infer S ? S : never,
+      }) as unknown as SimulatorState,
   });
 
   it('verifies real firmware toggling pin 13', { timeout: 15000 }, async () => {
