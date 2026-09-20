@@ -1,11 +1,23 @@
-"""Read-only tools the model can call before committing to a patch.
+"""Tools the model can call before committing to a patch.
 
 Tool use rides on the same JSON response as the patch (`Proposal.tool_calls`)
 instead of the provider's native tool-calling API, so any OpenAI-compatible
-chat-completions endpoint works. Everything here is read-only and deterministic
-except `search_libraries`, which is off unless AGENT_ALLOW_LIBRARY_SEARCH is
-enabled. A tool round never mutates the project: results are appended to the
-conversation and the model is asked again.
+chat-completions endpoint works.
+
+Two families:
+
+  research  read-only and deterministic (or network-gated): files, board
+            pinout/capabilities, catalog search, netlist, library notes. A
+            research round never mutates the project — results are appended to
+            the conversation and the model is asked again.
+  draft_*   the same pipeline the user's patch will face, run on a *candidate*
+            built from a patch the model supplies inline: schema + electrical
+            checks + the catalog-driven static analysis (draft_validate), the
+            real arduino-cli build (draft_compile), and execution on the avr8js
+            core with the declared interactions translated into electrical
+            stimuli (draft_simulate). Nothing is written to the workspace. This
+            is what lets the model debug its own design instead of handing the
+            user a first draft.
 """
 from __future__ import annotations
 
@@ -18,11 +30,13 @@ from typing import Any
 
 import httpx
 
-from app.agent.models import PINS, PROPERTIES, TOOL_NAMES, Project, ToolCall
+from app.agent import catalog
+from app.agent.models import PINS, PROPERTIES, TOOL_NAMES, Patch, Project, ToolCall, apply_patch
 from app.core.config import settings
 
 logger = logging.getLogger("velxio.agent.tools")
 
+_RESULT_LIMIT = 4000  # max chars of JSON per tool result in the prompt
 _RESULT_LIMIT = 4000  # max chars of JSON per tool result in the prompt
 
 # Offline index of a few ubiquitous Arduino libraries: the API surface an
@@ -149,12 +163,161 @@ def library_api(project: Project, args: dict) -> dict:
     return {"ok": True, **entry}
 
 
+
+def search_catalog(project: Project, args: dict) -> dict:
+    """Free-text component lookup over the whole 157-part catalog."""
+    query = str(args.get("query", ""))[:80]
+    category = args.get("category")
+    category = str(category)[:40] if category else None
+    limit = int(args.get("limit", 12) or 12)
+    hits = catalog.search(query, category=category, limit=max(1, min(limit, 30)))
+    if not hits:
+        return {"ok": True, "hits": [],
+                "note": f"Nothing matched {query!r}. Categories: "
+                        + ", ".join(f"{k} ({v})" for k, v in catalog.categories().items())}
+    return {"ok": True, "hits": [hit.as_dict() for hit in hits],
+            "note": "Use the exact id in metadataId. `simulated: false` means the canvas "
+                    "cannot run that part; the build can, but behaviour is unverifiable."}
+
+
+def netlist(project: Project, args: dict) -> dict:
+    """What is electrically connected to what, without reading every wire."""
+    from app.agent.analysis import netlist_summary
+
+    nets = netlist_summary(project)
+    return {"ok": True, "nets": nets[:80],
+            "note": "Each net lists the pins that share a wire (or a pass-through part). "
+                    "Read this before rewiring."}
+
+
+def _candidate(project: Project, args: dict) -> tuple[Project | None, dict | None]:
+    """Build the candidate project a draft_* tool should test."""
+    raw_patch = args.get("patch")
+    if not isinstance(raw_patch, dict):
+        return None, {"ok": False, "error": "This tool needs a `patch` object with the same "
+                                            "shape as the one you will eventually return."}
+    try:
+        patch = Patch.model_validate(raw_patch)
+    except Exception as exc:  # noqa: BLE001 — schema errors are the model's to read
+        return None, {"ok": False, "stage": "schema", "error": str(exc)[:2000]}
+    expectations = None
+    raw_expectations = args.get("expectations")
+    if isinstance(raw_expectations, dict):
+        from app.agent.models import Expectations
+
+        try:
+            expectations = Expectations.model_validate(raw_expectations)
+        except Exception as exc:  # noqa: BLE001
+            return None, {"ok": False, "stage": "schema", "error": str(exc)[:2000]}
+    try:
+        candidate = apply_patch(project, patch, expectations)
+    except Exception as exc:  # noqa: BLE001 — this is exactly the feedback being asked for
+        return None, {"ok": False, "stage": "static", "accepted": False, "error": str(exc)[:4000]}
+    return candidate, None
+
+
+def draft_validate(project: Project, args: dict) -> dict:
+    """Run schema + electrical + static analysis on a candidate patch."""
+    from app.agent.analysis import analyse
+
+    candidate, failure = _candidate(project, args)
+    if failure is not None:
+        return failure
+    findings = analyse(candidate, None)
+    errors = [f for f in findings if f.severity == "error"]
+    warnings = [f for f in findings if f.severity == "warning"]
+    return {
+        "ok": True,
+        "accepted": not errors,
+        "errors": [{"code": f.code, "message": f.message} for f in errors],
+        "warnings": [{"code": f.code, "message": f.message} for f in warnings],
+        "stats": {
+            "parts": len(candidate.components),
+            "wires": len(candidate.wires),
+            "files": [f.name for f in candidate.files],
+            "simulated": sum(1 for p in candidate.components
+                             if (spec := catalog.get(p.metadataId)) and spec.sim),
+            "unverifiable": [p.metadataId for p in candidate.components
+                             if (spec := catalog.get(p.metadataId)) and not spec.sim],
+        },
+    }
+
+
+async def draft_compile(project: Project, args: dict) -> dict:
+    """Compile a candidate patch with the real arduino-cli toolchain."""
+    from app.agent.service import compile_project
+
+    candidate, failure = _candidate(project, args)
+    if failure is not None:
+        return failure
+    result = await compile_project(candidate)
+    if result.get("error_kind") == "toolchain_unavailable":
+        return {"ok": False, "stage": "compile", "error": "The Arduino toolchain is not installed "
+                                                          "on this server; design carefully instead."}
+    return {
+        "ok": True,
+        "compiled": bool(result.get("success")),
+        "stdout": str(result.get("stdout", ""))[-2000:],
+        "stderr": str(result.get("stderr") or result.get("error") or "")[-4000:],
+        "note": "A compile proves the code is valid C++ for the board, not that the circuit works.",
+    }
+
+
+async def draft_simulate(project: Project, args: dict) -> dict:
+    """Compile a candidate and RUN it on avr8js with the declared interactions."""
+    from app.agent.headless import build_stimuli, run_headless, summarise
+    from app.agent.service import compile_project
+
+    candidate, failure = _candidate(project, args)
+    if failure is not None:
+        return failure
+    interactions = args.get("interactions")
+    interactions = [i for i in interactions if isinstance(i, dict)][:8] if isinstance(interactions, list) else []
+    observe_ms = int(args.get("observe_ms", 2000) or 2000)
+    observe_ms = max(200, min(observe_ms, 8000))
+    watch_pins = args.get("watch_pins")
+    if not isinstance(watch_pins, list) or not watch_pins:
+        watch_pins = [f"{n}" for n in range(2, 14)]
+
+    result = await compile_project(candidate)
+    if not result.get("success") or not result.get("hex_content"):
+        return {"ok": False, "stage": "compile",
+                "error": str(result.get("stderr") or result.get("error") or "Compile failed")[-4000:],
+                "note": "Fix the compile error first, then simulate."}
+
+    stimulus, notes = build_stimuli(candidate, interactions)
+    observation = await run_headless(str(result["hex_content"]), observe_ms,
+                                     [str(p) for p in watch_pins], stimulus)
+    if observation.get("supported") is False:
+        return {"ok": False, "stage": "simulate", "error": observation.get("error", "unavailable"),
+                "note": "Headless simulation is unavailable on this server."}
+    if observation.get("error"):
+        return {"ok": False, "stage": "simulate", "error": observation["error"]}
+
+    pins = observation.get("pins") or {}
+    return {
+        "ok": True,
+        "observed_ms": observe_ms,
+        "pins": pins,
+        "serial": (observation.get("serial") or "")[-2000:],
+        "stimulus_applied": notes,
+        "summary": summarise(observation, notes, len(str(result["hex_content"])) // 2),
+        "note": "These are REAL transitions from the emulator at the times shown. Compare them "
+                "with what your sketch should do, and check each pin's last_state.",
+    }
+
+
 TOOLS = {
     "read_file": read_file,
     "list_files": list_files,
     "board_pinout": board_pinout,
     "component_info": component_info,
+    "search_catalog": search_catalog,
+    "netlist": netlist,
     "check_design": check_design,
+    "draft_validate": draft_validate,
+    "draft_compile": draft_compile,
+    "draft_simulate": draft_simulate,
     "search_libraries": search_libraries,
     "library_api": library_api,
 }
@@ -162,13 +325,23 @@ assert set(TOOLS) == set(TOOL_NAMES), "TOOLS must match the model-facing TOOL_NA
 
 
 def describe_tools() -> str:
-    return ("Tools you may request in tool_calls (read-only, results arrive in the next message): "
-            "read_file{name} — a project file's content; list_files{} — file names and sizes; "
-            "board_pinout{} — Uno pins, PWM/ADC capabilities; component_info{component} — pins and "
-            "properties of a catalog part; check_design{} — run wiring/firmware coherence analysis "
-            "on the current project; search_libraries{query} — live Arduino library search (may be "
-            "disabled); library_api{library} — offline API notes for Servo, IRremote, DHT, "
-            "LiquidCrystal I2C, Stepper. Request at most 4; no patch is applied on a tool round.")
+    return (
+        "Tools you may request in tool_calls (results arrive in the next message; at most 4 calls "
+        "per round, nothing is written to the workspace): "
+        "read_file{name}; list_files{}; board_pinout{}; "
+        "component_info{component} — pins/properties/notes of one catalog id; "
+        "search_catalog{query, category?, limit?} — find parts across the whole catalog; "
+        "netlist{} — what is connected to what right now; "
+        "check_design{} — static coherence analysis of the current project; "
+        "search_libraries{query}; library_api{library}; "
+        "draft_validate{patch, expectations?} — build your patch and report every error and "
+        "warning without applying it; "
+        "draft_compile{patch} — compile your patch for real and return the compiler output; "
+        "draft_simulate{patch, interactions?, observe_ms?, watch_pins?} — compile and RUN your "
+        "patch on the emulator with the interactions applied, returning per-pin transitions, "
+        "serial output and the stimulus actually delivered. Use draft_simulate whenever the "
+        "design has to behave a certain way; iterate until the observation matches the intent."
+    )
 
 
 async def execute_tool(project: Project, call: ToolCall) -> dict:

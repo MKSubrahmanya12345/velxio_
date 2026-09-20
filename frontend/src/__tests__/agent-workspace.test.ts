@@ -194,14 +194,47 @@ describe('workspace transactions', () => {
     mocks.project.currentProject = { id: 'new-project' };
     expect(() => assertFresh(before, scope)).toThrow('workspace changed');
   });
-  it('rejects unsupported existing boards and components without mutation', () => {
+  it('rejects unsupported existing boards and unknown components without mutation', () => {
     const state = fromAgentProject(design, empty);
     state.boards[0].boardKind = 'esp32';
     expect(() => toAgentProject(state)).toThrow('Arduino Uno');
     state.boards[0].boardKind = 'arduino-uno';
-    state.components[0].metadataId = 'lcd1602';
-    expect(() => toAgentProject(state)).toThrow('lcd1602');
+    // An id no catalog entry knows is still refused (a typo must never silently
+    // drop a part from the wire format).
+    state.components[0].metadataId = 'wokwi-nonsense';
+    expect(() => toAgentProject(state)).toThrow('wokwi-nonsense');
     expect(mocks.sim.loadProjectState).not.toHaveBeenCalled();
+  });
+  it('accepts every placeable catalog part, including the expanded set', () => {
+    // The catalog is the scope: a part the canvas can place is a part the agent
+    // can edit. These used to be rejected outright.
+    for (const [metadataId, properties] of [
+      ['lcd1602', { pins: 'i2c', color: 'black' }],
+      ['dht22', {}],
+      ['ic-74hc14', {}],
+      ['servo', { angle: 45 }],
+    ] as const) {
+      const state = fromAgentProject(design, empty);
+      state.components[0].metadataId = metadataId;
+      state.components[0].properties = { ...properties };
+      const project = toAgentProject(state);
+      expect(project.components[0].metadataId).toBe(metadataId);
+      expect(project.components[0].properties).toEqual(properties);
+    }
+  });
+  it('drops runtime state and keeps the editable properties of a new part', () => {
+    const state = fromAgentProject(design, empty);
+    state.components[0].metadataId = 'lcd1602';
+    state.components[0].properties = {
+      pins: 'i2c',
+      cursorX: 3,        // live cursor position: the canvas owns it
+      characters: {},    // rendered frame buffer: not sent to the model
+      rotation: 90,      // a real, agent-editable property
+    };
+    expect(toAgentProject(state).components[0].properties).toEqual({
+      pins: 'i2c',
+      rotation: 90,
+    });
   });
   it('refuses dangling endpoints and board replacement', () => {
     expect(() =>

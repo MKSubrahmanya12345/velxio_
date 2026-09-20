@@ -83,12 +83,71 @@ async def test_non_uno_boards_report_as_not_checkable():
 
 
 @pytest.mark.asyncio
-async def test_non_catalog_parts_are_reported_as_notes_not_errors():
+async def test_parts_outside_the_catalog_are_notes_not_errors():
     circuit = dict(BLINK_CIRCUIT)
-    circuit["components"] = BLINK_CIRCUIT["components"] + [{"id": "lcd1", "type": "wokwi-lcd1602"}]
+    circuit["components"] = BLINK_CIRCUIT["components"] + [{"id": "x1", "type": "wokwi-nonsense-9000"}]
     report = await validate_circuit(circuit, files=BLINK_FILES)
     assert report["valid"] is True
-    assert any("lcd1602" in note for note in report["notes"])
+    assert any("nonsense" in note for note in report["notes"])
+
+
+# ── the catalog is the whole canvas, not the original five parts ─────────────
+
+I2C_LCD_CIRCUIT = {
+    "board_fqbn": "arduino:avr:uno",
+    "components": [UNO,
+                   {"id": "lcd1", "type": "wokwi-lcd1602", "attrs": {"pins": "i2c"}}],
+    "connections": [
+        {"from_part": "lcd1", "from_pin": "VCC", "to_part": "uno", "to_pin": "5V"},
+        {"from_part": "lcd1", "from_pin": "GND", "to_part": "uno", "to_pin": "GND.1"},
+        {"from_part": "lcd1", "from_pin": "SDA", "to_part": "uno", "to_pin": "A4"},
+        {"from_part": "lcd1", "from_pin": "SCL", "to_part": "uno", "to_pin": "A5"},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_i2c_display_is_checked_like_any_other_part():
+    files = [{"name": "sketch.ino", "content": (
+        "#include <Wire.h>\n"
+        "void setup(){Wire.begin();}\n"
+        "void loop(){Wire.beginTransmission(0x27);Wire.endTransmission();delay(500);}")}]
+    report = await validate_circuit(I2C_LCD_CIRCUIT, files=files)
+    assert report["valid"] is True, report["errors"]
+
+
+@pytest.mark.asyncio
+async def test_i2c_display_on_the_wrong_pins_is_rejected():
+    circuit = dict(I2C_LCD_CIRCUIT)
+    circuit["connections"] = [
+        {"from_part": "lcd1", "from_pin": "VCC", "to_part": "uno", "to_pin": "5V"},
+        {"from_part": "lcd1", "from_pin": "GND", "to_part": "uno", "to_pin": "GND.1"},
+        {"from_part": "lcd1", "from_pin": "SDA", "to_part": "uno", "to_pin": "7"},
+        {"from_part": "lcd1", "from_pin": "SCL", "to_part": "uno", "to_pin": "8"},
+    ]
+    report = await validate_circuit(circuit, files=None)
+    assert report["valid"] is False
+    assert any("bus-mismatch" in e for e in report["errors"])
+
+
+@pytest.mark.asyncio
+async def test_servo_on_a_pwm_pin_is_valid_and_on_a_plain_pin_is_not():
+    wires = [{"from_part": "s1", "from_pin": "PWM", "to_part": "uno", "to_pin": "9"},
+             {"from_part": "s1", "from_pin": "V+", "to_part": "uno", "to_pin": "5V"},
+             {"from_part": "s1", "from_pin": "GND", "to_part": "uno", "to_pin": "GND.1"}]
+    files = [{"name": "sketch.ino", "content": (
+        "#include <Servo.h>\nServo s;\n"
+        "void setup(){s.attach(9);}\nvoid loop(){s.write(90);delay(1000);}")}]
+    circuit = {"board_fqbn": "arduino:avr:uno",
+               "components": [UNO, {"id": "s1", "type": "wokwi-servo"}],
+               "connections": wires}
+    report = await validate_circuit(circuit, files=files)
+    assert report["valid"] is True, report["errors"]
+
+    circuit["connections"] = [dict(w, to_pin="7") if w["from_pin"] == "PWM" else w for w in wires]
+    report = await validate_circuit(circuit, files=files)
+    assert report["valid"] is False
+    assert any("PWM" in e for e in report["errors"])
 
 # ── simulate_firmware: headless behavioural observation ─────────────────────
 import os

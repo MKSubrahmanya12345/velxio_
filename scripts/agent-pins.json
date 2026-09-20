@@ -1,0 +1,2787 @@
+{
+ "$comment": "Component pin names measured from the elements the canvas actually instantiates (frontend/src/elements-register.ts + @wokwi/elements 1.9.2). Regenerate with: cd frontend && UPDATE_AGENT_PINS=1 npx vitest run src/agent/__tests__/agent-pins.test.ts — the same test fails when this file drifts from the live elements (e.g. after a wokwi-elements bump). Consumed by scripts/generate-agent-catalog.mjs.",
+ "element_source": "frontend/src/elements-register.ts",
+ "components": {
+  "7segment": {
+   "tag": "wokwi-7segment",
+   "pins": [
+    "A",
+    "B",
+    "C",
+    "COM.1",
+    "COM.2",
+    "D",
+    "DP",
+    "E",
+    "F",
+    "G"
+   ],
+   "variants": [
+    {
+     "when": {
+      "digits": 2
+     },
+     "pins": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "DP",
+      "E",
+      "F",
+      "G",
+      "DIG1",
+      "DIG2"
+     ]
+    },
+    {
+     "when": {
+      "digits": 4
+     },
+     "pins": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "DP",
+      "E",
+      "F",
+      "G",
+      "CLN",
+      "COM",
+      "DIG1",
+      "DIG2",
+      "DIG3",
+      "DIG4"
+     ]
+    }
+   ]
+  },
+  "a4988": {
+   "tag": "velxio-a4988",
+   "pins": [
+    "1A",
+    "1B",
+    "2A",
+    "2B",
+    "DIR",
+    "ENABLE",
+    "GND",
+    "GND.2",
+    "MS1",
+    "MS2",
+    "MS3",
+    "RESET",
+    "SLEEP",
+    "STEP",
+    "VDD",
+    "VMOT"
+   ]
+  },
+  "analog-joystick": {
+   "tag": "wokwi-analog-joystick",
+   "pins": [
+    "GND",
+    "HORZ",
+    "SEL",
+    "VCC",
+    "VERT"
+   ]
+  },
+  "arduino-mega": {
+   "tag": "wokwi-arduino-mega",
+   "pins": [
+    "0",
+    "1",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "16",
+    "17",
+    "18",
+    "19",
+    "2",
+    "20",
+    "21",
+    "22",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "29",
+    "3",
+    "3.3V",
+    "30",
+    "31",
+    "32",
+    "33",
+    "34",
+    "35",
+    "36",
+    "37",
+    "38",
+    "39",
+    "4",
+    "40",
+    "41",
+    "42",
+    "43",
+    "44",
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "5",
+    "50",
+    "51",
+    "52",
+    "53",
+    "5V",
+    "5V.1",
+    "5V.2",
+    "6",
+    "7",
+    "8",
+    "9",
+    "A0",
+    "A1",
+    "A10",
+    "A11",
+    "A12",
+    "A13",
+    "A14",
+    "A15",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "A8",
+    "A9",
+    "AREF",
+    "GND.1",
+    "GND.2",
+    "GND.3",
+    "GND.4",
+    "GND.5",
+    "IOREF",
+    "RESET",
+    "SCL",
+    "SDA",
+    "VIN"
+   ]
+  },
+  "arduino-nano": {
+   "tag": "wokwi-arduino-nano",
+   "pins": [
+    "0",
+    "1",
+    "10",
+    "11",
+    "11.2",
+    "12",
+    "12.2",
+    "13",
+    "13.2",
+    "2",
+    "3",
+    "3.3V",
+    "4",
+    "5",
+    "5V",
+    "5V.2",
+    "6",
+    "7",
+    "8",
+    "9",
+    "A0",
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "AREF",
+    "GND.1",
+    "GND.2",
+    "GND.3",
+    "RESET",
+    "RESET.2",
+    "RESET.3",
+    "VIN"
+   ]
+  },
+  "arduino-uno": {
+   "tag": "wokwi-arduino-uno",
+   "pins": [
+    "0",
+    "1",
+    "10",
+    "11",
+    "12",
+    "13",
+    "2",
+    "3",
+    "3.3V",
+    "4",
+    "5",
+    "5V",
+    "6",
+    "7",
+    "8",
+    "9",
+    "A0",
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A4.2",
+    "A5",
+    "A5.2",
+    "AREF",
+    "GND.1",
+    "GND.2",
+    "GND.3",
+    "IOREF",
+    "RESET",
+    "VIN"
+   ]
+  },
+  "battery-9v": {
+   "tag": "wokwi-battery-9v",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "battery-aa": {
+   "tag": "wokwi-battery-aa",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "battery-coin-cell": {
+   "tag": "wokwi-battery-coin-cell",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "biaxial-stepper": {
+   "tag": "wokwi-biaxial-stepper",
+   "pins": [
+    "A1+",
+    "A1-",
+    "A2+",
+    "A2-",
+    "B1+",
+    "B1-",
+    "B2+",
+    "B2-"
+   ]
+  },
+  "big-sound-sensor": {
+   "tag": "wokwi-big-sound-sensor",
+   "pins": [
+    "AOUT",
+    "DOUT",
+    "GND",
+    "VCC"
+   ]
+  },
+  "bjt-2n2222": {
+   "tag": "wokwi-bjt-2n2222",
+   "pins": [
+    "B",
+    "C",
+    "E"
+   ]
+  },
+  "bjt-2n3055": {
+   "tag": "wokwi-bjt-2n3055",
+   "pins": [
+    "B",
+    "C",
+    "E"
+   ]
+  },
+  "bjt-2n3906": {
+   "tag": "wokwi-bjt-2n3906",
+   "pins": [
+    "B",
+    "C",
+    "E"
+   ]
+  },
+  "bjt-bc547": {
+   "tag": "wokwi-bjt-bc547",
+   "pins": [
+    "B",
+    "C",
+    "E"
+   ]
+  },
+  "bjt-bc557": {
+   "tag": "wokwi-bjt-bc557",
+   "pins": [
+    "B",
+    "C",
+    "E"
+   ]
+  },
+  "bmp280": {
+   "tag": "velxio-bmp280",
+   "pins": [
+    "GND",
+    "SCL",
+    "SDA",
+    "VCC"
+   ]
+  },
+  "breadboard": {
+   "tag": "velxio-breadboard",
+   "pins": [
+    "10b.f",
+    "10b.g",
+    "10b.h",
+    "10b.i",
+    "10b.j",
+    "10t.a",
+    "10t.b",
+    "10t.c",
+    "10t.d",
+    "10t.e",
+    "11b.f",
+    "11b.g",
+    "11b.h",
+    "11b.i",
+    "11b.j",
+    "11t.a",
+    "11t.b",
+    "11t.c",
+    "11t.d",
+    "11t.e",
+    "12b.f",
+    "12b.g",
+    "12b.h",
+    "12b.i",
+    "12b.j",
+    "12t.a",
+    "12t.b",
+    "12t.c",
+    "12t.d",
+    "12t.e",
+    "13b.f",
+    "13b.g",
+    "13b.h",
+    "13b.i",
+    "13b.j",
+    "13t.a",
+    "13t.b",
+    "13t.c",
+    "13t.d",
+    "13t.e",
+    "14b.f",
+    "14b.g",
+    "14b.h",
+    "14b.i",
+    "14b.j",
+    "14t.a",
+    "14t.b",
+    "14t.c",
+    "14t.d",
+    "14t.e",
+    "15b.f",
+    "15b.g",
+    "15b.h",
+    "15b.i",
+    "15b.j",
+    "15t.a",
+    "15t.b",
+    "15t.c",
+    "15t.d",
+    "15t.e",
+    "16b.f",
+    "16b.g",
+    "16b.h",
+    "16b.i",
+    "16b.j",
+    "16t.a",
+    "16t.b",
+    "16t.c",
+    "16t.d",
+    "16t.e",
+    "17b.f",
+    "17b.g",
+    "17b.h",
+    "17b.i",
+    "17b.j",
+    "17t.a",
+    "17t.b",
+    "17t.c",
+    "17t.d",
+    "17t.e",
+    "18b.f",
+    "18b.g",
+    "18b.h",
+    "18b.i",
+    "18b.j",
+    "18t.a",
+    "18t.b",
+    "18t.c",
+    "18t.d",
+    "18t.e",
+    "19b.f",
+    "19b.g",
+    "19b.h",
+    "19b.i",
+    "19b.j",
+    "19t.a",
+    "19t.b",
+    "19t.c",
+    "19t.d",
+    "19t.e",
+    "1b.f",
+    "1b.g",
+    "1b.h",
+    "1b.i",
+    "1b.j",
+    "1t.a",
+    "1t.b",
+    "1t.c",
+    "1t.d",
+    "1t.e",
+    "20b.f",
+    "20b.g",
+    "20b.h",
+    "20b.i",
+    "20b.j",
+    "20t.a",
+    "20t.b",
+    "20t.c",
+    "20t.d",
+    "20t.e",
+    "21b.f",
+    "21b.g",
+    "21b.h",
+    "21b.i",
+    "21b.j",
+    "21t.a",
+    "21t.b",
+    "21t.c",
+    "21t.d",
+    "21t.e",
+    "22b.f",
+    "22b.g",
+    "22b.h",
+    "22b.i",
+    "22b.j",
+    "22t.a",
+    "22t.b",
+    "22t.c",
+    "22t.d",
+    "22t.e",
+    "23b.f",
+    "23b.g",
+    "23b.h",
+    "23b.i",
+    "23b.j",
+    "23t.a",
+    "23t.b",
+    "23t.c",
+    "23t.d",
+    "23t.e",
+    "24b.f",
+    "24b.g",
+    "24b.h",
+    "24b.i",
+    "24b.j",
+    "24t.a",
+    "24t.b",
+    "24t.c",
+    "24t.d",
+    "24t.e",
+    "25b.f",
+    "25b.g",
+    "25b.h",
+    "25b.i",
+    "25b.j",
+    "25t.a",
+    "25t.b",
+    "25t.c",
+    "25t.d",
+    "25t.e",
+    "26b.f",
+    "26b.g",
+    "26b.h",
+    "26b.i",
+    "26b.j",
+    "26t.a",
+    "26t.b",
+    "26t.c",
+    "26t.d",
+    "26t.e",
+    "27b.f",
+    "27b.g",
+    "27b.h",
+    "27b.i",
+    "27b.j",
+    "27t.a",
+    "27t.b",
+    "27t.c",
+    "27t.d",
+    "27t.e",
+    "28b.f",
+    "28b.g",
+    "28b.h",
+    "28b.i",
+    "28b.j",
+    "28t.a",
+    "28t.b",
+    "28t.c",
+    "28t.d",
+    "28t.e",
+    "29b.f",
+    "29b.g",
+    "29b.h",
+    "29b.i",
+    "29b.j",
+    "29t.a",
+    "29t.b",
+    "29t.c",
+    "29t.d",
+    "29t.e",
+    "2b.f",
+    "2b.g",
+    "2b.h",
+    "2b.i",
+    "2b.j",
+    "2t.a",
+    "2t.b",
+    "2t.c",
+    "2t.d",
+    "2t.e",
+    "30b.f",
+    "30b.g",
+    "30b.h",
+    "30b.i",
+    "30b.j",
+    "30t.a",
+    "30t.b",
+    "30t.c",
+    "30t.d",
+    "30t.e",
+    "31b.f",
+    "31b.g",
+    "31b.h",
+    "31b.i",
+    "31b.j",
+    "31t.a",
+    "31t.b",
+    "31t.c",
+    "31t.d",
+    "31t.e",
+    "32b.f",
+    "32b.g",
+    "32b.h",
+    "32b.i",
+    "32b.j",
+    "32t.a",
+    "32t.b",
+    "32t.c",
+    "32t.d",
+    "32t.e",
+    "33b.f",
+    "33b.g",
+    "33b.h",
+    "33b.i",
+    "33b.j",
+    "33t.a",
+    "33t.b",
+    "33t.c",
+    "33t.d",
+    "33t.e",
+    "34b.f",
+    "34b.g",
+    "34b.h",
+    "34b.i",
+    "34b.j",
+    "34t.a",
+    "34t.b",
+    "34t.c",
+    "34t.d",
+    "34t.e",
+    "35b.f",
+    "35b.g",
+    "35b.h",
+    "35b.i",
+    "35b.j",
+    "35t.a",
+    "35t.b",
+    "35t.c",
+    "35t.d",
+    "35t.e",
+    "36b.f",
+    "36b.g",
+    "36b.h",
+    "36b.i",
+    "36b.j",
+    "36t.a",
+    "36t.b",
+    "36t.c",
+    "36t.d",
+    "36t.e",
+    "37b.f",
+    "37b.g",
+    "37b.h",
+    "37b.i",
+    "37b.j",
+    "37t.a",
+    "37t.b",
+    "37t.c",
+    "37t.d",
+    "37t.e",
+    "38b.f",
+    "38b.g",
+    "38b.h",
+    "38b.i",
+    "38b.j",
+    "38t.a",
+    "38t.b",
+    "38t.c",
+    "38t.d",
+    "38t.e",
+    "39b.f",
+    "39b.g",
+    "39b.h",
+    "39b.i",
+    "39b.j",
+    "39t.a",
+    "39t.b",
+    "39t.c",
+    "39t.d",
+    "39t.e",
+    "3b.f",
+    "3b.g",
+    "3b.h",
+    "3b.i",
+    "3b.j",
+    "3t.a",
+    "3t.b",
+    "3t.c",
+    "3t.d",
+    "3t.e",
+    "40b.f",
+    "40b.g",
+    "40b.h",
+    "40b.i",
+    "40b.j",
+    "40t.a",
+    "40t.b",
+    "40t.c",
+    "40t.d",
+    "40t.e",
+    "41b.f",
+    "41b.g",
+    "41b.h",
+    "41b.i",
+    "41b.j",
+    "41t.a",
+    "41t.b",
+    "41t.c",
+    "41t.d",
+    "41t.e",
+    "42b.f",
+    "42b.g",
+    "42b.h",
+    "42b.i",
+    "42b.j",
+    "42t.a",
+    "42t.b",
+    "42t.c",
+    "42t.d",
+    "42t.e",
+    "43b.f",
+    "43b.g",
+    "43b.h",
+    "43b.i",
+    "43b.j",
+    "43t.a",
+    "43t.b",
+    "43t.c",
+    "43t.d",
+    "43t.e",
+    "44b.f",
+    "44b.g",
+    "44b.h",
+    "44b.i",
+    "44b.j",
+    "44t.a",
+    "44t.b",
+    "44t.c",
+    "44t.d",
+    "44t.e",
+    "45b.f",
+    "45b.g",
+    "45b.h",
+    "45b.i",
+    "45b.j",
+    "45t.a",
+    "45t.b",
+    "45t.c",
+    "45t.d",
+    "45t.e",
+    "46b.f",
+    "46b.g",
+    "46b.h",
+    "46b.i",
+    "46b.j",
+    "46t.a",
+    "46t.b",
+    "46t.c",
+    "46t.d",
+    "46t.e",
+    "47b.f",
+    "47b.g",
+    "47b.h",
+    "47b.i",
+    "47b.j",
+    "47t.a",
+    "47t.b",
+    "47t.c",
+    "47t.d",
+    "47t.e",
+    "48b.f",
+    "48b.g",
+    "48b.h",
+    "48b.i",
+    "48b.j",
+    "48t.a",
+    "48t.b",
+    "48t.c",
+    "48t.d",
+    "48t.e",
+    "49b.f",
+    "49b.g",
+    "49b.h",
+    "49b.i",
+    "49b.j",
+    "49t.a",
+    "49t.b",
+    "49t.c",
+    "49t.d",
+    "49t.e",
+    "4b.f",
+    "4b.g",
+    "4b.h",
+    "4b.i",
+    "4b.j",
+    "4t.a",
+    "4t.b",
+    "4t.c",
+    "4t.d",
+    "4t.e",
+    "50b.f",
+    "50b.g",
+    "50b.h",
+    "50b.i",
+    "50b.j",
+    "50t.a",
+    "50t.b",
+    "50t.c",
+    "50t.d",
+    "50t.e",
+    "51b.f",
+    "51b.g",
+    "51b.h",
+    "51b.i",
+    "51b.j",
+    "51t.a",
+    "51t.b",
+    "51t.c",
+    "51t.d",
+    "51t.e",
+    "52b.f",
+    "52b.g",
+    "52b.h",
+    "52b.i",
+    "52b.j",
+    "52t.a",
+    "52t.b",
+    "52t.c",
+    "52t.d",
+    "52t.e",
+    "53b.f",
+    "53b.g",
+    "53b.h",
+    "53b.i",
+    "53b.j",
+    "53t.a",
+    "53t.b",
+    "53t.c",
+    "53t.d",
+    "53t.e",
+    "54b.f",
+    "54b.g",
+    "54b.h",
+    "54b.i",
+    "54b.j",
+    "54t.a",
+    "54t.b",
+    "54t.c",
+    "54t.d",
+    "54t.e",
+    "55b.f",
+    "55b.g",
+    "55b.h",
+    "55b.i",
+    "55b.j",
+    "55t.a",
+    "55t.b",
+    "55t.c",
+    "55t.d",
+    "55t.e",
+    "56b.f",
+    "56b.g",
+    "56b.h",
+    "56b.i",
+    "56b.j",
+    "56t.a",
+    "56t.b",
+    "56t.c",
+    "56t.d",
+    "56t.e",
+    "57b.f",
+    "57b.g",
+    "57b.h",
+    "57b.i",
+    "57b.j",
+    "57t.a",
+    "57t.b",
+    "57t.c",
+    "57t.d",
+    "57t.e",
+    "58b.f",
+    "58b.g",
+    "58b.h",
+    "58b.i",
+    "58b.j",
+    "58t.a",
+    "58t.b",
+    "58t.c",
+    "58t.d",
+    "58t.e",
+    "59b.f",
+    "59b.g",
+    "59b.h",
+    "59b.i",
+    "59b.j",
+    "59t.a",
+    "59t.b",
+    "59t.c",
+    "59t.d",
+    "59t.e",
+    "5b.f",
+    "5b.g",
+    "5b.h",
+    "5b.i",
+    "5b.j",
+    "5t.a",
+    "5t.b",
+    "5t.c",
+    "5t.d",
+    "5t.e",
+    "60b.f",
+    "60b.g",
+    "60b.h",
+    "60b.i",
+    "60b.j",
+    "60t.a",
+    "60t.b",
+    "60t.c",
+    "60t.d",
+    "60t.e",
+    "61b.f",
+    "61b.g",
+    "61b.h",
+    "61b.i",
+    "61b.j",
+    "61t.a",
+    "61t.b",
+    "61t.c",
+    "61t.d",
+    "61t.e",
+    "62b.f",
+    "62b.g",
+    "62b.h",
+    "62b.i",
+    "62b.j",
+    "62t.a",
+    "62t.b",
+    "62t.c",
+    "62t.d",
+    "62t.e",
+    "63b.f",
+    "63b.g",
+    "63b.h",
+    "63b.i",
+    "63b.j",
+    "63t.a",
+    "63t.b",
+    "63t.c",
+    "63t.d",
+    "63t.e",
+    "6b.f",
+    "6b.g",
+    "6b.h",
+    "6b.i",
+    "6b.j",
+    "6t.a",
+    "6t.b",
+    "6t.c",
+    "6t.d",
+    "6t.e",
+    "7b.f",
+    "7b.g",
+    "7b.h",
+    "7b.i",
+    "7b.j",
+    "7t.a",
+    "7t.b",
+    "7t.c",
+    "7t.d",
+    "7t.e",
+    "8b.f",
+    "8b.g",
+    "8b.h",
+    "8b.i",
+    "8b.j",
+    "8t.a",
+    "8t.b",
+    "8t.c",
+    "8t.d",
+    "8t.e",
+    "9b.f",
+    "9b.g",
+    "9b.h",
+    "9b.i",
+    "9b.j",
+    "9t.a",
+    "9t.b",
+    "9t.c",
+    "9t.d",
+    "9t.e",
+    "bn.1",
+    "bn.10",
+    "bn.11",
+    "bn.12",
+    "bn.13",
+    "bn.14",
+    "bn.15",
+    "bn.16",
+    "bn.17",
+    "bn.18",
+    "bn.19",
+    "bn.2",
+    "bn.20",
+    "bn.21",
+    "bn.22",
+    "bn.23",
+    "bn.24",
+    "bn.25",
+    "bn.26",
+    "bn.27",
+    "bn.28",
+    "bn.29",
+    "bn.3",
+    "bn.30",
+    "bn.31",
+    "bn.32",
+    "bn.33",
+    "bn.34",
+    "bn.35",
+    "bn.36",
+    "bn.37",
+    "bn.38",
+    "bn.39",
+    "bn.4",
+    "bn.40",
+    "bn.41",
+    "bn.42",
+    "bn.43",
+    "bn.44",
+    "bn.45",
+    "bn.46",
+    "bn.47",
+    "bn.48",
+    "bn.49",
+    "bn.5",
+    "bn.50",
+    "bn.6",
+    "bn.7",
+    "bn.8",
+    "bn.9",
+    "bp.1",
+    "bp.10",
+    "bp.11",
+    "bp.12",
+    "bp.13",
+    "bp.14",
+    "bp.15",
+    "bp.16",
+    "bp.17",
+    "bp.18",
+    "bp.19",
+    "bp.2",
+    "bp.20",
+    "bp.21",
+    "bp.22",
+    "bp.23",
+    "bp.24",
+    "bp.25",
+    "bp.26",
+    "bp.27",
+    "bp.28",
+    "bp.29",
+    "bp.3",
+    "bp.30",
+    "bp.31",
+    "bp.32",
+    "bp.33",
+    "bp.34",
+    "bp.35",
+    "bp.36",
+    "bp.37",
+    "bp.38",
+    "bp.39",
+    "bp.4",
+    "bp.40",
+    "bp.41",
+    "bp.42",
+    "bp.43",
+    "bp.44",
+    "bp.45",
+    "bp.46",
+    "bp.47",
+    "bp.48",
+    "bp.49",
+    "bp.5",
+    "bp.50",
+    "bp.6",
+    "bp.7",
+    "bp.8",
+    "bp.9",
+    "tn.1",
+    "tn.10",
+    "tn.11",
+    "tn.12",
+    "tn.13",
+    "tn.14",
+    "tn.15",
+    "tn.16",
+    "tn.17",
+    "tn.18",
+    "tn.19",
+    "tn.2",
+    "tn.20",
+    "tn.21",
+    "tn.22",
+    "tn.23",
+    "tn.24",
+    "tn.25",
+    "tn.26",
+    "tn.27",
+    "tn.28",
+    "tn.29",
+    "tn.3",
+    "tn.30",
+    "tn.31",
+    "tn.32",
+    "tn.33",
+    "tn.34",
+    "tn.35",
+    "tn.36",
+    "tn.37",
+    "tn.38",
+    "tn.39",
+    "tn.4",
+    "tn.40",
+    "tn.41",
+    "tn.42",
+    "tn.43",
+    "tn.44",
+    "tn.45",
+    "tn.46",
+    "tn.47",
+    "tn.48",
+    "tn.49",
+    "tn.5",
+    "tn.50",
+    "tn.6",
+    "tn.7",
+    "tn.8",
+    "tn.9",
+    "tp.1",
+    "tp.10",
+    "tp.11",
+    "tp.12",
+    "tp.13",
+    "tp.14",
+    "tp.15",
+    "tp.16",
+    "tp.17",
+    "tp.18",
+    "tp.19",
+    "tp.2",
+    "tp.20",
+    "tp.21",
+    "tp.22",
+    "tp.23",
+    "tp.24",
+    "tp.25",
+    "tp.26",
+    "tp.27",
+    "tp.28",
+    "tp.29",
+    "tp.3",
+    "tp.30",
+    "tp.31",
+    "tp.32",
+    "tp.33",
+    "tp.34",
+    "tp.35",
+    "tp.36",
+    "tp.37",
+    "tp.38",
+    "tp.39",
+    "tp.4",
+    "tp.40",
+    "tp.41",
+    "tp.42",
+    "tp.43",
+    "tp.44",
+    "tp.45",
+    "tp.46",
+    "tp.47",
+    "tp.48",
+    "tp.49",
+    "tp.5",
+    "tp.50",
+    "tp.6",
+    "tp.7",
+    "tp.8",
+    "tp.9"
+   ]
+  },
+  "breadboard-mini": {
+   "tag": "velxio-breadboard-mini",
+   "pins": [
+    "10b.f",
+    "10b.g",
+    "10b.h",
+    "10b.i",
+    "10b.j",
+    "10t.a",
+    "10t.b",
+    "10t.c",
+    "10t.d",
+    "10t.e",
+    "11b.f",
+    "11b.g",
+    "11b.h",
+    "11b.i",
+    "11b.j",
+    "11t.a",
+    "11t.b",
+    "11t.c",
+    "11t.d",
+    "11t.e",
+    "12b.f",
+    "12b.g",
+    "12b.h",
+    "12b.i",
+    "12b.j",
+    "12t.a",
+    "12t.b",
+    "12t.c",
+    "12t.d",
+    "12t.e",
+    "13b.f",
+    "13b.g",
+    "13b.h",
+    "13b.i",
+    "13b.j",
+    "13t.a",
+    "13t.b",
+    "13t.c",
+    "13t.d",
+    "13t.e",
+    "14b.f",
+    "14b.g",
+    "14b.h",
+    "14b.i",
+    "14b.j",
+    "14t.a",
+    "14t.b",
+    "14t.c",
+    "14t.d",
+    "14t.e",
+    "15b.f",
+    "15b.g",
+    "15b.h",
+    "15b.i",
+    "15b.j",
+    "15t.a",
+    "15t.b",
+    "15t.c",
+    "15t.d",
+    "15t.e",
+    "16b.f",
+    "16b.g",
+    "16b.h",
+    "16b.i",
+    "16b.j",
+    "16t.a",
+    "16t.b",
+    "16t.c",
+    "16t.d",
+    "16t.e",
+    "17b.f",
+    "17b.g",
+    "17b.h",
+    "17b.i",
+    "17b.j",
+    "17t.a",
+    "17t.b",
+    "17t.c",
+    "17t.d",
+    "17t.e",
+    "1b.f",
+    "1b.g",
+    "1b.h",
+    "1b.i",
+    "1b.j",
+    "1t.a",
+    "1t.b",
+    "1t.c",
+    "1t.d",
+    "1t.e",
+    "2b.f",
+    "2b.g",
+    "2b.h",
+    "2b.i",
+    "2b.j",
+    "2t.a",
+    "2t.b",
+    "2t.c",
+    "2t.d",
+    "2t.e",
+    "3b.f",
+    "3b.g",
+    "3b.h",
+    "3b.i",
+    "3b.j",
+    "3t.a",
+    "3t.b",
+    "3t.c",
+    "3t.d",
+    "3t.e",
+    "4b.f",
+    "4b.g",
+    "4b.h",
+    "4b.i",
+    "4b.j",
+    "4t.a",
+    "4t.b",
+    "4t.c",
+    "4t.d",
+    "4t.e",
+    "5b.f",
+    "5b.g",
+    "5b.h",
+    "5b.i",
+    "5b.j",
+    "5t.a",
+    "5t.b",
+    "5t.c",
+    "5t.d",
+    "5t.e",
+    "6b.f",
+    "6b.g",
+    "6b.h",
+    "6b.i",
+    "6b.j",
+    "6t.a",
+    "6t.b",
+    "6t.c",
+    "6t.d",
+    "6t.e",
+    "7b.f",
+    "7b.g",
+    "7b.h",
+    "7b.i",
+    "7b.j",
+    "7t.a",
+    "7t.b",
+    "7t.c",
+    "7t.d",
+    "7t.e",
+    "8b.f",
+    "8b.g",
+    "8b.h",
+    "8b.i",
+    "8b.j",
+    "8t.a",
+    "8t.b",
+    "8t.c",
+    "8t.d",
+    "8t.e",
+    "9b.f",
+    "9b.g",
+    "9b.h",
+    "9b.i",
+    "9b.j",
+    "9t.a",
+    "9t.b",
+    "9t.c",
+    "9t.d",
+    "9t.e"
+   ]
+  },
+  "buzzer": {
+   "tag": "wokwi-buzzer",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "cap-100n": {
+   "tag": "wokwi-capacitor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "cap-100p": {
+   "tag": "wokwi-capacitor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "cap-10n": {
+   "tag": "wokwi-capacitor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "cap-10p": {
+   "tag": "wokwi-capacitor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "cap-1n": {
+   "tag": "wokwi-capacitor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "cap-1u": {
+   "tag": "wokwi-capacitor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "cap-22p": {
+   "tag": "wokwi-capacitor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "cap-elec-1000u": {
+   "tag": "velxio-capacitor-electrolytic",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "cap-elec-100u": {
+   "tag": "velxio-capacitor-electrolytic",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "cap-elec-10u": {
+   "tag": "velxio-capacitor-electrolytic",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "cap-elec-1u": {
+   "tag": "velxio-capacitor-electrolytic",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "cap-elec-470u": {
+   "tag": "velxio-capacitor-electrolytic",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "cap-elec-47u": {
+   "tag": "velxio-capacitor-electrolytic",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "capacitor": {
+   "tag": "wokwi-capacitor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "capacitor-electrolytic": {
+   "tag": "velxio-capacitor-electrolytic",
+   "pins": [
+    "+",
+    "−"
+   ]
+  },
+  "dht22": {
+   "tag": "wokwi-dht22",
+   "pins": [
+    "GND",
+    "NC",
+    "SDA",
+    "VCC"
+   ]
+  },
+  "diode": {
+   "tag": "wokwi-diode",
+   "pins": [
+    "A",
+    "C"
+   ]
+  },
+  "diode-1n4007": {
+   "tag": "wokwi-diode-1n4007",
+   "pins": [
+    "A",
+    "C"
+   ]
+  },
+  "diode-1n4148": {
+   "tag": "wokwi-diode-1n4148",
+   "pins": [
+    "A",
+    "C"
+   ]
+  },
+  "diode-1n5817": {
+   "tag": "wokwi-diode-1n5817",
+   "pins": [
+    "A",
+    "C"
+   ]
+  },
+  "diode-1n5819": {
+   "tag": "wokwi-diode-1n5819",
+   "pins": [
+    "A",
+    "C"
+   ]
+  },
+  "dip-switch-8": {
+   "tag": "wokwi-dip-switch-8",
+   "pins": [
+    "1a",
+    "1b",
+    "2a",
+    "2b",
+    "3a",
+    "3b",
+    "4a",
+    "4b",
+    "5a",
+    "5b",
+    "6a",
+    "6b",
+    "7a",
+    "7b",
+    "8a",
+    "8b"
+   ]
+  },
+  "ds1307": {
+   "tag": "wokwi-ds1307",
+   "pins": [
+    "5V",
+    "GND",
+    "SCL",
+    "SDA",
+    "SQW"
+   ]
+  },
+  "ds3231": {
+   "tag": "velxio-ds3231",
+   "pins": [
+    "GND",
+    "SCL",
+    "SDA",
+    "VCC"
+   ]
+  },
+  "epaper-1in54-bw": {
+   "tag": "velxio-epaper",
+   "pins": [
+    "BUSY",
+    "CS",
+    "DC",
+    "GND",
+    "RST",
+    "SCK",
+    "SDI",
+    "VCC"
+   ]
+  },
+  "epaper-2in13-bw": {
+   "tag": "velxio-epaper",
+   "pins": [
+    "BUSY",
+    "CS",
+    "DC",
+    "GND",
+    "RST",
+    "SCK",
+    "SDI",
+    "VCC"
+   ]
+  },
+  "epaper-2in13-bwr": {
+   "tag": "velxio-epaper",
+   "pins": [
+    "BUSY",
+    "CS",
+    "DC",
+    "GND",
+    "RST",
+    "SCK",
+    "SDI",
+    "VCC"
+   ]
+  },
+  "epaper-2in9-bw": {
+   "tag": "velxio-epaper",
+   "pins": [
+    "BUSY",
+    "CS",
+    "DC",
+    "GND",
+    "RST",
+    "SCK",
+    "SDI",
+    "VCC"
+   ]
+  },
+  "epaper-2in9-bwr": {
+   "tag": "velxio-epaper",
+   "pins": [
+    "BUSY",
+    "CS",
+    "DC",
+    "GND",
+    "RST",
+    "SCK",
+    "SDI",
+    "VCC"
+   ]
+  },
+  "epaper-4in2-bw": {
+   "tag": "velxio-epaper",
+   "pins": [
+    "BUSY",
+    "CS",
+    "DC",
+    "GND",
+    "RST",
+    "SCK",
+    "SDI",
+    "VCC"
+   ]
+  },
+  "epaper-5in65-7c": {
+   "tag": "velxio-epaper",
+   "pins": [
+    "BUSY",
+    "CS",
+    "DC",
+    "GND",
+    "RST",
+    "SCK",
+    "SDI",
+    "VCC"
+   ]
+  },
+  "epaper-7in5-bw": {
+   "tag": "velxio-epaper",
+   "pins": [
+    "BUSY",
+    "CS",
+    "DC",
+    "GND",
+    "RST",
+    "SCK",
+    "SDI",
+    "VCC"
+   ]
+  },
+  "esp32-devkit-v1": {
+   "tag": "wokwi-esp32-devkit-v1",
+   "pins": [
+    "3V3",
+    "D12",
+    "D13",
+    "D14",
+    "D15",
+    "D18",
+    "D19",
+    "D2",
+    "D21",
+    "D22",
+    "D23",
+    "D25",
+    "D26",
+    "D27",
+    "D32",
+    "D33",
+    "D34",
+    "D35",
+    "D4",
+    "D5",
+    "EN",
+    "GND.1",
+    "GND.2",
+    "RX0",
+    "RX2",
+    "TX0",
+    "TX2",
+    "VIN",
+    "VN",
+    "VP"
+   ]
+  },
+  "flame-sensor": {
+   "tag": "wokwi-flame-sensor",
+   "pins": [
+    "AOUT",
+    "DOUT",
+    "GND",
+    "VCC"
+   ]
+  },
+  "flip-flop-d": {
+   "tag": "velxio-flip-flop-d",
+   "pins": [
+    "CLK",
+    "D",
+    "Q",
+    "Qbar"
+   ]
+  },
+  "flip-flop-jk": {
+   "tag": "velxio-flip-flop-jk",
+   "pins": [
+    "CLK",
+    "J",
+    "K",
+    "Q",
+    "Qbar"
+   ]
+  },
+  "flip-flop-t": {
+   "tag": "velxio-flip-flop-t",
+   "pins": [
+    "CLK",
+    "Q",
+    "Qbar",
+    "T"
+   ]
+  },
+  "franzininho": {
+   "tag": "wokwi-franzininho",
+   "pins": [
+    "GND.1",
+    "GND.2",
+    "PB0",
+    "PB1",
+    "PB2",
+    "PB3",
+    "PB4",
+    "PB5",
+    "VCC.1",
+    "VCC.2",
+    "VIN"
+   ]
+  },
+  "gas-sensor": {
+   "tag": "wokwi-gas-sensor",
+   "pins": [
+    "AOUT",
+    "DOUT",
+    "GND",
+    "VCC"
+   ]
+  },
+  "gps-neo6m": {
+   "tag": "velxio-gps-neo6m",
+   "pins": [
+    "GND",
+    "RX",
+    "TX",
+    "VCC"
+   ]
+  },
+  "hc-sr04": {
+   "tag": "wokwi-hc-sr04",
+   "pins": [
+    "ECHO",
+    "GND",
+    "TRIG",
+    "VCC"
+   ]
+  },
+  "heart-beat-sensor": {
+   "tag": "wokwi-heart-beat-sensor",
+   "pins": [
+    "GND",
+    "OUT",
+    "VCC"
+   ]
+  },
+  "hx711": {
+   "tag": "wokwi-hx711",
+   "pins": [
+    "DT",
+    "GND",
+    "SCK",
+    "VCC"
+   ]
+  },
+  "ic-74hc00": {
+   "tag": "wokwi-ic-74hc00",
+   "pins": [
+    "1A",
+    "1B",
+    "1Y",
+    "2A",
+    "2B",
+    "2Y",
+    "3A",
+    "3B",
+    "3Y",
+    "4A",
+    "4B",
+    "4Y",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ic-74hc02": {
+   "tag": "wokwi-ic-74hc02",
+   "pins": [
+    "1A",
+    "1B",
+    "1Y",
+    "2A",
+    "2B",
+    "2Y",
+    "3A",
+    "3B",
+    "3Y",
+    "4A",
+    "4B",
+    "4Y",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ic-74hc04": {
+   "tag": "wokwi-ic-74hc04",
+   "pins": [
+    "1A",
+    "1Y",
+    "2A",
+    "2Y",
+    "3A",
+    "3Y",
+    "4A",
+    "4Y",
+    "5A",
+    "5Y",
+    "6A",
+    "6Y",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ic-74hc08": {
+   "tag": "wokwi-ic-74hc08",
+   "pins": [
+    "1A",
+    "1B",
+    "1Y",
+    "2A",
+    "2B",
+    "2Y",
+    "3A",
+    "3B",
+    "3Y",
+    "4A",
+    "4B",
+    "4Y",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ic-74hc14": {
+   "tag": "wokwi-ic-74hc14",
+   "pins": [
+    "1A",
+    "1Y",
+    "2A",
+    "2Y",
+    "3A",
+    "3Y",
+    "4A",
+    "4Y",
+    "5A",
+    "5Y",
+    "6A",
+    "6Y",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ic-74hc32": {
+   "tag": "wokwi-ic-74hc32",
+   "pins": [
+    "1A",
+    "1B",
+    "1Y",
+    "2A",
+    "2B",
+    "2Y",
+    "3A",
+    "3B",
+    "3Y",
+    "4A",
+    "4B",
+    "4Y",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ic-74hc86": {
+   "tag": "wokwi-ic-74hc86",
+   "pins": [
+    "1A",
+    "1B",
+    "1Y",
+    "2A",
+    "2B",
+    "2Y",
+    "3A",
+    "3B",
+    "3Y",
+    "4A",
+    "4B",
+    "4Y",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ili9341": {
+   "tag": "wokwi-ili9341",
+   "pins": [
+    "CS",
+    "D/C",
+    "GND",
+    "LED",
+    "MISO",
+    "MOSI",
+    "RST",
+    "SCK",
+    "VCC"
+   ]
+  },
+  "ind-100u": {
+   "tag": "wokwi-inductor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "ind-10m": {
+   "tag": "wokwi-inductor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "ind-1m": {
+   "tag": "wokwi-inductor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "inductor": {
+   "tag": "wokwi-inductor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "ir-receiver": {
+   "tag": "wokwi-ir-receiver",
+   "pins": [
+    "DAT",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ir-remote": {
+   "tag": "wokwi-ir-remote",
+   "pins": []
+  },
+  "junction": {
+   "tag": "velxio-junction",
+   "pins": [
+    "J"
+   ]
+  },
+  "ks2e-m-dc5": {
+   "tag": "wokwi-ks2e-m-dc5",
+   "pins": [
+    "COIL1",
+    "COIL2",
+    "NC1",
+    "NC2",
+    "NO1",
+    "NO2",
+    "P1",
+    "P2"
+   ]
+  },
+  "ky-040": {
+   "tag": "wokwi-ky-040",
+   "pins": [
+    "CLK",
+    "DT",
+    "GND",
+    "SW",
+    "VCC"
+   ]
+  },
+  "lcd1602": {
+   "tag": "wokwi-lcd1602",
+   "pins": [
+    "A",
+    "D0",
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "E",
+    "K",
+    "RS",
+    "RW",
+    "V0",
+    "VDD",
+    "VSS"
+   ],
+   "variants": [
+    {
+     "when": {
+      "pins": "i2c"
+     },
+     "pins": [
+      "GND",
+      "SCL",
+      "SDA",
+      "VCC"
+     ]
+    }
+   ]
+  },
+  "lcd1602-i2c": {
+   "tag": "wokwi-lcd1602",
+   "pins": [
+    "A",
+    "D0",
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "E",
+    "K",
+    "RS",
+    "RW",
+    "V0",
+    "VDD",
+    "VSS"
+   ]
+  },
+  "lcd2004": {
+   "tag": "wokwi-lcd2004",
+   "pins": [
+    "A",
+    "D0",
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "E",
+    "K",
+    "RS",
+    "RW",
+    "V0",
+    "VDD",
+    "VSS"
+   ],
+   "variants": [
+    {
+     "when": {
+      "pins": "i2c"
+     },
+     "pins": [
+      "GND",
+      "SCL",
+      "SDA",
+      "VCC"
+     ]
+    }
+   ]
+  },
+  "lcd2004-i2c": {
+   "tag": "wokwi-lcd2004",
+   "pins": [
+    "A",
+    "D0",
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "E",
+    "K",
+    "RS",
+    "RW",
+    "V0",
+    "VDD",
+    "VSS"
+   ]
+  },
+  "led": {
+   "tag": "wokwi-led",
+   "pins": [
+    "A",
+    "C"
+   ]
+  },
+  "led-bar-graph": {
+   "tag": "wokwi-led-bar-graph",
+   "pins": [
+    "A1",
+    "A10",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "A8",
+    "A9",
+    "C1",
+    "C10",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "C8",
+    "C9"
+   ]
+  },
+  "led-ring": {
+   "tag": "wokwi-led-ring",
+   "pins": [
+    "DIN",
+    "DOUT",
+    "GND",
+    "VCC"
+   ]
+  },
+  "logic-gate-and": {
+   "tag": "velxio-logic-and",
+   "pins": [
+    "A",
+    "B",
+    "Y"
+   ]
+  },
+  "logic-gate-and-3": {
+   "tag": "velxio-logic-and-3",
+   "pins": [
+    "A",
+    "B",
+    "C",
+    "Y"
+   ]
+  },
+  "logic-gate-and-4": {
+   "tag": "velxio-logic-and-4",
+   "pins": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "Y"
+   ]
+  },
+  "logic-gate-nand": {
+   "tag": "velxio-logic-nand",
+   "pins": [
+    "A",
+    "B",
+    "Y"
+   ]
+  },
+  "logic-gate-nand-3": {
+   "tag": "velxio-logic-nand-3",
+   "pins": [
+    "A",
+    "B",
+    "C",
+    "Y"
+   ]
+  },
+  "logic-gate-nand-4": {
+   "tag": "velxio-logic-nand-4",
+   "pins": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "Y"
+   ]
+  },
+  "logic-gate-nor": {
+   "tag": "velxio-logic-nor",
+   "pins": [
+    "A",
+    "B",
+    "Y"
+   ]
+  },
+  "logic-gate-nor-3": {
+   "tag": "velxio-logic-nor-3",
+   "pins": [
+    "A",
+    "B",
+    "C",
+    "Y"
+   ]
+  },
+  "logic-gate-nor-4": {
+   "tag": "velxio-logic-nor-4",
+   "pins": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "Y"
+   ]
+  },
+  "logic-gate-not": {
+   "tag": "velxio-logic-not",
+   "pins": [
+    "A",
+    "Y"
+   ]
+  },
+  "logic-gate-or": {
+   "tag": "velxio-logic-or",
+   "pins": [
+    "A",
+    "B",
+    "Y"
+   ]
+  },
+  "logic-gate-or-3": {
+   "tag": "velxio-logic-or-3",
+   "pins": [
+    "A",
+    "B",
+    "C",
+    "Y"
+   ]
+  },
+  "logic-gate-or-4": {
+   "tag": "velxio-logic-or-4",
+   "pins": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "Y"
+   ]
+  },
+  "logic-gate-xnor": {
+   "tag": "velxio-logic-xnor",
+   "pins": [
+    "A",
+    "B",
+    "Y"
+   ]
+  },
+  "logic-gate-xor": {
+   "tag": "velxio-logic-xor",
+   "pins": [
+    "A",
+    "B",
+    "Y"
+   ]
+  },
+  "membrane-keypad": {
+   "tag": "wokwi-membrane-keypad",
+   "pins": [
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "R1",
+    "R2",
+    "R3",
+    "R4"
+   ]
+  },
+  "microsd-card": {
+   "tag": "wokwi-microsd-card",
+   "pins": [
+    "CD",
+    "CS",
+    "DI",
+    "DO",
+    "GND",
+    "SCK",
+    "VCC"
+   ]
+  },
+  "mosfet-2n7000": {
+   "tag": "wokwi-mosfet-2n7000",
+   "pins": [
+    "D",
+    "G",
+    "S"
+   ]
+  },
+  "mosfet-fqp27p06": {
+   "tag": "wokwi-mosfet-fqp27p06",
+   "pins": [
+    "D",
+    "G",
+    "S"
+   ]
+  },
+  "mosfet-irf540": {
+   "tag": "wokwi-mosfet-irf540",
+   "pins": [
+    "D",
+    "G",
+    "S"
+   ]
+  },
+  "mosfet-irf9540": {
+   "tag": "wokwi-mosfet-irf9540",
+   "pins": [
+    "D",
+    "G",
+    "S"
+   ]
+  },
+  "motor-driver-l293d": {
+   "tag": "velxio-motor-driver-l293d",
+   "pins": [
+    "EN1",
+    "EN2",
+    "GND.1",
+    "GND.2",
+    "GND.3",
+    "GND.4",
+    "IN1",
+    "IN2",
+    "IN3",
+    "IN4",
+    "OUT1",
+    "OUT2",
+    "OUT3",
+    "OUT4",
+    "VCC1",
+    "VCC2"
+   ]
+  },
+  "mpu6050": {
+   "tag": "wokwi-mpu6050",
+   "pins": [
+    "AD0",
+    "GND",
+    "INT",
+    "SCL",
+    "SDA",
+    "VCC",
+    "XCL",
+    "XDA"
+   ]
+  },
+  "nano-rp2040-connect": {
+   "tag": "wokwi-nano-rp2040-connect",
+   "pins": [
+    "3.3V",
+    "5V",
+    "A0",
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "AREF",
+    "D10",
+    "D11",
+    "D12",
+    "D13",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "D8",
+    "D9",
+    "GND.1",
+    "GND.2",
+    "RESET",
+    "RESET.2",
+    "RX",
+    "TX",
+    "VIN"
+   ]
+  },
+  "neopixel": {
+   "tag": "wokwi-neopixel",
+   "pins": [
+    "DIN",
+    "DOUT",
+    "VDD",
+    "VSS"
+   ]
+  },
+  "neopixel-matrix": {
+   "tag": "wokwi-neopixel-matrix",
+   "pins": [
+    "DIN",
+    "DOUT",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ntc-temperature-sensor": {
+   "tag": "wokwi-ntc-temperature-sensor",
+   "pins": [
+    "GND",
+    "OUT",
+    "VCC"
+   ]
+  },
+  "opamp-ideal": {
+   "tag": "wokwi-opamp-ideal",
+   "pins": [
+    "IN+",
+    "IN-",
+    "OUT"
+   ]
+  },
+  "opamp-lm324": {
+   "tag": "wokwi-opamp-lm324",
+   "pins": [
+    "IN+",
+    "IN-",
+    "OUT"
+   ]
+  },
+  "opamp-lm358": {
+   "tag": "wokwi-opamp-lm358",
+   "pins": [
+    "IN+",
+    "IN-",
+    "OUT"
+   ]
+  },
+  "opamp-lm741": {
+   "tag": "wokwi-opamp-lm741",
+   "pins": [
+    "IN+",
+    "IN-",
+    "OUT"
+   ]
+  },
+  "opamp-tl072": {
+   "tag": "wokwi-opamp-tl072",
+   "pins": [
+    "IN+",
+    "IN-",
+    "OUT"
+   ]
+  },
+  "opto-4n25": {
+   "tag": "velxio-opto-4n25",
+   "pins": [
+    "AN",
+    "CAT",
+    "COL",
+    "EMIT"
+   ]
+  },
+  "opto-pc817": {
+   "tag": "velxio-opto-pc817",
+   "pins": [
+    "AN",
+    "CAT",
+    "COL",
+    "EMIT"
+   ]
+  },
+  "photodiode": {
+   "tag": "wokwi-photodiode",
+   "pins": [
+    "A",
+    "C"
+   ]
+  },
+  "photoresistor-sensor": {
+   "tag": "wokwi-photoresistor-sensor",
+   "pins": [
+    "AO",
+    "DO",
+    "GND",
+    "VCC"
+   ]
+  },
+  "pir-motion-sensor": {
+   "tag": "wokwi-pir-motion-sensor",
+   "pins": [
+    "GND",
+    "OUT",
+    "VCC"
+   ]
+  },
+  "potentiometer": {
+   "tag": "wokwi-potentiometer",
+   "pins": [
+    "GND",
+    "SIG",
+    "VCC"
+   ]
+  },
+  "power-supply": {
+   "tag": "wokwi-signal-generator",
+   "pins": [
+    "GND",
+    "SIG"
+   ]
+  },
+  "pushbutton": {
+   "tag": "wokwi-pushbutton",
+   "pins": [
+    "1.l",
+    "1.r",
+    "2.l",
+    "2.r"
+   ]
+  },
+  "pushbutton-6mm": {
+   "tag": "wokwi-pushbutton-6mm",
+   "pins": [
+    "1.l",
+    "1.r",
+    "2.l",
+    "2.r"
+   ]
+  },
+  "reg-7805": {
+   "tag": "wokwi-reg-7805",
+   "pins": [
+    "GND",
+    "VIN",
+    "VOUT"
+   ]
+  },
+  "reg-7812": {
+   "tag": "wokwi-reg-7812",
+   "pins": [
+    "GND",
+    "VIN",
+    "VOUT"
+   ]
+  },
+  "reg-7905": {
+   "tag": "wokwi-reg-7905",
+   "pins": [
+    "GND",
+    "VIN",
+    "VOUT"
+   ]
+  },
+  "reg-lm317": {
+   "tag": "wokwi-reg-lm317",
+   "pins": [
+    "ADJ",
+    "VIN",
+    "VOUT"
+   ]
+  },
+  "relay": {
+   "tag": "velxio-relay",
+   "pins": [
+    "COIL+",
+    "COIL-",
+    "COM",
+    "NC",
+    "NO"
+   ]
+  },
+  "resistor": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-100k": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-10k": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-1k": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-1m": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-220": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-22k": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-2k2": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-330": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-470": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-47k": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "resistor-4k7": {
+   "tag": "wokwi-resistor",
+   "pins": [
+    "1",
+    "2"
+   ]
+  },
+  "rgb-led": {
+   "tag": "wokwi-rgb-led",
+   "pins": [
+    "B",
+    "COM",
+    "G",
+    "R"
+   ]
+  },
+  "rotary-dialer": {
+   "tag": "wokwi-rotary-dialer",
+   "pins": [
+    "DIAL",
+    "GND",
+    "PULSE"
+   ]
+  },
+  "servo": {
+   "tag": "wokwi-servo",
+   "pins": [
+    "GND",
+    "PWM",
+    "V+"
+   ]
+  },
+  "signal-generator": {
+   "tag": "wokwi-signal-generator",
+   "pins": [
+    "GND",
+    "SIG"
+   ]
+  },
+  "slide-potentiometer": {
+   "tag": "wokwi-slide-potentiometer",
+   "pins": [
+    "GND",
+    "SIG",
+    "VCC"
+   ]
+  },
+  "slide-switch": {
+   "tag": "wokwi-slide-switch",
+   "pins": [
+    "1",
+    "2",
+    "3"
+   ]
+  },
+  "small-sound-sensor": {
+   "tag": "wokwi-small-sound-sensor",
+   "pins": [
+    "AOUT",
+    "DOUT",
+    "GND",
+    "VCC"
+   ]
+  },
+  "ssd1306": {
+   "tag": "wokwi-ssd1306",
+   "pins": [
+    "3V3",
+    "CLK",
+    "CS",
+    "DATA",
+    "DC",
+    "GND",
+    "RST",
+    "VIN"
+   ]
+  },
+  "ssd1306-i2c-4pin": {
+   "tag": "velxio-ssd1306-i2c-4pin",
+   "pins": [
+    "GND",
+    "SCL",
+    "SDA",
+    "VCC"
+   ]
+  },
+  "stepper-motor": {
+   "tag": "wokwi-stepper-motor",
+   "pins": [
+    "A+",
+    "A-",
+    "B+",
+    "B-"
+   ]
+  },
+  "tilt-switch": {
+   "tag": "wokwi-tilt-switch",
+   "pins": [
+    "GND",
+    "OUT",
+    "VCC"
+   ]
+  },
+  "zener-1n4733": {
+   "tag": "wokwi-zener-1n4733",
+   "pins": [
+    "A",
+    "C"
+   ]
+  }
+ }
+}

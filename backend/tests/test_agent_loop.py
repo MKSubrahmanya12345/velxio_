@@ -76,22 +76,20 @@ async def test_tool_budget_is_enforced(monkeypatch):
     monkeypatch.setattr(service.settings, "AGENT_MAX_TOOL_ROUNDS", 1)
     calls = []
 
-    def tool_proposal():
-        return Proposal(summary="checking", tool_calls=[ToolCall(tool="check_design")])
-
     async def llm(messages, spec=None):
         calls.append(messages)
-        if len(calls) <= 2:
-            return tool_proposal()
-        return Proposal(summary="Blink", patch=blink_patch())
+        return Proposal(summary="checking", tool_calls=[ToolCall(tool="check_design")])
 
     monkeypatch.setattr(service, "propose", llm)
     monkeypatch.setattr(service, "compile_project", AsyncMock(return_value=compile_ok()))
     events = await collect(AgentRequest(prompt="blink", project=Project()))
-    # Bounded: one executed tool round; the second tool request finds the budget
-    # empty and ends the run as an answer instead of looping forever.
-    assert len(calls) == 2
+    # Bounded: one executed tool round, then a single nudge that the budget is
+    # gone, and a model that keeps asking for tools ends the run as an answer
+    # instead of looping (or executing anything else).
+    assert len(calls) == 3
     assert "budget is exhausted" in calls[1][-1]["content"]
+    assert "budget is exhausted" in calls[2][-1]["content"]
+    assert len([e for e in events if e["type"] == "tools"]) == 1
     assert events[-1] == {**events[-1], "type": "answer", "summary": "checking",
                           "run_id": events[-1]["run_id"]}
 

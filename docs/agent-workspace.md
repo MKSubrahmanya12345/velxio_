@@ -1,6 +1,6 @@
-# Circuit agent workspace (phases 1 and 2)
+# Circuit agent workspace
 
-The editor now has an OSS, VS Code-style **Chat / Checkpoints** sidebar. The agent
+The editor has an OSS, VS Code-style **Chat / Checkpoints** sidebar. The agent
 can create circuits and edit the current workspace through conversation. It is
 **opt-in**; without model configuration the normal editor still works, and the
 sidebar shows setup instructions. No canned circuit generator is used in production.
@@ -8,18 +8,60 @@ sidebar shows setup instructions. No canned circuit generator is used in product
 ## Supported scope
 
 - One **Arduino Uno**, Arduino C++, one `.ino` and optional flat `.h/.c/.cpp` files.
-- LED, resistor, pushbutton, potentiometer, buzzer, servo (up to 40 parts / 100 wires).
-  Servos must signal on a PWM pin (3, 5, 6, 9, 10, 11); `Servo.h` ships with the
-  arduino:avr core and is allowlisted.
-- Arduino core APIs only; no automatic third-party library installation.
+- **The whole canvas catalog**: every one of the 157 components in
+  `frontend/public/components-metadata.json` (148 of them placeable — boards,
+  breadboards and junctions are the board/wiring layer, not parts) up to 40 parts
+  and 100 wires per project. A part the canvas can draw is a part the agent can
+  place, wire, set properties on and reason about: pins, power rails, buses,
+  series/gate resistors, required drivers and addressable-bus clashes all come
+  from the catalog.
+- **The catalog is generated, not hand-written.** `scripts/generate-agent-catalog.mjs`
+  merges three sources — the component metadata (ids, tags, properties, defaults),
+  `scripts/agent-pins.json` (pin names measured from the live custom elements) and
+  `scripts/agent-part-rules.json` (the per-family wiring rules) — into one file
+  copied verbatim to `backend/app/agent/catalog.json` and `frontend/src/agent/catalog.json`.
+  Adding a component to the canvas and re-running the generator adds it to the
+  agent, the validator, the MCP surface and the browser schema at once; the
+  frontend tests re-measure the live elements and fail if a pin name drifts.
+- Arduino core APIs and the libraries the catalog's own parts need (for example
+  `Servo.h`, `Wire.h`, `LiquidCrystal_I2C.h`, `Adafruit_NeoPixel.h`); no automatic
+  third-party library installation.
 - Automatic component placement, pin-level wiring, firmware generation, compilation,
   bounded validation/compiler repair, electrical pre-flight, simulation launch, and
   **live behavioural verification** of the agent's own declared expectations.
 - Follow-up edits read **live code and wiring**, including manual edits.
 - Explanations and clarification responses do not mutate the project.
 
-Unsupported boards/components already in a project are rejected rather than removed
-or silently converted. Start a new Uno project to use the agent with those projects.
+Boards other than the Arduino Uno are still out of scope (the compiler, emulator and
+pin analysis are AVR-Uno specific): a project already on another board is rejected
+rather than silently converted. Start a new Uno project to use the agent with it.
+
+## The agent loop
+
+The loop is deliberately not "propose once, then repair". A model that can only
+write a patch and wait for the compiler is guessing; this one works the problem:
+
+1. **Research rounds** (`AGENT_MAX_TOOL_ROUNDS`, default 5) — read-only tools:
+   `search_catalog` (find a part by description), `component_info` (exact pins,
+   properties, wiring notes), `board_pinout`, `netlist` (what is connected to
+   what right now), `read_file`/`list_files`, `check_design` (static analysis of
+   the current project), `library_api`/`search_libraries`. Results are appended
+   to the conversation and the model is asked again; nothing is applied.
+2. **Draft rounds** (`AGENT_MAX_DRAFT_ROUNDS`, default 4) — the model passes a
+   candidate patch *inline* to `draft_validate` (full schema + electrical +
+   static analysis), `draft_compile` (the real `arduino-cli` build) and
+   `draft_simulate` (the real AVR emulator, with the declared interactions
+   translated into electrical stimuli, returning per-pin transitions with
+   simulated timestamps, serial output and the stimulus actually delivered).
+   Nothing is written to the workspace, and the model is expected to iterate
+   until the observation matches its claim.
+3. **Commit** — only then does it return the response: plan, summary, target
+   patch and `expectations`. The server-side validator, the compiler and the
+   browser verification act as the same deterministic gates as before.
+
+Both budgets are separate because research is a catalog lookup and drafting is a
+compile plus a simulation. A model that runs out simply gets one final "return the
+response now" message instead of another loop.
 
 ## Setup
 
@@ -49,7 +91,8 @@ AGENT_MODEL=openai/gpt-oss-120b
 AGENT_ACCESS_TOKEN=choose-a-long-random-private-token
 # Optional loop bounds / resilience:
 # AGENT_MAX_ATTEMPTS=3            repair attempts (proposal -> validate/compile)
-# AGENT_MAX_TOOL_ROUNDS=3        read-only tool rounds before a patch is required
+# AGENT_MAX_TOOL_ROUNDS=5        research rounds before a patch is required
+# AGENT_MAX_DRAFT_ROUNDS=4       draft test rounds (compile/simulate a candidate)
 # AGENT_PROVIDER_TIMEOUT_S=60    per provider call
 # AGENT_PROVIDER_RETRIES=2       retries on 429/5xx/transport errors (backoff + jitter)
 # AGENT_ALLOW_LIBRARY_SEARCH=false  live Arduino library search from the agent
@@ -129,18 +172,31 @@ Docker Compose already loads `backend/.env`; restart/rebuild after changing sett
 2. Send the supported design plus recent conversation to the backend. Credential-shaped
    assignments (api key/password/token/bearer) are redacted from source, history and the
    prompt before anything leaves the server.
-3. The model may first request **read-only tools** (`read_file`, `list_files`,
-   `board_pinout`, `component_info`, `check_design`, `library_api`,
-   `search_libraries` — the last two optional/off by default). Tool rounds never apply
-   a patch and are bounded by `AGENT_MAX_TOOL_ROUNDS` (default 3).
+3. The model works in **tool rounds** (see *The agent loop* above): catalog and
+   project research (`read_file`, `list_files`, `board_pinout`, `component_info`,
+   `search_catalog`, `netlist`, `check_design`, `library_api`, `search_libraries`)
+   and, once it has a draft, `draft_validate` / `draft_compile` / `draft_simulate`
+   — which build the candidate inline, run the real validator, compiler and
+   emulator on it and hand the observations back. Tool rounds never apply a
+   patch; they are bounded by `AGENT_MAX_TOOL_ROUNDS` (default 5) and
+   `AGENT_MAX_DRAFT_ROUNDS` (default 4).
 4. The model returns a short plan, summary, **targeted patch** (upsert/remove by
    ID or filename), and **`expectations`** — falsifiable behaviour checks: pin
-   transitions/levels with periods, serial regexes, and interactions (press a button
-   at t, set a potentiometer value). Unmentioned objects/files are retained deterministically.
-5. Validation runs `apply_patch`: schema strictness, catalog pins, unique IDs, the
-   **static firmware/circuit analysis** (firmware pins vs wiring, analogWrite on PWM
-   pins, analogRead on ADC pins, GPIO-to-rail shorts, bridged GPIOs, bridged button
-   contacts, shorted LEDs/resistors), then rail shorts and LED series resistors, then
+   transitions/levels with periods, serial regexes, and interactions. An
+   interaction is one of `press` (a momentary switch), `pot` (a potentiometer or
+   joystick axis), `switch` (a toggle), `rotary` (an encoder or dial) or
+   `stimulus` (a sensor model value such as `temperature`, `lux`, `distance`,
+   `lat`/`lng` — the same knobs the Sensor panel exposes). Unmentioned
+   objects/files are retained deterministically.
+5. Validation runs `apply_patch`: schema strictness, catalog pins (per-instance
+   variants included: `digits=4`, `pins=i2c`), unique IDs, the **catalog-driven
+   static analysis** — firmware pins vs wiring, analogWrite on PWM pins,
+   analogRead on ADC pins, GPIO-to-rail shorts, bridged GPIOs, bridged switch
+   contacts, a part shorted across its own terminals, a supply output wired to a
+   GPIO, a required power/ground connection missing, a signal on a pin that
+   cannot carry it, I2C/SPI bus pinout mismatches and address clashes, missing
+   series resistors (LEDs, opto inputs, 7-segment/bar-graph channels), missing
+   gate resistors (transistors, MOSFETs) and coils wired straight to a pin — then
    include allowlisting. Errors name the fix and drive a repair.
 6. Compile for `arduino:avr:uno`. Validation/compiler diagnostics drive repairs,
    with **three proposals maximum** (`AGENT_MAX_ATTEMPTS`), transient provider
@@ -197,12 +253,17 @@ is instructed to the model and protected by checkpoints, not a semantic code pro
 2. “Add a button that pauses blinking while held. Keep the existing layout.”
 3. “Sweep a servo from 0 to 180 degrees.” — it must pick a PWM pin, wire power,
    and declare expectations the live simulation can check.
+3b. “Show the temperature from a DHT22 and turn on an LED above 30 °C.” — it must
+   look the part up in the catalog, wire the sensor, and declare a `stimulus`
+   interaction (`temperature`) that the browser can drive.
+3c. “Drive a relay from pin 8.” — the analysis must refuse a coil on a GPIO and
+   the loop must add a transistor (or driver) with a base/gate resistor.
 4. Manually add a comment in `sketch.ino`, then ask “Make the LED green and keep my comment.”
 5. “Explain the wiring and how to test this.” (No project mutation.)
 6. Undo/redo through Checkpoints. Move a part, then try Undo: it must refuse to discard
    the manual change. Explicit Restore should ask first.
 7. Send another request and immediately edit the code: the stale result must be blocked.
-8. Ask for ESP32 / an unsupported sensor: it should explain the scope, not fake a part.
+8. Ask for ESP32 / another board: it should explain the scope, not fake a part.
 9. Stop a request; verify no late edits arrive.
 10. Ask for something that cannot work (servo on pin 2): validation must reject it and
     the repair loop must fix it to a PWM pin, not report success.
@@ -212,7 +273,9 @@ is instructed to the model and protected by checkpoints, not a semantic code pro
 ```sh
 PYTHONPATH=backend .venv/bin/pytest backend/tests
 cd frontend
-npx vitest run src/__tests__/agent-workspace.test.ts src/__tests__/agent-expectations.test.ts src/__tests__/agent-runtime-repair.test.ts
+npx vitest run src/__tests__/agent-workspace.test.ts src/__tests__/agent-expectations.test.ts \
+  src/__tests__/agent-runtime-repair.test.ts src/__tests__/agent-catalog.test.ts \
+  src/__tests__/agent-pins.test.ts
 npx eslint src/agent src/components/agent src/__tests__/agent-workspace.test.ts
 npx vite build
 ```
@@ -231,6 +294,12 @@ The browser test intercepts **model/compiler HTTP results** with fixture data bu
 contextual editing, manual-comment preservation, undo/redo, conflict protection and
 mobile layout. `CHROMIUM_PATH`, `AGENT_TEST_URL`, and `AGENT_SCREENSHOT_DIR` are optional.
 It requires Vite's source modules, not a production-only server.
+
+`agent-catalog.test.ts` is the arbiter of the generator's claims (every catalog
+entry has a live element, the simulation coverage matches the live registries, a
+runtime property is never editable, a stimulus key exists in the Sensor panel),
+and `agent-pins.test.ts` re-measures every custom element's `pinInfo` against the
+frozen pin map so a renamed pin cannot silently break the wire format.
 
 The agent contract tests now run in CI (`.github/workflows/backend-unit-tests.yml`
 runs `pytest test/backend/unit/ backend/tests/`). The implementation was tested

@@ -1,6 +1,23 @@
 import { z } from 'zod';
+import { PARTS, isPlaceable } from './catalog';
 
 const id = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/);
+/**
+ * Part ids the catalog knows and the agent may place.
+ *
+ * A plain string on the wire (the catalog has 157 entries and a zod enum would
+ * serialize them all into the JSON schema the model reads), refined against the
+ * generated catalog so an unknown or unplaceable part is rejected in the browser
+ * with the same rule the backend applies — before anything touches the canvas.
+ */
+const metadataId = z
+  .string()
+  .min(1)
+  .max(60)
+  .refine((value) => Object.prototype.hasOwnProperty.call(PARTS, value), {
+    message: 'Unknown component id',
+  })
+  .refine(isPlaceable, { message: 'This component cannot be placed by the agent' });
 const coord = z.number().finite().min(-5000).max(5000);
 const endpoint = z.object({ componentId: id, pinName: z.string().min(1).max(16) }).strict();
 export const projectSchema = z
@@ -11,10 +28,14 @@ export const projectSchema = z
         z
           .object({
             id,
-            metadataId: z.enum(['led', 'resistor', 'pushbutton', 'potentiometer', 'buzzer', 'servo']),
+            metadataId,
             x: coord,
             y: coord,
-            properties: z.record(z.union([z.string(), z.number().finite(), z.boolean()])),
+            properties: z
+              .record(z.union([z.string().max(80), z.number().finite(), z.boolean()]))
+              .refine((value) => Object.keys(value).length <= 12, {
+                message: 'Too many properties',
+              }),
           })
           .strict(),
       )
@@ -70,11 +91,25 @@ export const expectationsSchema = z
       .array(
         z
           .object({
-            kind: z.enum(['press', 'pot']),
+            // One shape, five kinds. The runtime checks each against the part's
+            // declared capabilities (see src/agent/catalog.ts) and the backend
+            // rejects a mismatch before the run starts.
+            kind: z.enum(['press', 'pot', 'switch', 'stimulus', 'rotary']),
             componentId: id,
-            at_ms: z.number().int().min(0).max(60000),
-            hold_ms: z.number().int().min(10).max(20000),
-            value: z.number().int().min(0).max(1023),
+            /** Which part pin the input acts on (defaults to the part's primary). */
+            pin: z.string().min(1).max(16).nullable().optional(),
+            // Optional on the wire (the model may omit what the defaults cover);
+            // the runtime applies the same defaults the backend's Interaction
+            // model does, so a short payload behaves identically everywhere.
+            at_ms: z.number().int().min(0).max(60000).optional(),
+            hold_ms: z.number().int().min(10).max(20000).optional(),
+            value: z.number().int().min(0).max(1023).optional(),
+            /** switch: closed at at_ms (true) or opened (false). */
+            closed: z.boolean().optional(),
+            /** rotary: detents to turn, positive = clockwise. */
+            delta: z.number().int().min(-40).max(40).optional(),
+            /** stimulus: sensor model values, e.g. { temperature: 24 }. */
+            values: z.record(z.number().finite()).optional(),
           })
           .strict(),
       )

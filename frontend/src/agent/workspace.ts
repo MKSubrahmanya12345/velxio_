@@ -1,20 +1,16 @@
 import { useSimulatorStore } from '../store/useSimulatorStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useProjectStore } from '../store/useProjectStore';
+import { PARTS, editableProperties, isPlaceable, runtimePropertiesFor } from './catalog';
 import { projectSchema, stableStringify, type AgentProject } from './protocol';
 
 export type Snapshot = Parameters<
   ReturnType<typeof useSimulatorStore.getState>['loadProjectState']
 >[0];
-const editable: Record<string, string[]> = {
-  led: ['color', 'label', 'flip', 'rotation'],
-  resistor: ['value', 'rotation'],
-  pushbutton: ['color', 'label', 'rotation'],
-  potentiometer: ['value', 'rotation'],
-  buzzer: ['rotation'],
-  servo: ['angle', 'horn', 'hornColor', 'rotation'],
-};
-const runtimeProperties = new Set(['state', 'pressed', 'hasSignal', 'brightness']);
+// Both lists come from the generated catalog, so a new component becomes
+// agent-editable (and its runtime state stays out of the wire format) without
+// touching this file: `runtimePropertiesFor` merges the global live-state keys
+// with the ones a specific part owns.
 
 export function scopeKey(): string {
   const project = useProjectStore.getState();
@@ -46,14 +42,15 @@ export function captureWorkspace(): Snapshot {
       ]),
     ),
     folderGroups: e.folderGroups,
-    components: s.components.map((c) => ({
-      ...c,
-      properties: Object.fromEntries(
-        Object.entries(c.properties).filter(
-          ([key]) => !runtimeProperties.has(key) && !(c.metadataId === 'led' && key === 'value'),
+    components: s.components.map((c) => {
+      const runtime = runtimePropertiesFor(c.metadataId);
+      return {
+        ...c,
+        properties: Object.fromEntries(
+          Object.entries(c.properties).filter(([key]) => !runtime.has(key)),
         ),
-      ),
-    })),
+      };
+    }),
     wires: s.wires,
     activeBoardId: s.activeBoardId,
   });
@@ -97,9 +94,13 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
       'This project uses a custom file group, which the agent cannot safely edit yet.',
     );
   for (const part of snapshot.components) {
-    if (!editable[part.metadataId])
+    if (!PARTS[part.metadataId])
       throw new Error(
-        `The agent does not support ${part.metadataId} yet. Your project is unchanged.`,
+        `The agent does not know the component ${part.metadataId}. Your project is unchanged.`,
+      );
+    if (!isPlaceable(part.metadataId))
+      throw new Error(
+        `${PARTS[part.metadataId].name} cannot be placed by the agent. Your project is unchanged.`,
       );
   }
   const data = projectSchema.safeParse({
@@ -107,7 +108,9 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
     components: snapshot.components.map((c) => ({
       ...c,
       properties: Object.fromEntries(
-        Object.entries(c.properties).filter(([key]) => editable[c.metadataId].includes(key)),
+        Object.entries(c.properties).filter(([key]) =>
+          editableProperties(c.metadataId).includes(key),
+        ),
       ),
     })),
     wires: snapshot.wires.map((w) => ({
@@ -168,7 +171,7 @@ export function fromAgentProject(project: AgentProject, previous: Snapshot): Sna
           Object.entries(
             previous.components.find((old) => old.id === c.id && old.metadataId === c.metadataId)
               ?.properties ?? {},
-          ).filter(([key]) => !editable[c.metadataId].includes(key)),
+          ).filter(([key]) => !editableProperties(c.metadataId).includes(key)),
         ),
         ...c.properties,
       },

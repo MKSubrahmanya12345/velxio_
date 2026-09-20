@@ -1284,7 +1284,7 @@ export interface CanvasCommand {
 const HISTORY_MAX = 50;
 
 // ── Store interface ───────────────────────────────────────────────────────
-interface SimulatorState {
+export interface SimulatorState {
   // ── Multi-board state ───────────────────────────────────────────────────
   boards: BoardInstance[];
   activeBoardId: string | null;
