@@ -10,6 +10,12 @@ Exposes the following tools to MCP-compatible agents (e.g. Claude):
   - create_circuit        Create a new circuit definition
   - update_circuit        Merge changes into an existing circuit definition
   - generate_code_files   Generate starter Arduino code from a circuit
+  - validate_circuit      Run the in-editor agent's full validation stack
+                          (pin catalog, electrical rules, firmware/circuit
+                          coherence) over a circuit — use it BEFORE compiling
+  - simulate_firmware     Execute compiled AVR firmware headlessly and report
+                          what it actually did (pin transitions, serial) —
+                          use it AFTER compiling to verify behaviour
 
 Transport:
   - stdio  — run `python mcp_server.py` for Claude Desktop / CLI agents
@@ -18,8 +24,10 @@ Transport:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+from pathlib import Path
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
@@ -29,7 +37,10 @@ from app.mcp.wokwi import (
     generate_arduino_sketch,
     parse_wokwi_diagram,
 )
+from app.mcp.validate import validate_circuit as _validate_circuit
 from app.services.arduino_cli import ArduinoCLIService
+
+_AVR_SIM_SCRIPT = Path(__file__).with_name("avr_sim.cjs")
 
 # ---------------------------------------------------------------------------
 # Server setup
@@ -405,3 +416,125 @@ async def generate_code_files(
         "files": [{"name": f"{sketch_name}.ino", "content": sketch_content}],
         "board_fqbn": board_fqbn,
     }
+
+
+# ---------------------------------------------------------------------------
+# validate_circuit
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def validate_circuit(
+    circuit: Annotated[
+        dict[str, Any],
+        "Velxio circuit object (as from create_circuit / import_wokwi_json). "
+        "Only the Arduino Uno catalog (led, resistor, pushbutton, potentiometer, "
+        "buzzer) is fully checkable.",
+    ],
+    files: Annotated[
+        list[dict[str, str]] | None,
+        "Optional sketch files ({'name','content'}) — when given, firmware/circuit "
+        "coherence and include rules are checked too (strongly recommended).",
+    ] = None,
+) -> dict[str, Any]:
+    """
+    Validate a circuit with the exact rules the Velxio in-editor agent enforces.
+
+    Checks: pin names against the catalog, GPIO shorted to a rail, bridged
+    GPIOs, LED series resistor, firmware pins vs wiring, analogWrite/analogRead
+    pin capabilities, shorted buttons/LEDs/resistors, include allowlist.
+
+    ALWAYS call this before compile_project: a circuit that fails here compiles
+    fine and still does nothing (or burns out). valid=false lists the reasons;
+    fix them and validate again.
+    """
+    if not isinstance(circuit, dict):
+        return {"error": "circuit must be a JSON object."}
+    return _validate_circuit(circuit, files)
+
+
+# ---------------------------------------------------------------------------
+# simulate_firmware
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def simulate_firmware(
+    hex_content: Annotated[
+        str,
+        "Intel HEX string — exactly the hex_content returned by compile_project.",
+    ],
+    observe_ms: Annotated[
+        int,
+        "How long (simulated milliseconds, 100..10000) to run the firmware.",
+    ] = 2000,
+    watch_pins: Annotated[
+        list[str] | None,
+        "Arduino pin names to report, e.g. ['13', 'A0']. Defaults to every pin that changed.",
+    ] = None,
+    analog: Annotated[
+        dict[str, float] | None,
+        "Analog stimulus in volts, keyed by ADC channel: {'0': 2.5} drives A0 to 2.5V "
+        "(as if a potentiometer wiper sat there).",
+    ] = None,
+) -> dict[str, Any]:
+    """
+    Execute compiled AVR firmware in a headless emulator and OBSERVE it.
+
+    Reports, per pin: transition count, final level, first/last change time and
+    the median period between changes; plus up to 4000 chars of serial output.
+    This is how you VERIFY behaviour instead of assuming it:
+
+      - "does the LED blink?" -> watch pin 13, expect many transitions and a
+        median_period_ms near the sketch's delay
+      - "does it react to input?" -> pass analog {'0': 2.5} for a pot on A0
+      - "does it print?" -> check the returned serial text
+
+    Returns { supported, success, simulated_ms, pins, serial }. supported=false
+    means the server has no Node.js/avr8js runtime — say so and stop simulating.
+    """
+    if not isinstance(hex_content, str) or not hex_content.strip():
+        return {"success": False, "supported": False,
+                "error": "hex_content (Intel HEX string) is required."}
+    try:
+        observe = max(100, min(int(observe_ms), 10000))
+    except (TypeError, ValueError):
+        return {"success": False, "supported": False, "error": "observe_ms must be an integer."}
+    payload = {
+        "hex": hex_content,
+        "observe_ms": observe,
+        "watch_pins": [str(p)[:4] for p in (watch_pins or [])][:24],
+        "analog": {str(k)[:3]: max(0.0, min(5.0, float(v)))
+                   for k, v in (analog or {}).items() if isinstance(v, (int, float))},
+    }
+    if not _AVR_SIM_SCRIPT.exists():
+        return {"success": False, "supported": False,
+                "error": "The simulate_firmware helper is missing from this install."}
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "node", str(_AVR_SIM_SCRIPT),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(
+                process.communicate(json.dumps(payload).encode()), timeout=60)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return {"success": False, "supported": True, "error": "Simulation timed out."}
+    except FileNotFoundError:
+        return {"success": False, "supported": False,
+                "error": "Node.js is not installed on the server; headless simulation is unavailable."}
+    if process.returncode != 0:
+        stderr = err.decode(errors="replace").strip()[:300]
+        supported = "avr8js-not-found" not in stderr
+        hint = ("" if supported
+                else " Install Node.js + avr8js (npm install avr8js; set VELXIO_AVR8JS_PATH).")
+        return {"success": False, "supported": supported,
+                "error": "Headless simulation failed." + (f" Detail: {stderr}" if stderr else "") + hint}
+    try:
+        result = json.loads(out.decode())
+    except ValueError:
+        return {"success": False, "supported": True, "error": "Simulator returned unparseable output."}
+    return result

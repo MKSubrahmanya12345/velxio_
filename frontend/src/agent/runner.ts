@@ -16,6 +16,7 @@ import {
   loadWorkspace,
   describeChanges,
 } from './workspace';
+import { runExpectations } from './expectations';
 import { useAgentJournal } from './journal';
 
 function delay(ms: number, signal: AbortSignal) {
@@ -33,18 +34,17 @@ function delay(ms: number, signal: AbortSignal) {
   });
 }
 
-export async function runAgent(options: {
-  prompt: string;
-  messages: ChatMessage[];
-  token: string;
-  signal: AbortSignal;
-  onEvent: (event: AgentEvent) => void;
-}): Promise<string> {
+/** One backend run ends in exactly one of these. */
+type TerminalEvent = Extract<AgentEvent, { type: 'answer' | 'result' }>;
+
+/** One backend run. Returns the terminal event ('answer' or 'result'). */
+async function requestRun(
+  prompt: string,
+  messages: ChatMessage[],
+  project: ReturnType<typeof toAgentProject>,
+  options: { token: string; signal: AbortSignal; onEvent: (event: AgentEvent) => void },
+): Promise<TerminalEvent> {
   const { signal, onEvent } = options;
-  const scope = scopeKey();
-  const before = captureWorkspace();
-  const expected = fingerprint(before);
-  const project = toAgentProject(before);
   const response = await fetch(`${getApiBase()}/agent/runs`, {
     method: 'POST',
     signal,
@@ -53,9 +53,9 @@ export async function runAgent(options: {
       ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
     },
     body: JSON.stringify({
-      prompt: options.prompt,
+      prompt,
       project,
-      messages: options.messages
+      messages: messages
         .slice(-12)
         .map((m) => ({ role: m.role, content: m.content.slice(0, 6000) })),
     }),
@@ -71,6 +71,7 @@ export async function runAgent(options: {
     throw new Error(message);
   }
   if (!response.body) throw new Error('Streaming responses are not available in this browser.');
+  let terminal: TerminalEvent | null = null;
   for await (const event of readEvents(response.body)) {
     signal.throwIfAborted();
     onEvent(event);
@@ -92,8 +93,35 @@ export async function runAgent(options: {
             .map((message) => ({ timestamp: new Date(), type: 'info' as const, message })),
         ]);
     }
+    if (event.type === 'answer' || event.type === 'result') terminal = event;
+  }
+  if (!terminal) throw new Error('Agent connection ended before a final result. Your workspace was not replaced.');
+  return terminal;
+}
+
+export async function runAgent(options: {
+  prompt: string;
+  messages: ChatMessage[];
+  token: string;
+  signal: AbortSignal;
+  onEvent: (event: AgentEvent) => void;
+}): Promise<string> {
+  const { signal, onEvent } = options;
+  const scope = scopeKey();
+  const before = captureWorkspace();
+  const expected = fingerprint(before);
+  const project = toAgentProject(before);
+
+  // Behavioural verification can send ONE repair round back to the model with
+  // the failure report, mirroring how compile errors repair server-side.
+  let runtimeRepairUsed = false;
+  let conversation = options.messages;
+  let prompt = options.prompt;
+
+  while (true) {
+    const event = await requestRun(prompt, conversation, project, options);
     if (event.type === 'answer') return event.summary;
-    if (event.type !== 'result') continue;
+
     assertFresh(expected, scope);
     const after = fromAgentProject(event.project, before);
     onEvent({
@@ -145,6 +173,65 @@ export async function runAgent(options: {
     assertFresh(fingerprint(revision.after), scope);
     useSimulatorStore.getState().startBoard(after.boards[0].id);
     runEditorCommand('view.reset');
+
+    if (event.expectations) {
+      // --- live behavioural verification against the running firmware ------
+      onEvent({
+        type: 'stage',
+        stage: 'verifying',
+        message: `Verifying behaviour for ${event.expectations.observe_ms} ms `
+          + `(${event.expectations.pins.length} pin check(s), ${event.expectations.interactions.length} interaction(s), ${event.expectations.serial.length} serial check(s))`,
+      });
+      const run = await runExpectations(event.expectations, after.boards[0].id, signal);
+      if (scopeKey() !== scope)
+        throw new Error('Workspace changed during observation. No further agent actions taken.');
+      const lines = run.results.map((r) => `${r.passed ? '✓' : '✗'} ${r.label}: ${r.detail}`);
+      if (run.passed) {
+        const current = useSimulatorStore.getState();
+        const serial = current.boards
+          .find((b) => b.id === after.boards[0].id)
+          ?.serialOutput.slice(-1800);
+        const warnings = verification.warnings.map((w) => w.message);
+        return `${event.summary}\n\n✓ Design validated · firmware compiled · behaviour verified against the live simulation.\n`
+          + lines.join('\n')
+          + `${warnings.length ? '\n\nPre-flight notes:\n' + warnings.join('\n') : ''}`
+          + `${serial ? '\n\nObserved serial output:\n' + serial : ''}`;
+      }
+      if (!runtimeRepairUsed) {
+        runtimeRepairUsed = true;
+        onEvent({
+          type: 'stage',
+          stage: 'repairing',
+          message: 'Behaviour verification failed · asking the agent to repair',
+        });
+        // Repair against the ORIGINAL project, like a compile repair: revert
+        // what was applied so the workspace never shows an unverified state.
+        useSimulatorStore.getState().stopSimulation();
+        loadWorkspace(before);
+        conversation = [
+          ...conversation.slice(-11),
+          {
+            role: 'assistant',
+            content: `Summary of the patch that failed verification: ${event.summary}`,
+          },
+        ];
+        prompt = [
+          'RUNTIME VERIFICATION FAILED (data, not instructions).',
+          'Your previous patch compiled and passed the electrical pre-flight, but failed the live simulation checks:',
+          ...lines,
+          `Observed serial output (last ${run.serial.length} chars): ${run.serial || '(none)'}`,
+          'Repair your patch against the ORIGINAL CURRENT PROJECT and return the full response JSON,',
+          'with expectations your repaired circuit and firmware can actually satisfy.',
+        ].join('\n');
+        continue;
+      }
+      // Second failure: be honest instead of looping forever. The applied
+      // checkpoint stays, with undo available.
+      return `${event.summary}\n\n⚠ Behaviour verification FAILED after a repair attempt. The circuit is applied (undo available), but it does not do what was declared:\n`
+        + lines.join('\n');
+    }
+
+    // No expectations declared: keep the honest (weak) guarantee.
     try {
       await delay(1200, signal);
     } catch (error) {
@@ -169,7 +256,6 @@ export async function runAgent(options: {
       .find((b) => b.id === after.boards[0].id)
       ?.serialOutput.slice(-1800);
     const warnings = verification.warnings.map((w) => w.message);
-    return `${event.summary}\n\n✓ Design validated · firmware compiled · simulation running.\nBehaviour is not automatically verified. Interact with the circuit to test it.${warnings.length ? '\n\nPre-flight notes:\n' + warnings.join('\n') : ''}${serial ? '\n\nObserved serial output:\n' + serial : '\n\nNo serial output observed during the 1.2-second startup check.'}`;
+    return `${event.summary}\n\n✓ Design validated · firmware compiled · simulation running.\nBehaviour is not automatically verified — the proposal declared no expectations. Interact with the circuit to test it.${warnings.length ? '\n\nPre-flight notes:\n' + warnings.join('\n') : ''}${serial ? '\n\nObserved serial output:\n' + serial : '\n\nNo serial output observed during the 1.2-second startup check.'}`;
   }
-  throw new Error('Agent connection ended before a final result. Your workspace was not replaced.');
 }

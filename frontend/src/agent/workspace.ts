@@ -12,6 +12,7 @@ const editable: Record<string, string[]> = {
   pushbutton: ['color', 'label', 'rotation'],
   potentiometer: ['value', 'rotation'],
   buzzer: ['rotation'],
+  servo: ['angle', 'horn', 'hornColor', 'rotation'],
 };
 const runtimeProperties = new Set(['state', 'pressed', 'hasSignal', 'brightness']);
 

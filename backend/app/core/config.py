@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     AGENT_MODEL: str = "gpt-4.1"
     AGENT_ACCESS_TOKEN: str = ""
     AGENT_ALLOW_ANONYMOUS: bool = False
+    # Agent loop bounds — repair attempts, tool rounds, provider resilience.
+    AGENT_MAX_ATTEMPTS: int = 3
+    AGENT_MAX_TOOL_ROUNDS: int = 3
+    AGENT_PROVIDER_TIMEOUT_S: float = 60.0
+    AGENT_PROVIDER_RETRIES: int = 2
+    # Live Arduino library search from the agent's search_libraries tool.
+    AGENT_ALLOW_LIBRARY_SEARCH: bool = False
 
     # CORS — used by main.py to whitelist the SPA origin during local dev
     # and to build redirect URLs from auth routes in the overlay.

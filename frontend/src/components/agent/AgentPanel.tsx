@@ -164,7 +164,12 @@ export function AgentPanel() {
         signal: abort.signal,
         onEvent: (event: AgentEvent) => {
           if (event.type === 'stage')
-            setStage(`${event.message}${event.attempt ? ` · attempt ${event.attempt}/3` : ''}`);
+            setStage(`${event.message}${event.attempt ? ` · attempt ${event.attempt}` : ''}`);
+          if (event.type === 'tools')
+            setStage(
+              `Consulted ${event.calls.map((c) => c.tool).join(', ')}`
+                + `${event.calls.some((c) => !c.ok) ? ' (some tools failed)' : ''}`,
+            );
           if (event.type === 'plan') setPlan(event.plan);
           if (event.type === 'diagnostic') setDiagnostics((v) => [...v, event.message]);
         },
