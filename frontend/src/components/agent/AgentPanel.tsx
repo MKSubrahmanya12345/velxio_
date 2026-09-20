@@ -404,17 +404,19 @@ export function AgentPanel() {
           <details>
             <summary>Server setup</summary>
             <pre>
-              AGENT_ENABLED=true{'\n'}AGENT_API_KEY=your-groq-api-key{'\n'}AGENT_MODEL=openai/gpt-oss-120b{'\n'}
+              AGENT_ENABLED=true{'\n'}AGENT_OPENCODE_BASE_URL=http://127.0.0.1:4096{'\n'}AGENT_OPENCODE_MODEL=big-pickle{'\n'}
+              AGENT_API_KEY=your-groq-api-key{'\n'}AGENT_MODEL=openai/gpt-oss-120b{'\n'}
               AGENT_GEMINI_API_KEY=your-google-ai-studio-key{'\n'}AGENT_GEMINI_MODEL=gemini-2.5-flash{'\n'}
               BEDROCK_MODEL_ID=moonshotai.kimi-k2.5{'\n'}AWS_REGION=eu-north-1{'\n'}BEDROCK_API_KEY=your-mantle-key{'\n'}
               AGENT_ACCESS_TOKEN=your-private-token
             </pre>
             <p>
-              Set these in backend/.env and restart the API. Groq and Gemini
-              both expose OpenAI-compatible endpoints; Bedrock uses native
-              Converse (or Bedrock Mantle for Kimi K2.5 — that model needs
-              BEDROCK_API_KEY). Any configured provider appears in the chat
-              dropdown.
+              Set these in backend/.env and restart the API. OpenCode (the
+              default) routes through a local `opencode serve` instance; Groq
+              and Gemini expose OpenAI-compatible endpoints; Bedrock uses
+              native Converse (or Bedrock Mantle for Kimi K2.5 — that model
+              needs BEDROCK_API_KEY). Any configured provider appears in the
+              chat dropdown.
             </p>
           </details>
         </section>

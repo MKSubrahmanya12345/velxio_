@@ -548,9 +548,81 @@ class ProviderTransientError(ProviderError):
 
 
 async def _propose_once(messages: list[dict], spec: ProviderSpec) -> Proposal:
+    if spec.kind == "opencode":
+        return await _propose_once_opencode(messages, spec)
     if spec.kind == "bedrock":
         return await _propose_once_bedrock(messages, spec)
     return await _propose_once_openai(messages, spec)
+
+
+async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec) -> Proposal:
+    """Route through a local `opencode serve` server (the TUI's own server).
+
+    The opencode v2 server has no OpenAI-compatible endpoint, so we use its
+    REST API directly: create a throwaway session, POST the whole conversation
+    as one text part, read the text parts back, then delete the session.
+    Credentials never live here; opencode proxies to the free big-pickle model
+    on Zen.
+    """
+    base_url = spec.base_url.rstrip("/")
+    labels = {"system": "Instructions", "user": "User", "assistant": "Assistant"}
+    turns = [f"<{labels.get(m.get('role', 'user'), 'User')}>\n{m.get('content', '')}\n</block>"
+             for m in messages]
+    prompt = "\n\n".join(turns)
+
+    async with httpx.AsyncClient(timeout=settings.AGENT_PROVIDER_TIMEOUT_S) as client:
+        try:
+            session_resp = await client.post(f"{base_url}/session", json={"title": "velxio-agent-propose"})
+        except httpx.HTTPError:
+            raise ProviderTransientError(
+                "OpenCode server is unreachable. Is `opencode serve` running? Retrying…") from None
+        if session_resp.status_code >= 500:
+            raise ProviderTransientError(f"OpenCode server returned HTTP {session_resp.status_code}. Retrying…")
+        if session_resp.status_code >= 400:
+            raise ProviderError(f"OpenCode server rejected the session (HTTP {session_resp.status_code}). Check `opencode serve`.")
+        try:
+            session_id = session_resp.json()["id"]
+        except (KeyError, ValueError):
+            raise ProviderError("OpenCode server returned an invalid session response") from None
+        try:
+            try:
+                msg_resp = await client.post(
+                    f"{base_url}/session/{session_id}/message",
+                    json={
+                        "parts": [{"type": "text", "text": prompt}],
+                        "model": {"providerID": "opencode", "modelID": spec.model},
+                    },
+                )
+            except httpx.HTTPError:
+                raise ProviderTransientError("OpenCode server dropped the request. Retrying…") from None
+            if msg_resp.status_code == 429 or msg_resp.status_code >= 500:
+                raise ProviderTransientError(f"OpenCode server returned HTTP {msg_resp.status_code}. Retrying…")
+            if msg_resp.status_code >= 400:
+                raise ProviderError(f"OpenCode server rejected the message (HTTP {msg_resp.status_code}). Check the server log.")
+            try:
+                payload = msg_resp.json()
+            except ValueError:
+                raise ProviderError("OpenCode server returned an invalid response") from None
+        finally:
+            try:
+                await client.delete(f"{base_url}/session/{session_id}")
+            except httpx.HTTPError:
+                pass
+
+    parts = payload.get("parts") or []
+    content = "\n".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text")
+    if not content.strip():
+        raise ProviderError("OpenCode returned an empty response. Try a different provider or check `opencode serve`.")
+    proposal = await parse_proposal_with_fix(content)
+    info = payload.get("info") or {}
+    tokens = info.get("tokens") or {}
+    if isinstance(tokens, dict):
+        input_tokens = tokens.get("input", 0) or 0
+        output_tokens = tokens.get("output", 0) or 0
+        proposal._usage = {"prompt_tokens": input_tokens,
+                           "completion_tokens": output_tokens,
+                           "total_tokens": input_tokens + output_tokens}
+    return proposal
 
 
 async def _propose_once_openai(messages: list[dict], spec: ProviderSpec) -> Proposal:
@@ -759,7 +831,7 @@ def _resolve_provider(provider_id: str) -> ProviderSpec:
 async def propose(messages: list[dict], spec: ProviderSpec | None = None) -> Proposal:
     """One provider call with bounded retry/backoff on transient failures."""
     if spec is None:
-        spec = _resolve_provider("groq")
+        spec = _resolve_provider("opencode")
     last: ProviderTransientError | None = None
     for try_index in range(settings.AGENT_PROVIDER_RETRIES + 1):
         try:

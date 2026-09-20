@@ -37,7 +37,9 @@ async def status():
     # The browser reads model names/ids only; credentials never leave the server.
     providers = [{"id": p.id, "label": p.label, "model": p.model, "configured": p.configured}
                  for p in settings.providers()]
-    default = settings.provider("groq")
+    default = settings.provider("opencode")
+    if default is None:
+        default = next((spec for spec in settings.providers() if spec.configured), None)
     return {"configured": configured(), "requires_token": bool(settings.AGENT_ACCESS_TOKEN),
             "providers": providers,
             "model": default.model if configured() else None,

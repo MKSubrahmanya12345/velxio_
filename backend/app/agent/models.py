@@ -316,7 +316,7 @@ class AgentRequest(StrictModel):
     messages: list[Message] = Field(default_factory=list, max_length=12)
     # Which server-side provider routes this run. Only ids listed in
     # Settings.providers() are accepted; the id never carries credentials.
-    provider: Literal["groq", "gemini", "bedrock"] = "groq"
+    provider: Literal["opencode", "groq", "gemini", "bedrock"] = "opencode"
 
 
 def _number(key: str, value) -> float:

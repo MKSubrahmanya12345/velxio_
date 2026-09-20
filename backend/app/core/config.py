@@ -24,6 +24,10 @@ class ProviderSpec:
 
     @property
     def configured(self) -> bool:
+        if self.kind == "opencode":
+            # Local server talks to the model for us; credentials live in
+            # opencode, not here. Ready whenever a base URL is wired up.
+            return bool(self.base_url and self.model)
         if self.kind == "bedrock":
             if not self.model:
                 return False
@@ -53,6 +57,12 @@ class Settings(BaseSettings):
     AGENT_API_KEY: str = ""
     AGENT_BASE_URL: str = "https://api.groq.com/openai/v1"
     AGENT_MODEL: str = "openai/gpt-oss-120b"
+    # OpenCode provider: talks to a local `opencode serve` instance (the same
+    # one the TUI uses), routing to the free big-pickle Zen model through the
+    # server's OpenAI-style message API. No API key is stored here — opencode
+    # holds the credentials. Point AGENT_OPENCODE_BASE_URL at the server.
+    AGENT_OPENCODE_BASE_URL: str = "http://127.0.0.1:4096"
+    AGENT_OPENCODE_MODEL: str = "big-pickle"
     # Second provider: Google Gemini through its official OpenAI-compatible
     # layer (https://ai.google.dev/gemini-api/docs/openai). Only used when the
     # API key is set; AGENT_ENABLED gates both providers.
@@ -76,7 +86,7 @@ class Settings(BaseSettings):
     BEDROCK_TEMPERATURE: float = 0.2
     BEDROCK_TOP_P: float = 0.9
     BEDROCK_TIMEOUT_MS: int = 120000
-    BEDROCK_MAX_RETRIES: int = 5
+    BEDROCK_MAX_RETRIES: int = 50
     # Agent loop bounds — repair attempts, tool rounds, provider resilience.
     AGENT_MAX_ATTEMPTS: int = 3
     # Research rounds are cheap (catalog lookups) and are what make the loop
@@ -98,6 +108,9 @@ class Settings(BaseSettings):
     def providers(self) -> list[ProviderSpec]:
         """Every provider the agent can route to, in dropdown order."""
         return [
+            ProviderSpec(id="opencode", label="OpenCode", kind="opencode",
+                         base_url=self.AGENT_OPENCODE_BASE_URL,
+                         model=self.AGENT_OPENCODE_MODEL),
             ProviderSpec(id="groq", label="Groq", base_url=self.AGENT_BASE_URL,
                          model=self.AGENT_MODEL, api_key=self.AGENT_API_KEY),
             ProviderSpec(id="gemini", label="Gemini", base_url=self.AGENT_GEMINI_BASE_URL,

@@ -133,7 +133,7 @@ def _artifact_load(key: str) -> dict | None:
     try:
         if not path.is_file():
             return None
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return None
         # Age from when it was BUILT, not from the last read: touch-on-read

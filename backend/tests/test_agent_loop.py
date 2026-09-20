@@ -168,7 +168,7 @@ async def test_unconfigured_provider_is_a_graceful_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_defaults_to_groq(monkeypatch):
+async def test_run_defaults_to_opencode(monkeypatch):
     seen = []
 
     async def fake_propose_once(messages, spec):
@@ -177,7 +177,25 @@ async def test_run_defaults_to_groq(monkeypatch):
 
     monkeypatch.setattr(service, "_propose_once", fake_propose_once)
     events = await collect(AgentRequest(prompt="explain", project=Project()))
-    assert seen and seen[0].id == "groq"
+    assert seen and seen[0].id == "opencode"
+    assert seen[0].kind == "opencode"
+    assert seen[0].model == service.settings.AGENT_OPENCODE_MODEL
+    assert seen[0].base_url == service.settings.AGENT_OPENCODE_BASE_URL
+    assert events[-1]["type"] == "answer"
+
+
+@pytest.mark.asyncio
+async def test_run_uses_the_requested_opencode_provider(monkeypatch):
+    seen = []
+
+    async def fake_propose_once(messages, spec):
+        seen.append(spec)
+        return Proposal(summary="explained")
+
+    monkeypatch.setattr(service, "_propose_once", fake_propose_once)
+    events = await collect(AgentRequest(prompt="explain", project=Project(), provider="opencode"))
+    assert seen and seen[0].id == "opencode"
+    assert seen[0].kind == "opencode"
     assert events[-1]["type"] == "answer"
 
 

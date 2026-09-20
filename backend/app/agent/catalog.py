@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 _CATALOG_PATH = Path(__file__).with_name("catalog.json")
-_CATALOG: dict[str, Any] = json.loads(_CATALOG_PATH.read_text())
+_CATALOG: dict[str, Any] = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
 
 VERSION: int = int(_CATALOG.get("version", 1))
 BOARDS: dict[str, dict] = _CATALOG["boards"]
