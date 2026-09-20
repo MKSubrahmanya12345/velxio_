@@ -6,27 +6,24 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StringConstraints, model_validator
 
+from app.agent import catalog
+
 Id = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")]
 Coordinate = Annotated[float, Field(ge=-5000, le=5000, allow_inf_nan=False)]
 
-# Pin names from @wokwi/elements 1.9.2 pinInfo. Deliberately a small capability set.
-# The catalog also carries the board's electrical capabilities (PWM/analog pins,
-# vcc, per-pin current limit) so analysis.py has one source of truth to check
-# analogWrite/analogRead against instead of a second hardcoded table.
-_CATALOG: dict[str, dict] = json.loads(Path(__file__).with_name("catalog.json").read_text())
-PINS: dict[str, list[str]] = {kind: list(spec["pins"]) for kind, spec in _CATALOG.items()}
-BOARD_CAPABILITIES: dict[str, dict] = {
-    kind: {k: v for k, v in spec.items() if k != "pins"} for kind, spec in _CATALOG.items()
-}
+# The catalog (generated, see app/agent/catalog.py) is the single description of
+# every part: pins (with property-driven variants), editable properties, wiring
+# rules and whether the canvas can simulate it. These mirrors exist because tool
+# code and tests read them by name.
+PINS: dict[str, list[str]] = catalog.PINS
+PROPERTIES: dict[str, set[str]] = catalog.PROPERTIES
+BOARD_CAPABILITIES: dict[str, dict] = {catalog.DEFAULT_BOARD: catalog.board_capabilities()}
 
-PROPERTIES = {
-    "led": {"color", "label", "flip", "rotation"},
-    "resistor": {"value", "rotation"},
-    "pushbutton": {"color", "label", "rotation"},
-    "potentiometer": {"value", "rotation"},
-    "buzzer": {"rotation"},
-    "servo": {"angle", "horn", "hornColor", "rotation"},
-}
+# Largest designs the agent will build: enough for a class project, small enough
+# that the live simulation stays interactive in a browser tab.
+MAX_PARTS = 40
+MAX_WIRES = 100
+MAX_FILES = 12
 
 
 class StrictModel(BaseModel):
@@ -41,31 +38,53 @@ class Board(StrictModel):
 
 class Part(StrictModel):
     id: Id
-    metadataId: Literal["led", "resistor", "pushbutton", "potentiometer", "buzzer", "servo"]
+    # Any placeable catalog part (157 of them). Boards and breadboards are in the
+    # catalog too - they are searchable and documented, but the project's board is
+    # a field, and row-based wiring is not modelled by the static analysis.
+    metadataId: str = Field(min_length=1, max_length=60)
     x: Coordinate
     y: Coordinate
-    properties: dict[str, str | float | bool] = Field(default_factory=dict, max_length=8)
+    properties: dict[str, str | float | bool] = Field(default_factory=dict, max_length=12)
 
     @model_validator(mode="after")
-    def valid_properties(self):
-        if set(self.properties) - PROPERTIES[self.metadataId]:
-            raise ValueError(f"Unsupported properties for {self.metadataId}")
+    def valid_part(self):
+        spec = catalog.get(self.metadataId)
+        if spec is None:
+            near = ", ".join(s.id for s in catalog.PARTS.values()
+                             if self.metadataId.split("-")[0] in s.id)[:200]
+            raise ValueError(f"Unknown component {self.metadataId!r}. Closest catalog ids: {near}")
+        if not spec.placeable:
+            raise ValueError(f"{spec.name} cannot be placed: {spec.why or 'not supported by the agent'}")
+        unsupported = sorted(set(self.properties) - set(spec.properties))
+        if unsupported:
+            raise ValueError(
+                f"Unsupported properties for {self.metadataId}: {', '.join(unsupported)}. "
+                f"Editable: {', '.join(sorted(spec.properties)) or 'none'}")
         for key, value in self.properties.items():
-            if key in ("color", "label") and (not isinstance(value, str) or len(value) > 80):
-                raise ValueError(f"Invalid {key}")
-            if key == "flip" and not isinstance(value, bool):
-                raise ValueError("flip must be boolean")
-            if key in ("value", "rotation"):
-                try:
-                    n = float(value)
-                except (ValueError, TypeError):
-                    raise ValueError(f"{key} must be numeric (resistance in ohms)")
-                low, high = (100, 1e7) if self.metadataId == "resistor" else (0, 1023)
-                if key == "rotation":
-                    low, high = 0, 270
-                if not low <= n <= high or isinstance(value, bool):
-                    raise ValueError(f"{key} outside supported range {low}..{high}")
+            if isinstance(value, str) and len(value) > 80:
+                raise ValueError(f"{key} is too long (max 80 characters)")
+            if isinstance(value, bool):
+                continue
+            if key == "rotation":
+                n = _number(key, value)
+                if not 0 <= n <= 270:
+                    raise ValueError("rotation outside supported range 0..270")
+            elif self.metadataId.startswith("resistor") and key == "value":
+                n = _number(key, value)
+                if not 100 <= n <= 1e7:
+                    raise ValueError("value outside supported range 100..1e7 (ohms)")
+            elif key in ("value", "angle", "digits", "stepSize", "refreshMs"):
+                _number(key, value)
         return self
+
+    @property
+    def pins(self) -> list[str]:
+        """Pin names for THIS instance (variant-aware: digits=4, pins=i2c …)."""
+        return catalog.pins_for(self.metadataId, self.properties)
+
+    @property
+    def spec(self) -> "catalog.PartSpec":
+        return catalog.PARTS[self.metadataId]
 
 
 class Endpoint(StrictModel):
@@ -109,12 +128,13 @@ class Project(StrictModel):
             values = [getattr(item, key) for item in items]
             if len(set(values)) != len(values):
                 raise ValueError(f"Duplicate {key}")
-        kinds = {p.id: p.metadataId for p in self.components}
+        pins_by_id = {p.id: p.pins for p in self.components}
         if self.board:
-            kinds[self.board.id] = "arduino-uno"
+            pins_by_id[self.board.id] = catalog.board_pins()
         for wire in self.wires:
             for end in (wire.start, wire.end):
-                if end.componentId not in kinds or end.pinName not in PINS[kinds[end.componentId]]:
+                known = pins_by_id.get(end.componentId)
+                if known is None or end.pinName not in known:
                     raise ValueError(f"Invalid endpoint {end.componentId}:{end.pinName}")
             if wire.start == wire.end:
                 raise ValueError("A wire must connect two different pins")
@@ -135,13 +155,43 @@ class Patch(StrictModel):
 
 
 class Interaction(StrictModel):
-    """An input the verifier drives on the live simulation before sampling."""
+    """An input the verifier drives on the live simulation before sampling.
 
-    kind: Literal["press", "pot"]
+    One shape, five kinds — every kind is checked against the part's declared
+    capabilities (`interactions` in the catalog) and against the circuit, so a
+    request to press a resistor, or to set a stimulus key a sensor does not
+    have, is rejected before anything runs:
+
+      press     momentary switch (pushbutton, ky-040's SW): HIGH->LOW->HIGH
+      pot       potentiometer/joystick axis: drive the wiper to `value` (0..1023)
+      switch    SPST/SPDT slide, DIP or tilt: hold it `closed` (or open) at `at_ms`
+      rotary    quadrature/step input: turn `delta` detents (>0 clockwise)
+      stimulus  drive a sensor's own model (DHT22 temperature, HC-SR04 distance,
+                LDR lux, IR remote command …) via the canvas sensor controls
+    """
+
+    kind: Literal["press", "pot", "switch", "stimulus", "rotary"]
     componentId: Id
+    # Which pin of the part the input acts on, when the part has several
+    # (a joystick's VERT/HORZ, a keypad row). Defaults to the part's primary pin.
+    pin: str | None = Field(default=None, max_length=16)
     at_ms: int = Field(default=500, ge=0, le=60000)
     hold_ms: int = Field(default=500, ge=10, le=20000)
     value: int = Field(default=512, ge=0, le=1023)
+    closed: bool = True
+    delta: int = Field(default=1, ge=-40, le=40)
+    values: dict[str, float] = Field(default_factory=dict, max_length=8)
+
+    @model_validator(mode="after")
+    def kind_specific(self):
+        if self.kind == "stimulus":
+            if not self.values:
+                raise ValueError("A stimulus interaction needs at least one value")
+        elif self.values:
+            raise ValueError("values only apply to a stimulus interaction")
+        if self.kind == "rotary" and self.delta == 0:
+            raise ValueError("A rotary interaction needs a non-zero delta")
+        return self
 
 
 class PinExpectation(StrictModel):
@@ -196,11 +246,22 @@ TOOL_NAMES = (
     "list_files",
     "board_pinout",
     "component_info",
+    "search_catalog",
+    "netlist",
     "check_design",
+    "draft_validate",
+    "draft_compile",
+    "draft_simulate",
     "search_libraries",
     "library_api",
 )
 ToolName = Literal[TOOL_NAMES]
+
+# Tools that take a candidate patch instead of plain scalars. They never mutate
+# the workspace: they build the candidate, run the deterministic stack (and, for
+# `draft_simulate`, the real emulator) and hand the observations back, so the
+# model can debug its own proposal before the user ever sees it.
+DRAFT_TOOLS = ("draft_validate", "draft_compile", "draft_simulate")
 
 
 class ToolCall(StrictModel):
@@ -212,7 +273,18 @@ class ToolCall(StrictModel):
     """
 
     tool: ToolName
-    args: dict[str, str | int | float | bool] = Field(default_factory=dict, max_length=4)
+    # Scalars for the read-only tools; a nested `patch` object (same shape as
+    # Proposal.patch) for the draft_* tools. Bounded so a runaway model cannot
+    # stuff a megabyte into a tool call.
+    args: dict = Field(default_factory=dict, max_length=12)
+
+    @model_validator(mode="after")
+    def bounded_args(self):
+        import json as _json
+
+        if len(_json.dumps(self.args, default=str)) > 24000:
+            raise ValueError("Tool call arguments are too large")
+        return self
 
 
 class Proposal(StrictModel):
@@ -242,6 +314,15 @@ class AgentRequest(StrictModel):
     prompt: str = Field(min_length=1, max_length=6000)
     project: Project
     messages: list[Message] = Field(default_factory=list, max_length=12)
+
+
+def _number(key: str, value) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be numeric")
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        raise ValueError(f"{key} must be numeric") from None
 
 
 def merge_items(old, new, removed, key):
@@ -283,7 +364,12 @@ def apply_patch(project: Project, patch: Patch, expectations=None) -> Project:
     return candidate
 
 
-def validate_includes(content: str, filenames: set[str]):
+def allowed_include_headers() -> set[str]:
+    """Core headers + every header a catalog part's driver needs."""
+    return set(catalog.allowed_headers())
+
+
+def validate_includes(content: str, filenames: set[str], allowed: set[str] | None = None):
     # C preprocessing splices lines before replacing comments. Keep literals
     # intact, so a URL or comment-looking text inside a string isn't stripped.
     logical = re.sub(r"\\\r?\n", "", content)
@@ -297,10 +383,15 @@ def validate_includes(content: str, filenames: set[str]):
             raise ValueError("Only literal Arduino core or local file includes are supported")
         system, local = match.groups()
         header = system or local
-        # Servo.h ships with the arduino:avr core (built-in library), so it
-        # compiles without any library installation — same trust level as the core.
-        if header not in {"Arduino.h", "math.h", "stdint.h", "string.h", "Servo.h"} and not (local and local in filenames):
-            raise ValueError(f"Unsupported include: {header}; use Arduino core APIs")
+        # Core headers and the drivers the catalog's parts need (Servo.h,
+        # Wire.h, LiquidCrystal_I2C.h, DHT.h …) are allowed; a header no catalog
+        # part uses is rejected before it wastes a compile round.
+        permitted = allowed if allowed is not None else allowed_include_headers()
+        if header not in permitted and not (local and local in filenames):
+            raise ValueError(
+                f"Unsupported include: {header}. Allowed headers are the Arduino core plus "
+                f"the drivers of parts in the catalog; use one of: "
+                + ", ".join(sorted(permitted)))
 
 
 def validate_electrical(project: Project):
@@ -322,9 +413,10 @@ def validate_electrical(project: Project):
     for wire in project.wires:
         union(ep(wire.start), ep(wire.end))
     for part in project.components:
-        if part.metadataId == "pushbutton":
-            union(f"{part.id}:1.l", f"{part.id}:1.r")
-            union(f"{part.id}:2.l", f"{part.id}:2.r")
+        # Contacts that are joined inside the part (a pushbutton's 1.l/1.r) must
+        # not be treated as two separate nets.
+        for a, b in (catalog.get(part.metadataId).internal_pairs if catalog.get(part.metadataId) else ()):
+            union(f"{part.id}:{a}", f"{part.id}:{b}")
     if project.board:
         b = project.board.id
         for ground in ("GND.1", "GND.2", "GND.3"):

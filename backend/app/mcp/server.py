@@ -15,7 +15,11 @@ Exposes the following tools to MCP-compatible agents (e.g. Claude):
                           coherence) over a circuit — use it BEFORE compiling
   - simulate_firmware     Execute compiled AVR firmware headlessly and report
                           what it actually did (pin transitions, serial) —
-                          use it AFTER compiling to verify behaviour
+                          use it AFTER compiling to verify behaviour. Can also
+                          press a button / turn a pot while it runs.
+  - list_components       Browse/search the 157-part component catalog
+  - component_info        Pins, editable properties and wiring notes for one part
+  - board_pinout          Uno pin names and PWM/ADC/I2C/SPI capabilities
 
 Transport:
   - stdio  — run `python mcp_server.py` for Claude Desktop / CLI agents
@@ -32,6 +36,7 @@ from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 
+from app.agent import catalog
 from app.mcp.wokwi import (
     format_wokwi_diagram,
     generate_arduino_sketch,
@@ -50,7 +55,10 @@ mcp = FastMCP(
     name="velxio",
     instructions=(
         "Velxio MCP server — create circuits, import/export Wokwi JSON, "
-        "generate Arduino code, and compile projects."
+        "generate Arduino code, compile projects and simulate firmware. "
+        "Call list_components/component_info/board_pinout before wiring, "
+        "validate_circuit before compiling, and simulate_firmware to verify "
+        "behaviour. Pin names must match the component's real pins."
     ),
 )
 
@@ -196,6 +204,109 @@ async def export_wokwi_json(
         return {"error": "circuit must be a JSON object."}
 
     return format_wokwi_diagram(circuit, author=author)
+
+
+
+# ---------------------------------------------------------------------------
+# list_components / component_info / board_pinout
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def list_components(
+    query: Annotated[
+        str,
+        "Free-text search over ids, names, tags and notes (e.g. 'i2c display', 'motor driver'). "
+        "Leave empty to list whole categories.",
+    ] = "",
+    category: Annotated[
+        str | None,
+        "Optional category filter: sensors, displays, output, input, passive, logic, power, "
+        "motors, boards, wiring …",
+    ] = None,
+    limit: Annotated[int, "Maximum number of parts to return (1..40)."] = 12,
+) -> dict[str, Any]:
+    """
+    Search the component catalog the canvas supports.
+
+    Every entry carries its real pin names, editable properties, defaults, and
+    whether the browser can simulate it ('simulated': false means a design may
+    compile but its behaviour cannot be verified live). Categories:
+    {categories}
+
+    Returns {count, parts:[{id, name, category, pins, properties, simulated, notes}]}.
+    """
+    hits = catalog.search(query, category=category, limit=max(1, min(int(limit or 12), 40)))
+    return {
+        "count": len(hits),
+        "categories": catalog.categories(),
+        "parts": [spec.as_dict() for spec in hits],
+    }
+
+
+@mcp.tool()
+async def component_info(
+    component: Annotated[
+        str,
+        "Catalog id or Wokwi type, e.g. 'lcd1602', 'wokwi-servo', 'ic-74hc595', 'dht22'.",
+    ],
+) -> dict[str, Any]:
+    """
+    Full description of one component: pins, editable properties, defaults,
+    wiring rules the validator enforces, and usage notes.
+
+    Returns an error listing near-matches when the id is unknown.
+    """
+    resolved = catalog.resolve_id(component)
+    if resolved is None:
+        return {"error": f"Unknown component {component!r}.",
+                "did_you_mean": [s.id for s in catalog.search(component, limit=8)]}
+    spec = catalog.get(resolved)
+    assert spec is not None
+    return {
+        "id": spec.id,
+        "name": spec.name,
+        "tag": spec.tag,
+        "category": spec.category,
+        "pins": list(spec.pins),
+        "pin_variants": [v for v in spec.pin_variants],
+        "properties": list(spec.properties),
+        "defaults": spec.defaults,
+        "placeable": spec.placeable,
+        "simulated": spec.sim,
+        "power_pins": spec.power,
+        "signals": {pin: {"needs": rule.cap, "direction": rule.direction,
+                          "optional": rule.optional}
+                    for pin, rule in spec.signals.items()},
+        "buses": [{"type": bus.type, "pins": bus.pins} for bus in spec.buses],
+        "interactions": list(spec.interactions),
+        "stimulus_keys": list(spec.stimulus_keys),
+        "notes": spec.notes,
+    }
+
+
+@mcp.tool()
+async def board_pinout() -> dict[str, Any]:
+    """
+    The Arduino Uno pin names and capabilities used by every other tool.
+
+    Pin names must be used verbatim in component pins and connections.
+    digital/PWM pins are '0'..'13' and 'A0'..'A5' may also be used as digital.
+    """
+    board = catalog.board(catalog.DEFAULT_BOARD)
+    return {
+        "board": catalog.DEFAULT_BOARD,
+        "fqbn": board.get("fqbn"),
+        "pins": board.get("pins"),
+        "pwm": board.get("pwm"),
+        "analog": board.get("analog"),
+        "i2c": board.get("i2c"),
+        "spi": board.get("spi"),
+        "uart": board.get("uart"),
+        "vcc": board.get("vcc"),
+        "max_pin_ma": board.get("max_pin_ma"),
+        "note": "GPIO 0/1 are the hardware serial pins; A4/A5 are also SDA/SCL.",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +588,17 @@ async def simulate_firmware(
         "Analog stimulus in volts, keyed by ADC channel: {'0': 2.5} drives A0 to 2.5V "
         "(as if a potentiometer wiper sat there).",
     ] = None,
+    interactions: Annotated[
+        list[dict[str, Any]] | None,
+        "Digital stimuli that happen WHILE the firmware runs, e.g. a button press. Each item: "
+        "{'at_ms': 500, 'pin': 2, 'state': False} pulls pin 2 LOW at t=500ms (then set it back "
+        "with a second entry at a later at_ms). Use this to prove the sketch reacts to input.",
+    ] = None,
+    analog_events: Annotated[
+        list[dict[str, Any]] | None,
+        "Timed analog changes: [{'at_ms': 800, 'channel': 0, 'volts': 3.3}] turns the A0 "
+        "potentiometer mid-run so a threshold crossing can be observed.",
+    ] = None,
 ) -> dict[str, Any]:
     """
     Execute compiled AVR firmware in a headless emulator and OBSERVE it.
@@ -487,7 +609,9 @@ async def simulate_firmware(
 
       - "does the LED blink?" -> watch pin 13, expect many transitions and a
         median_period_ms near the sketch's delay
-      - "does it react to input?" -> pass analog {'0': 2.5} for a pot on A0
+      - "does it react to input?" -> pass analog {'0': 2.5} for a pot on A0, or
+        interactions [{'at_ms': 500, 'pin': 2, 'state': False},
+        {'at_ms': 1000, 'pin': 2, 'state': True}] for a button between pin 2 and GND
       - "does it print?" -> check the returned serial text
 
     Returns { supported, success, simulated_ms, pins, serial }. supported=false
@@ -506,6 +630,18 @@ async def simulate_firmware(
         "watch_pins": [str(p)[:4] for p in (watch_pins or [])][:24],
         "analog": {str(k)[:3]: max(0.0, min(5.0, float(v)))
                    for k, v in (analog or {}).items() if isinstance(v, (int, float))},
+        "interactions": [
+            {"at_ms": max(0, int(e.get("at_ms", 0))), "pin": int(e.get("pin", -1)),
+             "state": bool(e.get("state", False))}
+            for e in (interactions or [])[:24]
+            if isinstance(e, dict) and str(e.get("pin", "")).lstrip("-").isdigit()
+        ],
+        "analog_events": [
+            {"at_ms": max(0, int(e.get("at_ms", 0))), "channel": int(e.get("channel", -1)),
+             "volts": max(0.0, min(5.0, float(e.get("volts", 0))))}
+            for e in (analog_events or [])[:24]
+            if isinstance(e, dict) and isinstance(e.get("volts", 0), (int, float))
+        ],
     }
     if not _AVR_SIM_SCRIPT.exists():
         return {"success": False, "supported": False,

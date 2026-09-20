@@ -25,7 +25,10 @@ class Settings(BaseSettings):
     AGENT_ALLOW_ANONYMOUS: bool = False
     # Agent loop bounds — repair attempts, tool rounds, provider resilience.
     AGENT_MAX_ATTEMPTS: int = 3
-    AGENT_MAX_TOOL_ROUNDS: int = 3
+    # Research rounds are cheap (catalog lookups) and are what make the loop
+    # agentic; draft rounds compile and may simulate, so they are separate.
+    AGENT_MAX_TOOL_ROUNDS: int = 5
+    AGENT_MAX_DRAFT_ROUNDS: int = 4
     AGENT_PROVIDER_TIMEOUT_S: float = 60.0
     AGENT_PROVIDER_RETRIES: int = 2
     # Live Arduino library search from the agent's search_libraries tool.

@@ -8,7 +8,9 @@
  * — without a browser.
  *
  * Protocol: reads one JSON object from stdin:
- *   { "hex": "<Intel HEX>", "observe_ms": 2000, "watch_pins": ["13"], "analog": {"0": 2.5} }
+ *   { "hex": "<Intel HEX>", "observe_ms": 2000, "watch_pins": ["13"], "analog": {"0": 2.5},
+ *     "interactions": [{ "at_ms": 500, "pin": 2, "state": false }],     // digital drives
+ *     "analog_events": [{ "at_ms": 800, "channel": 0, "volts": 3.3 }] } // scheduled ADC
  * and prints one JSON result to stdout. Always exits 0 with a JSON body.
  *
  * avr8js resolution order: $VELXIO_AVR8JS_PATH, the repo's
@@ -118,9 +120,13 @@ try {
   /* serial observation is best-effort */
 }
 
+let adc = null;
 try {
-  if (payload.analog && typeof payload.analog === 'object') {
-    const adc = new avr.AVRADC(cpu, avr.adcConfig);
+  if ((payload.analog && typeof payload.analog === 'object')
+      || (Array.isArray(payload.analog_events) && payload.analog_events.length)) {
+    adc = new avr.AVRADC(cpu, avr.adcConfig);
+  }
+  if (adc && payload.analog && typeof payload.analog === 'object') {
     for (const [channel, volts] of Object.entries(payload.analog)) {
       const index = Number(channel);
       if (Number.isInteger(index) && index >= 0 && index <= 15) {
@@ -131,6 +137,33 @@ try {
 } catch {
   /* analog stimulus is best-effort */
 }
+
+// A potentiometer turned, a sensor value changed mid-run: same idea, on a clock.
+const analogEvents = (Array.isArray(payload.analog_events) ? payload.analog_events : [])
+  .map((event) => ({
+    atMs: Number(event.at_ms) || 0,
+    channel: Number(event.channel),
+    volts: Math.max(0, Math.min(5, Number(event.volts) || 0)),
+  }))
+  .filter((event) => adc && Number.isInteger(event.channel) && event.channel >= 0 && event.channel <= 15)
+  .sort((a, b) => a.atMs - b.atMs);
+
+// External digital drives (a button pressed, a switch thrown) at simulated times.
+function setDigitalPin(pin, state) {
+  if (pin >= 0 && pin <= 7) ports.D.setPin(pin, state);
+  else if (pin >= 8 && pin <= 13) ports.B.setPin(pin - 8, state);
+  else if (pin >= 14 && pin <= 19) ports.C.setPin(pin - 14, state);
+}
+const interactions = (Array.isArray(payload.interactions) ? payload.interactions : [])
+  .map((event) => ({
+    atMs: Number(event.at_ms) || 0,
+    pin: Number(event.pin),
+    state: !!event.state,
+  }))
+  .filter((event) => Number.isInteger(event.pin) && event.pin >= 0 && event.pin <= 19)
+  .sort((a, b) => a.atMs - b.atMs);
+let nextInteraction = 0;
+let nextAnalogEvent = 0;
 
 // Arduino pin mapping (Uno/Nano): PORTD→0..7, PORTB→8..13, PORTC→14..21 (A0..A5).
 const PIN_OFFSET = { B: 8, C: 14, D: 0 };
@@ -160,6 +193,15 @@ for (const [name, port] of Object.entries(ports)) {
 
 const endCycles = observeMs * CYCLES_PER_MS;
 while (cpu.cycles < endCycles) {
+  const nowMs = cpu.cycles / CYCLES_PER_MS;
+  while (nextInteraction < interactions.length && interactions[nextInteraction].atMs <= nowMs) {
+    const event = interactions[nextInteraction++];
+    setDigitalPin(event.pin, event.state);
+  }
+  while (nextAnalogEvent < analogEvents.length && analogEvents[nextAnalogEvent].atMs <= nowMs) {
+    const event = analogEvents[nextAnalogEvent++];
+    adc.channelValues[event.channel] = event.volts;
+  }
   const sliceEnd = Math.min(cpu.cycles + 200000, endCycles);
   while (cpu.cycles < sliceEnd) {
     avr.avrInstruction(cpu);

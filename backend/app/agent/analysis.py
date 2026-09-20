@@ -6,15 +6,23 @@ forces *every* wired GPIO HIGH ("the sketch will eventually digitalWrite HIGH"),
 so the LED lights and the design looks verified.
 
 This module closes that hole with a deterministic pass over the proposed
-candidate — no model involved, no simulation needed:
+candidate — no model involved, no simulation needed. The rules themselves live
+in the generated catalog (`app/agent/catalog.py`): every part declares which pins
+need power, which pins must reach a board pin and with what capability, which
+buses it can attach to, what needs a series resistor, and what must never touch a
+GPIO. Adding a component therefore adds its wiring checks; this file only knows
+how to walk nets and phrase findings.
 
   * every pin the firmware touches must actually be wired to something
   * every wired GPIO should be referenced by the firmware (warning, not error:
     a user may wire ahead of the code)
   * a GPIO must not be shorted to a power rail, or bridged to another GPIO
   * analogWrite/analogRead only on pins that can do it
-  * a potentiometer wiper must land on an analog-capable pin
-  * declared expectations must describe pins that exist in the circuit
+  * required part pins must reach the board, on a pin of the right capability
+    (a pot wiper on an analog pin, an I2C device on A4/A5, a servo on PWM)
+  * part pins that are outputs must not be driven by the firmware as well
+  * LEDs need a series resistor; motor/relay/stepper coils need a driver
+  * declared expectations must describe pins and interactions that exist
 
 `analyse()` returns findings; `assert_clean()` raises on the errors so
 `apply_patch` keeps its existing "reject, never half-apply" contract.
@@ -23,14 +31,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Iterable, Literal
 
-from app.agent.models import BOARD_CAPABILITIES, PINS
+from app.agent import catalog
+from app.agent.catalog import DEFAULT_BOARD, PartSpec
 
 Severity = Literal["error", "warning"]
 
 # Board pins that are never a signal: they are power distribution.
-POWER_PINS = {"5V", "3.3V", "GND", "GND.1", "GND.2", "GND.3", "VIN", "VCC"}
+POWER_PINS = {"5V", "3.3V", "GND", "GND.1", "GND.2", "GND.3", "VIN", "VCC", "AREF", "IOREF"}
 
 WRITE_CALLS = {"digitalWrite", "analogWrite", "tone", "noTone", "attach"}
 READ_CALLS = {"digitalRead", "analogRead", "pulseIn"}
@@ -38,12 +47,16 @@ READ_CALLS = {"digitalRead", "analogRead", "pulseIn"}
 # Comments and string/char literals must not contribute pin references. The
 # preprocessor splices continued lines before it replaces comments, so mirror
 # that order (same reasoning as validate_includes in models.py).
-_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\\n]*|/\*[\s\S]*?\*/')
+_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/')
 _CALL = re.compile(
     r"\b(pinMode|digitalWrite|digitalRead|analogRead|analogWrite|tone|noTone|pulseIn|attach)\s*\(\s*([^,()]+)")
 _CONST = re.compile(r"(?m)^\s*(?:const\s+)?(?:static\s+)?(?:volatile\s+)?(?:unsigned\s+)?(?:int|byte|uint8_t|int8_t|int16_t)\s+([A-Za-z_]\w*)\s*=\s*(\d{1,2}|A[0-7])\s*;")
 _DEFINE = re.compile(r"(?m)^\s*#\s*define\s+([A-Za-z_]\w*)\s+(\d{1,2}|A[0-7])\b")
 _ANALOG_NAME = re.compile(r"^A([0-7])$")
+
+# Opening/instantiation of a part's own API (servos, libraries) - used for one
+# thing only: noticing that the firmware drives a pin a part also drives.
+_LIBRARY_CALL = re.compile(r"\b([A-Za-z_]\w*)\s*\.\s*(attach|write|writeMicroseconds)\s*\(\s*(?:(\d{1,2})\s*,?)?")
 
 
 @dataclass(frozen=True)
@@ -51,6 +64,46 @@ class Finding:
     severity: Severity
     code: str
     message: str
+
+
+# ── wording ──────────────────────────────────────────────────────────────────
+# Messages keep the wording earlier versions used for the original six parts
+# (they are what users have already seen in the repair loop) and fall back to a
+# generic phrasing for the rest of the catalog.
+
+_SHORT_CODES = {
+    "led": "led-shorted",
+    "passive": "resistor-shorted",
+    "diode": "diode-shorted",
+    "switch": "button-shorted",
+    "logic": "part-shorted",
+}
+_SHORT_PHRASES = {
+    "led": "has both terminals on the same net; it can never light",
+    "passive": "has both legs on the same net, so it does nothing",
+    "diode": "has its anode and cathode on the same net, so it can never conduct",
+    "switch": "has both contacts on the same net, so it can never switch anything",
+}
+
+
+def _short_finding(spec: PartSpec, part_id: str, a: str, b: str) -> Finding:
+    phrase = _SHORT_PHRASES.get(spec.cls)
+    if phrase is None:
+        phrase = f"has pins {a} and {b} on the same net, so it can never do anything"
+    code = _SHORT_CODES.get(spec.cls, "part-shorted")
+    hint = ""
+    if spec.cls == "switch":
+        hint = " Wire opposite sides (1.l and 2.r)."
+    return Finding("error", code, f"{spec.name} {part_id} {phrase}.{hint}")
+
+
+def _power_code(spec: PartSpec, kind: str) -> str:
+    if spec.cls == "actuator-pwm":
+        return "servo-power-unwired" if kind == "supply" else "servo-ground-unwired"
+    return "power-unwired" if kind == "supply" else "ground-unwired"
+
+
+# ── source scanning ──────────────────────────────────────────────────────────
 
 
 def _clean(source: str) -> str:
@@ -109,18 +162,44 @@ def firmware_pin_usage(sources: list[str]) -> tuple[set[str], set[str]]:
     return driven, read
 
 
+# ── topology ─────────────────────────────────────────────────────────────────
+
+
 class Netlist:
-    """Union-find over wire endpoints plus a pushbutton's internal contacts."""
+    """Union-find over wire endpoints, part-internal contacts and pass-throughs.
+
+    Two traversals matter and they are deliberately different:
+
+      * `net_of` (wires + internal contacts) answers "is this pin wired straight
+        to a rail / to another GPIO" — a resistor in between must still count as
+        a component, so it does NOT pass through parts.
+      * `signal_net` additionally walks through pass-through terminals
+        (`tracePairs`: a series resistor, a diode, an opto's input LED) so that
+        "the LED's anode reaches pin 13" is recognised as wired.
+
+    `internal_pairs` are contacts that are physically joined inside a part (a
+    pushbutton's 1.l↔1.r), so a button wired across its own contacts is caught
+    with one pair test instead of four.
+    """
 
     def __init__(self, project) -> None:
-        self.parent: dict[str, str] = {}
         self.project = project
+        self.parent: dict[str, str] = {}
+        self.kinds: dict[str, str] = {p.id: p.metadataId for p in project.components}
+        if project.board:
+            self.kinds[project.board.id] = DEFAULT_BOARD
+        self.trace: dict[str, set[str]] = {}
         for wire in project.wires:
             self.union(self.key(wire.start), self.key(wire.end))
         for part in project.components:
-            if part.metadataId == "pushbutton":
-                self.union(f"{part.id}:1.l", f"{part.id}:1.r")
-                self.union(f"{part.id}:2.l", f"{part.id}:2.r")
+            spec = catalog.get(part.metadataId)
+            if spec is None:
+                continue
+            for a, b in spec.internal_pairs:
+                self.union(f"{part.id}:{a}", f"{part.id}:{b}")
+            for a, b in spec.trace_pairs:
+                self.trace.setdefault(f"{part.id}:{a}", set()).add(f"{part.id}:{b}")
+                self.trace.setdefault(f"{part.id}:{b}", set()).add(f"{part.id}:{a}")
 
     @staticmethod
     def key(endpoint) -> str:
@@ -143,6 +222,62 @@ class Netlist:
         root = self.find(pin)
         return {p for p in self.parent if self.find(p) == root}
 
+    def signal_net(self, pin: str) -> set[str]:
+        """Net reachable from `pin`, walking through series pass-throughs."""
+        seen = {pin}
+        stack = [pin]
+        while stack:
+            current = stack.pop()
+            for node in self.net_of(current) | self.trace.get(current, set()):
+                if node not in seen:
+                    seen.add(node)
+                    stack.append(node)
+        return seen
+
+    def board_pins_on(self, pins: Iterable[str], include_power: bool = False) -> set[str]:
+        """Board pin names in `pins` (excluding power distribution by default)."""
+        board_id = self.project.board.id if self.project.board else DEFAULT_BOARD
+        found = set()
+        for pin in pins:
+            component, _, name = pin.partition(":")
+            if component == board_id and (include_power or name not in POWER_PINS):
+                found.add(name)
+        return found
+
+    def supply_rails(self) -> set[str]:
+        """Board pins that count as a supply, plus other parts' power outputs."""
+        board_id = self.project.board.id if self.project.board else DEFAULT_BOARD
+        supply, _ = catalog.power_rails(board_id)
+        return {f"{board_id}:{pin}" for pin in supply}
+
+    def ground_rails(self) -> set[str]:
+        """Board GND pins plus the ground pin of any part that supplies a rail.
+
+        A 9V battery's `\u2212` or a bench supply's GND is a real return path, so a
+        relay coil fed from a battery does not have to touch the board's GND to be
+        a complete circuit.
+        """
+        board_id = self.project.board.id if self.project.board else DEFAULT_BOARD
+        _, ground = catalog.power_rails(board_id)
+        rails = {f"{board_id}:{pin}" for pin in ground}
+        for part in self.project.components:
+            spec = catalog.get(part.metadataId)
+            if spec is None or not spec.power_out:
+                continue
+            rails.update(f"{part.id}:{pin}" for pin, kind in spec.power.items() if kind == "ground")
+        return rails
+
+    def regulator_outputs(self) -> set[str]:
+        """Pins that are a regulated supply rail (a 7805's VOUT, a PSU's SIG)."""
+        out = set()
+        for part in self.project.components:
+            spec = catalog.get(part.metadataId)
+            if spec is None:
+                continue
+            for pin in spec.power_out:
+                out.add(f"{part.id}:{pin}")
+        return out
+
 
 def wired_gpio_pins(project) -> set[str]:
     """Board pins a wire actually touches, excluding power distribution."""
@@ -157,23 +292,81 @@ def wired_gpio_pins(project) -> set[str]:
     return pins
 
 
+def _pins_of(project, part) -> list[str]:
+    spec = catalog.get(part.metadataId)
+    return list(spec.pins_for(part.properties)) if spec else []
+
+
+def _expectation_kind_ok(spec: PartSpec, kind: str) -> bool:
+    return kind in spec.interactions
+
+
+# ── the analysis ─────────────────────────────────────────────────────────────
+
+
+
+def _pin_satisfies(nets: Netlist, pin: str, capability: str) -> bool:
+    if capability == catalog.ANY_CAPABILITY:
+        return True
+    return any(catalog.satisfies(bp, capability)
+               for bp in nets.board_pins_on(nets.signal_net(pin)))
+
+
+def _bus_satisfied(nets: Netlist, spec: PartSpec, bus, key) -> bool:
+    return all(_pin_satisfies(nets, key(pin), capability) for pin, capability in bus.pins.items())
+
+
+def _series_resistor_present(project, nets: Netlist, terminals: list[str]) -> bool:
+    """True when a resistor is genuinely in series with one of `terminals`.
+
+    Three ways a "resistor" must NOT count:
+
+      * both legs on the terminal's net — the resistors is bypassed, it is a short;
+      * the far leg is on its own, unconnected net — a dangling resistor in series
+        with nothing (an LED wired straight to the pin with a spare part parked
+        next to it is still an LED without a resistor, and that is the failure
+        this check exists for);
+      * the same resistor counted twice because both legs touch the net.
+    """
+    for part in project.components:
+        if not part.metadataId.startswith("resistor"):
+            continue
+        resistor_pins = _pins_of(project, part)
+        if len(resistor_pins) < 2:
+            continue
+        a, b = f"{part.id}:{resistor_pins[0]}", f"{part.id}:{resistor_pins[1]}"
+        for terminal in terminals:
+            near, far = None, None
+            if nets.same_net(terminal, a) and not nets.same_net(terminal, b):
+                near, far = a, b
+            elif nets.same_net(terminal, b) and not nets.same_net(terminal, a):
+                near, far = b, a
+            if near is None:
+                continue
+            # The far leg must reach something else (a pin, a rail) for this to be
+            # a series resistor rather than a parked part.
+            if len(nets.net_of(far)) > 1:
+                return True
+    return False
+
+
 def analyse(project, expectations=None) -> list[Finding]:
     """Deterministic findings for a candidate project. Never raises."""
     findings: list[Finding] = []
     if not project.board:
         return findings
     board = project.board.id
-    caps = BOARD_CAPABILITIES.get("arduino-uno", {})
+    caps = catalog.board_capabilities()
     pwm = {str(p) for p in caps.get("pwm", [])}
     analog = {str(p) for p in caps.get("analog", [])}
-    all_pins = set(PINS.get("arduino-uno", []))
+    all_pins = set(catalog.board_pins())
 
     nets = Netlist(project)
     wired = wired_gpio_pins(project)
     sources = [f.content for f in project.files]
     driven, read = firmware_pin_usage(sources)
 
-    # --- firmware ↔ circuit coherence -------------------------------------
+    # --- firmware ↔ circuit ------------------------------------------------
     for pin in sorted(driven | read):
         if pin not in all_pins:
             findings.append(Finding("error", "unknown-pin",
@@ -187,11 +380,7 @@ def analyse(project, expectations=None) -> list[Finding]:
         findings.append(Finding("warning", "pin-unreferenced",
             f"Pin {pin} is wired but the sketch never uses it."))
 
-    # --- pin capability ----------------------------------------------------
-    for pin in sorted(driven):
-        # analogWrite is the only PWM writer we can see statically; tone/digital
-        # work on any GPIO, so only flag analogWrite on a non-PWM pin.
-        pass
+    # --- pin capability -----------------------------------------------------
     for source in sources:
         text = _clean(source)
         consts = pin_constants(sources)
@@ -208,8 +397,8 @@ def analyse(project, expectations=None) -> list[Finding]:
                     f"analogRead() on pin {pin}: that pin has no ADC input on the Uno. "
                     f"Use one of {', '.join(sorted(analog))}."))
 
-    # --- shorts and contention --------------------------------------------
-    rails = {p for p in ("GND", "GND.1", "GND.2", "GND.3", "5V", "3.3V") if p in PINS.get("arduino-uno", [])}
+    # --- shorts and contention (raw wire nets: a part in between is a load) --
+    rails = {p for p in ("GND", "GND.1", "GND.2", "GND.3", "5V", "3.3V") if p in all_pins}
     for pin in sorted(wired):
         net = nets.net_of(f"{board}:{pin}")
         hit = sorted({p.split(":", 1)[1] for p in net if p.startswith(f"{board}:") and p.split(":", 1)[1] in rails})
@@ -226,56 +415,176 @@ def analyse(project, expectations=None) -> list[Finding]:
                 f"Pins {' and '.join(pins)} are wired together. Two GPIOs on one net fight "
                 f"each other; use one pin, or separate the nets."))
 
+    # --- per-part rules from the catalog ------------------------------------
+    # Two passes on purpose: structural faults (a part shorted across its own
+    # terminals, a power output on a GPIO, a coil on a pin) are reported before
+    # the "is it wired correctly" rules, so the first error a repair loop sees is
+    # the most fundamental one.
+    sim_flagged: set[str] = set()
+    supply_pins = nets.supply_rails() | nets.regulator_outputs()
+    ground_pins = nets.ground_rails()
+    i2c_claims: dict[str, list[str]] = {}
+    key_of = lambda part, name: f"{part.id}:{name}"  # noqa: E731
+
+    def spec_of(part):
+        return catalog.get(part.metadataId)
+
     for part in project.components:
-        if part.metadataId == "pushbutton":
-            left = nets.find(f"{part.id}:1.l")
-            for side_a, side_b in (("1.l", "2.l"), ("1.r", "2.r"), ("1.l", "2.r"), ("1.r", "2.l")):
-                a, b = f"{part.id}:{side_a}", f"{part.id}:{side_b}"
-                if nets.same_net(a, b):
-                    findings.append(Finding("error", "button-shorted",
-                        f"Button {part.id} has both contacts on the same net, so it can never "
-                        f"switch anything. Wire opposite sides (1.l and 2.r)."))
-                    break
-            # A driven pin that the button pulls to GND is a live short when pressed.
-            for driven_pin in sorted(driven):
-                node = f"{board}:{driven_pin}"
-                if nets.find(node) == left or nets.find(node) == nets.find(f"{part.id}:1.r"):
-                    other = nets.net_of(f"{part.id}:2.l") | nets.net_of(f"{part.id}:2.r")
-                    if any(p.startswith(f"{board}:GND") for p in other):
-                        findings.append(Finding("warning", "button-shorts-pin",
-                            f"Pin {driven_pin} drives a net that button {part.id} connects to GND "
-                            f"when pressed. Read it with INPUT_PULLUP instead of driving it."))
-        if part.metadataId == "led" and nets.same_net(f"{part.id}:A", f"{part.id}:C"):
-            findings.append(Finding("error", "led-shorted",
-                f"LED {part.id} has both terminals on the same net; it can never light."))
-        if part.metadataId == "resistor" and nets.same_net(f"{part.id}:1", f"{part.id}:2"):
-            findings.append(Finding("error", "resistor-shorted",
-                f"Resistor {part.id} has both legs on the same net, so it does nothing."))
-        if part.metadataId == "servo":
-            # The pulse train needs a timer/PWM pin; on digital pins Servo.h
-            # either fails to compile or jitters unusably.
-            net = nets.net_of(f"{part.id}:PWM")
-            board_pins_on_net = {p.split(":", 1)[1] for p in net if p.startswith(f"{board}:")}
-            if not board_pins_on_net:
-                findings.append(Finding("error", "servo-unwired",
-                    f"Servo {part.id} signal (PWM) is not wired to any board pin. "
-                    f"Connect it to a PWM pin: {', '.join(sorted(pwm, key=lambda x: int(x)))}."))
-            elif not (board_pins_on_net & pwm):
-                findings.append(Finding("error", "servo-not-pwm",
-                    f"Servo {part.id} signal is on non-PWM pin {sorted(board_pins_on_net)[0]}. "
-                    f"Servo pulses need a PWM pin: {', '.join(sorted(pwm, key=lambda x: int(x)))}."))
-            if not any(p.startswith(f"{board}:5V") for p in nets.net_of(f"{part.id}:V+")):
-                findings.append(Finding("warning", "servo-power-unwired",
-                    f"Servo {part.id} V+ is not wired to 5V; it cannot move without power."))
-            if not any(p.startswith(f"{board}:GND") for p in nets.net_of(f"{part.id}:GND")):
-                findings.append(Finding("warning", "servo-ground-unwired",
-                    f"Servo {part.id} GND is not wired to a GND pin."))
-        if part.metadataId == "potentiometer":
-            net = nets.net_of(f"{part.id}:SIG")
-            if not any(p.startswith(f"{board}:") and p.split(":", 1)[1] in analog for p in net):
-                findings.append(Finding("error", "pot-not-analog",
-                    f"Potentiometer {part.id} wiper is not on an analog-capable pin. Connect SIG "
-                    f"to one of {', '.join(sorted(analog))}."))
+        spec = spec_of(part)
+        if spec is None:
+            continue
+        pins = _pins_of(project, part)
+        key = lambda name: key_of(part, name)  # noqa: E731
+        if not spec.sim and part.metadataId not in sim_flagged:
+            sim_flagged.add(part.metadataId)
+            findings.append(Finding("warning", "sim-unverifiable",
+                f"{spec.name} has no live simulation, so a design using it can be "
+                f"compiled but its behaviour cannot be verified automatically."))
+        for a, b in spec.self_short:
+            if a in pins and b in pins and nets.same_net(key(a), key(b)):
+                findings.append(_short_finding(spec, part.id, a, b))
+        for pin in spec.power_out:
+            if pin not in pins:
+                continue
+            touched = nets.board_pins_on(nets.net_of(key(pin)))
+            if touched:
+                findings.append(Finding(catalog.SEVERITY.get("powerOut", "error"), "power-out-to-gpio",
+                    f"{spec.name} {part.id} {pin} is a power output but is wired to GPIO "
+                    f"{sorted(touched)[0]}. Feed a rail or a load, not a pin."))
+        if spec.external_driver:
+            gpio_pins = {f"{board}:{pin}" for pin in wired}
+            bad = [p for p in spec.external_driver["pins"] if p in pins and (nets.net_of(key(p)) & gpio_pins)]
+            if bad:
+                findings.append(Finding(catalog.SEVERITY.get("externalDriver", "error"), "needs-driver",
+                    f"{spec.name} {part.id} pin {bad[0]}: {spec.external_driver['why']}"))
+
+    for part in project.components:
+        spec = spec_of(part)
+        if spec is None:
+            continue
+        pins = _pins_of(project, part)
+        key = lambda name: key_of(part, name)  # noqa: E731
+        buses = spec.buses_for(part.properties)
+        bus_pins = {pin for bus in buses for pin in bus.pins}
+
+        for pin, kind in spec.power.items():
+            if pin not in pins:
+                continue
+            targets = supply_pins if kind == "supply" else ground_pins
+            if not (nets.net_of(key(pin)) & targets):
+                want = "a supply rail (5V, or a battery/regulator output)" if kind == "supply" else "GND"
+                findings.append(Finding(catalog.SEVERITY.get("power", "warning"),
+                    _power_code(spec, kind),
+                    f"{spec.name} {part.id} {pin} is not wired to {want}, so the part has no "
+                    f"{'power' if kind == 'supply' else 'return path'}."))
+
+        for pin, rule in spec.signals.items():
+            if pin not in pins:
+                continue
+            net = nets.signal_net(key(pin))
+            board_pins = nets.board_pins_on(net)
+            if not board_pins:
+                if rule.optional:
+                    continue
+                code = "servo-unwired" if spec.cls == "actuator-pwm" else "signal-unwired"
+                findings.append(Finding(
+                    rule.severity or catalog.SEVERITY.get("signal", "error"), code,
+                    f"{spec.name} {part.id} {pin} is not wired to any board pin. Connect it to "
+                    f"{catalog.capability_label(rule.cap)}."))
+                continue
+            if rule.cap != catalog.ANY_CAPABILITY and not any(
+                catalog.satisfies(p, rule.cap) for p in board_pins
+            ):
+                code = {"pwm": "not-pwm-capable", "analog": "not-analog-capable"}.get(
+                    rule.cap, f"signal-not-{rule.cap}")
+                if spec.cls == "input-analog" and rule.cap == "analog":
+                    findings.append(Finding(
+                        rule.severity or "error", code,
+                        f"Potentiometer {part.id} {pin} is not on an analog-capable pin. Connect "
+                        f"{pin} to one of {', '.join(sorted(analog))}."))
+                else:
+                    label = (
+                        f"non-PWM pin {sorted(board_pins)[0]}" if rule.cap == "pwm"
+                        else f"non-analog pin {sorted(board_pins)[0]}" if rule.cap == "analog"
+                        else f"a pin that is not {rule.cap}"
+                    )
+                    findings.append(Finding(
+                        rule.severity or "error", code,
+                        f"{spec.name} {part.id} {pin} is on {label}. Use "
+                        f"{catalog.capability_label(rule.cap)}."))
+            # Direction: `out` means the part is the source on that net, so the
+            # firmware must read it. Bus pins are excluded (I2C/SPI are driven by
+            # both sides by definition).
+            if rule.direction == "out" and pin not in bus_pins and (board_pins & driven):
+                pin_name = sorted(board_pins & driven)[0]
+                if spec.cls == "switch":
+                    findings.append(Finding("warning", "button-shorts-pin",
+                        f"Pin {pin_name} drives a net that {spec.name.lower()} {part.id} connects "
+                        f"to a rail. Read it with INPUT_PULLUP instead of driving it."))
+                else:
+                    findings.append(Finding("error", "drive-conflict",
+                        f"Pin {pin_name} is driven by the firmware and also driven by "
+                        f"{spec.name} {part.id} {pin}. Read it instead of writing to it."))
+
+        if buses:
+            # `net_of` auto-creates a singleton net for any name, so "is this pin
+            # wired at all" means "its net has more than itself in it".
+            wired_bus_pins = [p for p in buses[0].pins if len(nets.net_of(key(p))) > 1]
+            if wired_bus_pins:
+                if not any(_bus_satisfied(nets, spec, bus, key) for bus in buses):
+                    bus = buses[0]
+                    missing = [
+                        f"{p}->{catalog.capability_label(cap)}"
+                        for p, cap in bus.pins.items()
+                        if not _pin_satisfies(nets, key(p), cap)
+                    ]
+                    findings.append(Finding(
+                        catalog.SEVERITY.get("bus", "error"), "bus-mismatch",
+                        f"{spec.name} {part.id} is wired but does not match a supported bus pinout. "
+                        f"{bus.type.upper()} needs " + "; ".join(missing) + "."))
+                if spec.address_property and "i2c" in {b.type for b in buses}:
+                    address = str(part.properties.get(spec.address_property)
+                                  or spec.defaults.get(spec.address_property, "")).lower()
+                    i2c_claims.setdefault(address, []).append(part.id)
+
+        if spec.gate_resistor:
+            for pin in spec.gate_resistor["pins"]:
+                if pin not in pins:
+                    continue
+                raw = nets.net_of(key(pin))
+                on_gpio = nets.board_pins_on(raw)
+                if on_gpio:
+                    findings.append(Finding(catalog.SEVERITY.get("gateResistor", "error"),
+                        "needs-gate-resistor",
+                        f"{spec.name} {part.id} {pin} is wired straight to GPIO {sorted(on_gpio)[0]}. "
+                        f"Put a {int(spec.gate_resistor.get('min', 100))}-10000 ohm resistor in "
+                        f"series with the base/gate."))
+
+        rule = spec.series_resistor
+        if rule:
+            targets = [p for p in rule["pins"] if p in pins]
+            each = bool(rule.get("each"))
+            severity = rule.get("severity") or catalog.SEVERITY.get("seriesResistor", "error")
+            minimum = int(rule.get("min", 100))
+            if each:
+                for pin in targets:
+                    if not _series_resistor_present(project, nets, key(pin)):
+                        findings.append(Finding(severity, "needs-series-resistor",
+                            f"{spec.name} {part.id} pin {pin} has no series resistor "
+                            f"(at least {minimum} ohms); the segment will either be dim or "
+                            f"burn out."))
+            elif targets and not _series_resistor_present(
+                    project, nets, [key(pin) for pin in targets]):
+                findings.append(Finding(severity, "led-needs-resistor",
+                    f"{spec.name} {part.id} needs a series resistor (at least {minimum} ohms) on "
+                    f"one terminal."))
+
+    # two I2C devices on one address: they would answer each other's traffic
+    for address, ids in i2c_claims.items():
+        if len(ids) > 1 and address not in {"", "none"}:
+            findings.append(Finding(catalog.SEVERITY.get("busAddressClash", "error"), "i2c-address-clash",
+                f"{', '.join(ids)} are all on I2C address {address}. Two devices cannot share an "
+                f"address; change one part's address property (or its AD0/SDO pin)."))
 
     # --- expectations must describe the real circuit ------------------------
     if expectations is not None:
@@ -289,12 +598,38 @@ def analyse(project, expectations=None) -> list[Finding]:
             if kind is None:
                 findings.append(Finding("error", "expectation-unknown-part",
                     f"Interaction targets {inter.componentId}, which is not in the circuit."))
-            elif inter.kind == "press" and kind != "pushbutton":
-                findings.append(Finding("error", "expectation-not-pressable",
-                    f"{inter.componentId} is a {kind}; only a pushbutton can be pressed."))
-            elif inter.kind == "pot" and kind != "potentiometer":
-                findings.append(Finding("error", "expectation-not-a-pot",
-                    f"{inter.componentId} is a {kind}; only a potentiometer can be set."))
+                continue
+            spec = catalog.get(kind)
+            if spec is None:
+                continue
+            supported = spec.interactions
+            if inter.kind not in supported:
+                if inter.kind == "press":
+                    findings.append(Finding("error", "expectation-not-pressable",
+                        f"{inter.componentId} is a {kind}; only a pushbutton or another "
+                        f"momentary switch can be pressed."))
+                elif inter.kind == "pot":
+                    findings.append(Finding("error", "expectation-not-a-pot",
+                        f"{inter.componentId} is a {kind}; only a potentiometer or a joystick "
+                        f"axis can be set."))
+                elif inter.kind == "stimulus":
+                    findings.append(Finding("error", "expectation-not-stimulatable",
+                        f"{inter.componentId} is a {kind}, which takes no stimulus. Stimulus parts: "
+                        + ", ".join(sorted(p.id for p in catalog.PARTS.values() if p.stimulus_keys)) + "."))
+                elif inter.kind == "switch":
+                    findings.append(Finding("error", "expectation-not-a-switch",
+                        f"{inter.componentId} is a {kind}; only a switch can be toggled."))
+                elif inter.kind == "rotary":
+                    findings.append(Finding("error", "expectation-not-rotary",
+                        f"{inter.componentId} is a {kind}; only a rotary part can be turned."))
+                continue
+            if inter.kind == "stimulus":
+                allowed = set(spec.stimulus_keys)
+                bad = sorted(set(inter.values) - allowed)
+                if bad:
+                    findings.append(Finding("error", "expectation-unknown-stimulus",
+                        f"{inter.componentId} ({spec.name}) does not accept stimulus "
+                        f"{', '.join(bad)}. Available: {', '.join(sorted(allowed))}."))
     return findings
 
 
@@ -305,3 +640,25 @@ def assert_clean(project, expectations=None) -> list[Finding]:
         if finding.severity == "error":
             raise ValueError(finding.message)
     return findings
+
+
+def netlist_summary(project) -> list[dict[str, Any]]:
+    """Nets as data, for the agent's `netlist` tool: what is connected to what."""
+    nets = Netlist(project)
+    grouped: dict[str, list[str]] = {}
+    for part in project.components:
+        for pin in _pins_of(project, part):
+            grouped.setdefault(nets.find(f"{part.id}:{pin}"), []).append(f"{part.id}.{pin}")
+    if project.board:
+        for pin in catalog.board_pins():
+            key = f"{project.board.id}:{pin}"
+            if key in nets.parent:
+                grouped.setdefault(nets.find(key), []).append(f"{project.board.id}.{pin}")
+    out = []
+    for _root, members in grouped.items():
+        if len(members) < 2:
+            continue
+        out.append({"pins": sorted(members),
+                    "board_pins": sorted(nets.board_pins_on(members, include_power=True))})
+    out.sort(key=lambda net: net["pins"])
+    return out

@@ -24,6 +24,7 @@ import ReactMarkdown from 'react-markdown';
 import { getApiBase } from '../../lib/apiBase';
 import { useProjectStore } from '../../store/useProjectStore';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
+import { CATALOG_SIZE, PLACEABLE_SIZE } from '../../agent/catalog';
 import { useAgentJournal, type Revision } from '../../agent/journal';
 import { runAgent } from '../../agent/runner';
 import {
@@ -292,7 +293,12 @@ export function AgentPanel() {
         <Cpu size={13} />
         <span>SUPPORTS</span>
         <strong>Arduino Uno</strong>
-        <span className="agent-scope-badge">5 part types</span>
+        <span
+          className="agent-scope-badge"
+          title={`${PLACEABLE_SIZE} placeable parts, ${CATALOG_SIZE} documented in the catalog`}
+        >
+          {PLACEABLE_SIZE} parts
+        </span>
       </div>
 
       {settingsOpen && (

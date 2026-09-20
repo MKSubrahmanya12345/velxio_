@@ -1,0 +1,2037 @@
+{
+  "$comment": "Wiring rules for the Velxio agent, one entry per component family or id. This is the only hand-maintained part of the agent catalog: scripts/generate-agent-catalog.mjs merges it with frontend/public/components-metadata.json (ids, properties, defaults), scripts/agent-pins.json (measured pin names) and the live simulation registry into backend/app/agent/catalog.json + frontend/src/agent/catalog.json. Vocabulary: class (grouping used for wording), placeable, why (when not), pinPatterns (regex -> signal rules, expanded by the generator), signal {pin: {cap, dir, optional, severity}}, power {pin: supply|ground}, bus [{type, pins, when?}], selfShortPairs (pins that must not share a net), internalPairs (pins joined inside the part), tracePairs (pass-through when active), seriesResistor {pins, min, each?}, gateResistor {pins, min}, externalDriver {pins, why, via}, powerOut (pins that ARE a supply rail), interactions (press|pot|switch|rotary|stimulus), stimulusKeys (sensor-model keys the browser can drive), rotary {role: pin}, addressProperty (I2C address the user can change), libraries (headers a sketch may include), notes (the wiring paragraph shown to the model). cap values: gpio, analog, pwm, i2c-sda, i2c-scl, spi-sck, spi-mosi, spi-miso, uart-tx, uart-rx.",
+  "severity": {
+    "power": "warning",
+    "signal": "error",
+    "bus": "error",
+    "selfShort": "error",
+    "seriesResistor": "error",
+    "gateResistor": "warning",
+    "externalDriver": "error",
+    "powerOut": "error",
+    "driveConflict": "error",
+    "busAddressClash": "error",
+    "simUnverifiable": "warning"
+  },
+  "runtimeProperties": {
+    "global": [
+      "state",
+      "pressed",
+      "hasSignal",
+      "running",
+      "brightness",
+      "lightColor"
+    ],
+    "parts": {
+      "led": [
+        "value"
+      ],
+      "neopixel": [
+        "r",
+        "g",
+        "b"
+      ],
+      "neopixel-matrix": [
+        "r",
+        "g",
+        "b"
+      ],
+      "led-ring": [
+        "r",
+        "g",
+        "b"
+      ],
+      "rgb-led": [
+        "ledRed",
+        "ledGreen",
+        "ledBlue"
+      ],
+      "7segment": [
+        "values",
+        "colonValue"
+      ],
+      "lcd1602": [
+        "characters",
+        "cursor",
+        "blink",
+        "cursorX",
+        "cursorY",
+        "screenOnly"
+      ],
+      "lcd2004": [
+        "characters",
+        "cursor",
+        "blink",
+        "cursorX",
+        "cursorY",
+        "screenOnly"
+      ],
+      "lcd1602-i2c": [
+        "characters",
+        "cursor",
+        "blink",
+        "cursorX",
+        "cursorY",
+        "screenOnly"
+      ],
+      "lcd2004-i2c": [
+        "characters",
+        "cursor",
+        "blink",
+        "cursorX",
+        "cursorY",
+        "screenOnly"
+      ],
+      "ssd1306": [
+        "imageData"
+      ],
+      "ssd1306-i2c-4pin": [
+        "imageData"
+      ],
+      "gps-neo6m": [
+        "lat",
+        "lng",
+        "altitude",
+        "speed"
+      ]
+    }
+  },
+  "boards": {
+    "arduino-uno": {
+      "label": "Arduino Uno",
+      "fqbn": "arduino:avr:uno",
+      "kind": "arduino-uno",
+      "pins": [
+        "0",
+        "1",
+        "10",
+        "11",
+        "12",
+        "13",
+        "2",
+        "3",
+        "3.3V",
+        "4",
+        "5",
+        "5V",
+        "6",
+        "7",
+        "8",
+        "9",
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A4.2",
+        "A5",
+        "A5.2",
+        "AREF",
+        "GND.1",
+        "GND.2",
+        "GND.3",
+        "IOREF",
+        "RESET",
+        "VIN",
+        "GND"
+      ],
+      "pwm": [
+        3,
+        5,
+        6,
+        9,
+        10,
+        11
+      ],
+      "analog": [
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5"
+      ],
+      "serial": [
+        "0",
+        "1"
+      ],
+      "i2c": {
+        "SDA": "A4",
+        "SCL": "A5"
+      },
+      "spi": {
+        "SCK": "13",
+        "MISO": "12",
+        "MOSI": "11"
+      },
+      "uart": {
+        "RX": "0",
+        "TX": "1"
+      },
+      "vcc": 5.0,
+      "logic_v": 5.0,
+      "max_pin_ma": 40,
+      "max_total_ma": 200
+    }
+  },
+  "families": [
+    {
+      "match": "^resistor(-[0-9a-z]+)?$",
+      "spec": {
+        "class": "passive",
+        "selfShortPairs": [
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "notes": "Two-terminal resistor. `value` in ohms (100..1e7). In series with an LED use 220-1000; as a pull-up/pull-down 1k-100k; as a base resistor 1k-10k.",
+        "tracePairs": [
+          [
+            "1",
+            "2"
+          ]
+        ]
+      }
+    },
+    {
+      "match": "^(cap-[0-9a-z]+|capacitor)$",
+      "spec": {
+        "class": "passive",
+        "selfShortPairs": [
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "notes": "Ceramic capacitor. Decoupling between a supply and GND; a timing capacitor on a GPIO must be charged through a resistor.",
+        "tracePairs": [
+          [
+            "1",
+            "2"
+          ]
+        ]
+      }
+    },
+    {
+      "match": "^(cap-elec-[0-9a-z]+|capacitor-electrolytic)$",
+      "spec": {
+        "class": "passive",
+        "selfShortPairs": [
+          [
+            "+",
+            "−"
+          ]
+        ],
+        "notes": "Electrolytic capacitor: `+` to the higher potential, `−` to GND. Never reverse it.",
+        "tracePairs": [
+          [
+            "+",
+            "−"
+          ]
+        ]
+      }
+    },
+    {
+      "match": "^(inductor|ind-[0-9a-z]+)$",
+      "spec": {
+        "class": "passive",
+        "selfShortPairs": [
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "notes": "Inductor. A GPIO cannot drive one directly — use a transistor with a flyback diode.",
+        "tracePairs": [
+          [
+            "1",
+            "2"
+          ]
+        ]
+      }
+    },
+    {
+      "match": "^(diode(-[0-9a-z]+)?|zener-[0-9a-z]+)$",
+      "spec": {
+        "class": "diode",
+        "selfShortPairs": [
+          [
+            "A",
+            "C"
+          ]
+        ],
+        "notes": "Diode: anode (A) toward the driving side, cathode (C, the stripe) toward the load/rail. Flyback diodes go across inductive loads, reverse-biased.",
+        "tracePairs": [
+          [
+            "A",
+            "C"
+          ]
+        ]
+      }
+    },
+    {
+      "match": "^bjt-(2n2222|2n3055|bc547|2n3904|tip120)$",
+      "spec": {
+        "class": "transistor-npn",
+        "signal": {
+          "B": {
+            "dir": "in"
+          },
+          "C": {
+            "dir": "out"
+          },
+          "E": {
+            "dir": "out"
+          }
+        },
+        "gateResistor": {
+          "pins": [
+            "B"
+          ],
+          "min": 100
+        },
+        "notes": "NPN transistor: E to GND, load between +V and C, B driven through a base resistor (1k-10k) from a GPIO. That is how a GPIO switches anything bigger than an LED."
+      }
+    },
+    {
+      "match": "^bjt-(2n3906|bc557|2n2907)$",
+      "spec": {
+        "class": "transistor-pnp",
+        "signal": {
+          "B": {
+            "dir": "in"
+          },
+          "C": {
+            "dir": "out"
+          },
+          "E": {
+            "dir": "out"
+          }
+        },
+        "gateResistor": {
+          "pins": [
+            "B"
+          ],
+          "min": 100
+        },
+        "notes": "PNP transistor: E to +V, load between C and GND, B to GND through a resistor to switch it on (a GPIO drives it LOW)."
+      }
+    },
+    {
+      "match": "^mosfet-",
+      "spec": {
+        "class": "mosfet",
+        "signal": {
+          "G": {
+            "dir": "in"
+          },
+          "D": {
+            "dir": "out"
+          },
+          "S": {
+            "dir": "out"
+          }
+        },
+        "gateResistor": {
+          "pins": [
+            "G"
+          ],
+          "min": 10
+        },
+        "notes": "MOSFET: S to GND (N-channel), load between +V and D, G through a 10-220 ohm gate resistor, plus a 10k pull-down from G to S so it cannot float on."
+      }
+    },
+    {
+      "match": "^opamp-",
+      "spec": {
+        "class": "opamp",
+        "signal": {
+          "IN+": {
+            "cap": "analog",
+            "dir": "in"
+          },
+          "IN-": {
+            "cap": "analog",
+            "dir": "in"
+          },
+          "OUT": {
+            "cap": "analog",
+            "dir": "out"
+          }
+        },
+        "notes": "Op-amp (the model has no supply pins): OUT swings between the rails. No feedback network is required, but no input may float."
+      }
+    },
+    {
+      "match": "^opto-",
+      "spec": {
+        "class": "opto",
+        "power": {
+          "CAT": "ground"
+        },
+        "signal": {
+          "AN": {
+            "dir": "in"
+          },
+          "COL": {
+            "dir": "out"
+          }
+        },
+        "seriesResistor": {
+          "pins": [
+            "AN"
+          ],
+          "min": 100
+        },
+        "notes": "Optocoupler: drive AN through a 220-1k resistor (CAT to GND) and use COL/EMIT as the isolated switch on the other side.",
+        "tracePairs": [
+          [
+            "AN",
+            "CAT"
+          ]
+        ]
+      }
+    },
+    {
+      "match": "^reg-(7805|7812|7905)$",
+      "spec": {
+        "class": "regulator",
+        "power": {
+          "VIN": "supply",
+          "GND": "ground"
+        },
+        "powerOut": [
+          "VOUT"
+        ],
+        "notes": "Linear regulator: VIN from an unregulated supply, VOUT is the regulated rail for the rest of the circuit. Never wire VOUT (or VIN) to a GPIO."
+      }
+    },
+    {
+      "match": "^reg-lm317$",
+      "spec": {
+        "class": "regulator",
+        "power": {
+          "VIN": "supply",
+          "GND": "ground"
+        },
+        "powerOut": [
+          "VOUT"
+        ],
+        "notes": "Adjustable regulator: VIN from the supply, ADJ sets the output, VOUT is the regulated rail. Never wire VOUT to a GPIO."
+      }
+    },
+    {
+      "match": "^battery-",
+      "spec": {
+        "class": "battery",
+        "power": {
+          "−": "ground"
+        },
+        "powerOut": [
+          "+"
+        ],
+        "notes": "Battery: `+` is the supply rail, `−` the ground. Use it for loads a GPIO cannot drive (motors, relays, servos) and join the grounds."
+      }
+    },
+    {
+      "match": "^logic-gate-",
+      "spec": {
+        "class": "logic",
+        "pinPatterns": [
+          {
+            "match": "^[A-D]$",
+            "dir": "in"
+          },
+          {
+            "match": "^Y$",
+            "dir": "out"
+          }
+        ],
+        "notes": "Logic gate: inputs A..D must be driven by GPIOs (or another output), Y is the output. The model has no power pins — never leave an input floating."
+      }
+    },
+    {
+      "match": "^flip-flop-",
+      "spec": {
+        "class": "logic",
+        "pinPatterns": [
+          {
+            "match": "^(CLK|D|J|K|T)$",
+            "dir": "in"
+          },
+          {
+            "match": "^(Q|Qbar)$",
+            "dir": "out"
+          }
+        ],
+        "notes": "Edge-triggered flip-flop: CLK and D/J/K/T are inputs, Q/Qbar outputs. Drive CLK from a GPIO and expect one state change per rising edge."
+      }
+    },
+    {
+      "match": "^ic-74hc",
+      "spec": {
+        "class": "logic",
+        "power": {
+          "VCC": "supply",
+          "GND": "ground"
+        },
+        "pinPatterns": [
+          {
+            "match": "^\\d+[AB]$",
+            "dir": "in"
+          },
+          {
+            "match": "^\\d+Y$",
+            "dir": "out"
+          }
+        ],
+        "notes": "74HC logic IC: VCC to 5V, GND to GND, and an unused input must never float — tie it to a rail or drive it. Outputs (nY) can drive a GPIO input, or an LED through a series resistor."
+      }
+    },
+    {
+      "match": "^epaper-",
+      "spec": {
+        "class": "display-spi",
+        "power": {
+          "VCC": "supply",
+          "GND": "ground"
+        },
+        "signal": {
+          "BUSY": {
+            "dir": "out"
+          },
+          "CS": {
+            "dir": "in"
+          },
+          "DC": {
+            "dir": "in"
+          },
+          "RST": {
+            "dir": "in"
+          },
+          "SCK": {
+            "cap": "spi-sck",
+            "dir": "in"
+          },
+          "SDI": {
+            "cap": "spi-mosi",
+            "dir": "in"
+          }
+        },
+        "bus": [
+          {
+            "type": "spi",
+            "pins": {
+              "SCK": "spi-sck",
+              "SDI": "spi-mosi",
+              "CS": "gpio",
+              "DC": "gpio",
+              "RST": "gpio"
+            }
+          }
+        ],
+        "libraries": [
+          "SPI.h",
+          "GxEPD2.h"
+        ],
+        "notes": "E-paper over SPI (hardware SCK=13, MOSI=11 on the Uno; CS/DC/RST on free GPIOs). BUSY is an output from the panel. A full refresh takes seconds."
+      }
+    },
+    {
+      "match": "^lcd(1602|2004)$",
+      "spec": {
+        "class": "display-parallel",
+        "power": {
+          "VDD": "supply",
+          "VSS": "ground",
+          "K": "ground",
+          "VCC": "supply",
+          "GND": "ground",
+          "A": "supply"
+        },
+        "signal": {
+          "RS": {
+            "dir": "in"
+          },
+          "E": {
+            "dir": "in"
+          },
+          "D4": {
+            "dir": "in"
+          },
+          "D5": {
+            "dir": "in"
+          },
+          "D6": {
+            "dir": "in"
+          },
+          "D7": {
+            "dir": "in"
+          }
+        },
+        "libraries": [
+          "LiquidCrystal.h",
+          "Wire.h",
+          "LiquidCrystal_I2C.h"
+        ],
+        "notes": "Character LCD in 4-bit parallel mode: RS, E and D4-D7 (6 GPIOs), VDD=5V, VSS=GND, K=GND (backlight cathode), V0 to a 10k contrast pot. Use the LiquidCrystal library; wire D0-D3 only for 8-bit mode.",
+        "bus": [
+          {
+            "type": "parallel",
+            "when": {
+              "pins": "full"
+            },
+            "pins": {
+              "RS": "gpio",
+              "E": "gpio",
+              "D4": "gpio",
+              "D5": "gpio",
+              "D6": "gpio",
+              "D7": "gpio"
+            }
+          },
+          {
+            "type": "i2c",
+            "when": {
+              "pins": "i2c"
+            },
+            "pins": {
+              "SDA": "i2c-sda",
+              "SCL": "i2c-scl"
+            }
+          }
+        ],
+        "addressProperty": "i2cAddress"
+      }
+    },
+    {
+      "match": "^lcd(1602|2004)-i2c$",
+      "spec": {
+        "class": "display-i2c",
+        "power": {
+          "VCC": "supply",
+          "GND": "ground"
+        },
+        "signal": {
+          "SDA": {
+            "cap": "i2c-sda",
+            "dir": "in"
+          },
+          "SCL": {
+            "cap": "i2c-scl",
+            "dir": "in"
+          }
+        },
+        "bus": [
+          {
+            "type": "i2c",
+            "pins": {
+              "SDA": "i2c-sda",
+              "SCL": "i2c-scl"
+            }
+          }
+        ],
+        "addressProperty": "i2cAddress",
+        "libraries": [
+          "Wire.h",
+          "LiquidCrystal_I2C.h"
+        ],
+        "notes": "I2C character LCD backpack: VCC=5V, GND, SDA=A4, SCL=A5 (Uno), address 0x27/0x3F. Construct LiquidCrystal_I2C with that address."
+      }
+    }
+  ],
+  "parts": {
+    "led": {
+      "class": "led",
+      "signal": {
+        "A": {
+          "dir": "in"
+        }
+      },
+      "selfShortPairs": [
+        [
+          "A",
+          "C"
+        ]
+      ],
+      "seriesResistor": {
+        "pins": [
+          "A",
+          "C"
+        ],
+        "min": 100
+      },
+      "notes": "LED: A=anode (long leg), C=cathode. Always in series with a 220-1000 ohm resistor; use a PWM pin (3,5,6,9,10,11) for brightness.",
+      "tracePairs": [
+        [
+          "A",
+          "C"
+        ]
+      ]
+    },
+    "rgb-led": {
+      "class": "led",
+      "power": {
+        "COM": "ground"
+      },
+      "pinPatterns": [
+        {
+          "match": "^[RGB]$",
+          "dir": "in"
+        }
+      ],
+      "seriesResistor": {
+        "pins": [
+          "R",
+          "G",
+          "B"
+        ],
+        "min": 100,
+        "each": true,
+        "severity": "warning"
+      },
+      "notes": "RGB LED with a common cathode (COM to GND): R/G/B are three separate LEDs, each needing its own 150-330 ohm resistor. PWM each channel to mix colours.",
+      "tracePairs": [
+        [
+          "R",
+          "COM"
+        ],
+        [
+          "G",
+          "COM"
+        ],
+        [
+          "B",
+          "COM"
+        ]
+      ]
+    },
+    "led-bar-graph": {
+      "class": "led",
+      "power": {
+        "C1": "ground",
+        "C2": "ground",
+        "C3": "ground",
+        "C4": "ground",
+        "C5": "ground",
+        "C6": "ground",
+        "C7": "ground",
+        "C8": "ground",
+        "C9": "ground",
+        "C10": "ground"
+      },
+      "pinPatterns": [
+        {
+          "match": "^A\\d+$",
+          "dir": "in",
+          "severity": "warning"
+        }
+      ],
+      "seriesResistor": {
+        "pins": [
+          "A1",
+          "A2",
+          "A3",
+          "A4",
+          "A5",
+          "A6",
+          "A7",
+          "A8",
+          "A9",
+          "A10"
+        ],
+        "min": 100,
+        "each": true,
+        "severity": "warning"
+      },
+      "notes": "10-segment bar graph: C1..C10 are the cathodes (GND), A1..A10 the anodes, each needing its own series resistor."
+    },
+    "neopixel": {
+      "class": "addressable-led",
+      "power": {
+        "VDD": "supply",
+        "VSS": "ground"
+      },
+      "signal": {
+        "DIN": {
+          "dir": "in"
+        },
+        "DOUT": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "libraries": [
+        "Adafruit_NeoPixel.h"
+      ],
+      "notes": "WS2812 strip: 5V, GND, data into DIN (a 300-500 ohm series resistor and a large electrolytic across the supply are good practice). Drive it with Adafruit_NeoPixel; never power a long strip from the Uno's 5V pin."
+    },
+    "neopixel-matrix": {
+      "class": "addressable-led",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "DIN": {
+          "dir": "in"
+        },
+        "DOUT": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "libraries": [
+        "Adafruit_NeoPixel.h"
+      ],
+      "notes": "WS2812 matrix: VCC=5V, GND, DIN from a GPIO through a series resistor; DOUT chains on to the next panel."
+    },
+    "led-ring": {
+      "class": "addressable-led",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "DIN": {
+          "dir": "in"
+        },
+        "DOUT": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "libraries": [
+        "Adafruit_NeoPixel.h"
+      ],
+      "notes": "WS2812 ring: 5V, GND, DIN from a GPIO. Set the pixel-count property to the ring size."
+    },
+    "7segment": {
+      "class": "display-7seg",
+      "power": {
+        "COM.1": "ground",
+        "COM.2": "ground",
+        "COM": "ground"
+      },
+      "pinPatterns": [
+        {
+          "match": "^[A-G]$|^DP$",
+          "cap": "gpio",
+          "dir": "in",
+          "severity": "warning"
+        },
+        {
+          "match": "^DIG\\d$|^CLN$",
+          "dir": "in",
+          "severity": "warning"
+        }
+      ],
+      "seriesResistor": {
+        "pins": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "E",
+          "F",
+          "G",
+          "DP"
+        ],
+        "min": 100,
+        "each": true,
+        "severity": "warning"
+      },
+      "notes": "7-segment display: every segment (A-G, DP) needs its own 220-470 ohm resistor, and the common pin (COM.1/COM.2, or CLN/COM on the 4-digit module) goes to GND. With digits>1 multiplex DIG1..DIG4 and keep the refresh fast."
+    },
+    "buzzer": {
+      "class": "output-audio",
+      "power": {
+        "1": "ground"
+      },
+      "signal": {
+        "2": {
+          "dir": "in"
+        }
+      },
+      "notes": "Piezo buzzer: pin 1 to GND, pin 2 to a GPIO. Drive it with tone() (or analogWrite for volume on a PWM pin)."
+    },
+    "pushbutton": {
+      "class": "switch",
+      "power": {
+        "2.r": "ground"
+      },
+      "signal": {
+        "1.l": {
+          "dir": "out"
+        }
+      },
+      "internalPairs": [
+        [
+          "1.l",
+          "1.r"
+        ],
+        [
+          "2.l",
+          "2.r"
+        ]
+      ],
+      "selfShortPairs": [
+        [
+          "1.l",
+          "2.l"
+        ]
+      ],
+      "interactions": [
+        "press"
+      ],
+      "notes": "Momentary pushbutton: 1.l-1.r and 2.l-2.r are joined inside. Wire one side to a GPIO with pinMode(INPUT_PULLUP) and the opposite side to GND; it reads LOW while pressed."
+    },
+    "pushbutton-6mm": {
+      "class": "switch",
+      "power": {
+        "2.r": "ground"
+      },
+      "signal": {
+        "1.l": {
+          "dir": "out"
+        }
+      },
+      "internalPairs": [
+        [
+          "1.l",
+          "1.r"
+        ],
+        [
+          "2.l",
+          "2.r"
+        ]
+      ],
+      "selfShortPairs": [
+        [
+          "1.l",
+          "2.l"
+        ]
+      ],
+      "interactions": [
+        "press"
+      ],
+      "notes": "Panel-mount pushbutton — same contacts as the standard one (1.l/1.r, 2.l/2.r). GPIO to one side, GND to the other, INPUT_PULLUP."
+    },
+    "slide-switch": {
+      "class": "switch",
+      "signal": {
+        "2": {
+          "dir": "out"
+        }
+      },
+      "tracePairs": [
+        [
+          "1",
+          "2"
+        ],
+        [
+          "2",
+          "3"
+        ]
+      ],
+      "selfShortPairs": [
+        [
+          "1",
+          "3"
+        ]
+      ],
+      "interactions": [
+        "switch"
+      ],
+      "notes": "SPDT slide switch: 2 is the common, 1 and 3 the throws. Common to a GPIO (INPUT_PULLUP), one throw to GND — or use both throws as a selector. The `value` property is the resting position."
+    },
+    "tilt-switch": {
+      "class": "switch",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "OUT": {
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "toggle"
+      ],
+      "notes": "Tilt sensor module: OUT changes level when tilted. Read it with INPUT_PULLUP (check the module's polarity)."
+    },
+    "dip-switch-8": {
+      "class": "switch",
+      "signal": {
+        "1a": {
+          "dir": "out"
+        }
+      },
+      "tracePairs": [
+        [
+          "1a",
+          "1b"
+        ],
+        [
+          "2a",
+          "2b"
+        ],
+        [
+          "3a",
+          "3b"
+        ],
+        [
+          "4a",
+          "4b"
+        ],
+        [
+          "5a",
+          "5b"
+        ],
+        [
+          "6a",
+          "6b"
+        ],
+        [
+          "7a",
+          "7b"
+        ],
+        [
+          "8a",
+          "8b"
+        ]
+      ],
+      "selfShortPairs": [
+        [
+          "1a",
+          "1b"
+        ],
+        [
+          "2a",
+          "2b"
+        ],
+        [
+          "3a",
+          "3b"
+        ],
+        [
+          "4a",
+          "4b"
+        ],
+        [
+          "5a",
+          "5b"
+        ],
+        [
+          "6a",
+          "6b"
+        ],
+        [
+          "7a",
+          "7b"
+        ],
+        [
+          "8a",
+          "8b"
+        ]
+      ],
+      "interactions": [
+        "switch"
+      ],
+      "notes": "8-way DIP switch: each Na-Nb pair is an independent SPST switch. Na to a GPIO with INPUT_PULLUP, Nb to GND is the usual wiring."
+    },
+    "membrane-keypad": {
+      "class": "input-matrix",
+      "pinPatterns": [
+        {
+          "match": "^[RC]\\d$",
+          "dir": "out"
+        }
+      ],
+      "notes": "4x4 matrix keypad: R1-R4 rows, C1-C4 columns (8 GPIOs). Scan the rows and read the columns with INPUT_PULLUP. It cannot be auto-stimulated in the browser."
+    },
+    "ky-040": {
+      "class": "input-rotary",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "CLK": {
+          "dir": "out"
+        },
+        "DT": {
+          "dir": "out"
+        },
+        "SW": {
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "rotary",
+        "press"
+      ],
+      "rotary": {
+        "clk": "CLK",
+        "dt": "DT",
+        "sw": "SW"
+      },
+      "notes": "Rotary encoder with a push button: CLK/DT are the quadrature outputs (pull-ups are on the module), SW is the shaft button. Read CLK in an interrupt and SW with INPUT_PULLUP."
+    },
+    "rotary-dialer": {
+      "class": "input-rotary",
+      "power": {
+        "GND": "ground"
+      },
+      "signal": {
+        "PULSE": {
+          "dir": "out"
+        },
+        "DIAL": {
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "rotary"
+      ],
+      "rotary": {
+        "pulse": "PULSE",
+        "dial": "DIAL"
+      },
+      "notes": "Pulse-dial telephone dial: PULSE gives one pulse per digit, DIAL marks that a digit is being dialled. Count pulses in an interrupt."
+    },
+    "potentiometer": {
+      "class": "input-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "SIG": {
+          "cap": "analog",
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "pot"
+      ],
+      "notes": "Potentiometer: VCC=5V, GND=GND, SIG to an analog pin (A0-A5). Read it with analogRead — the wiper is a voltage divider, so it cannot be read as a digital pin."
+    },
+    "slide-potentiometer": {
+      "class": "input-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "SIG": {
+          "cap": "analog",
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "pot"
+      ],
+      "notes": "Slide potentiometer: the same three terminals as a rotary pot (VCC, GND, SIG to an analog pin)."
+    },
+    "analog-joystick": {
+      "class": "input-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "VERT": {
+          "cap": "analog",
+          "dir": "out"
+        },
+        "HORZ": {
+          "cap": "analog",
+          "dir": "out"
+        },
+        "SEL": {
+          "dir": "out",
+          "severity": "warning"
+        }
+      },
+      "interactions": [
+        "pot",
+        "press"
+      ],
+      "notes": "Analog joystick: VERT/HORZ to two analog pins, SEL is a push button (INPUT_PULLUP to GND). Use the pot interaction with a pin name to drive one axis."
+    },
+    "dht22": {
+      "class": "sensor-1wire",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "SDA": {
+          "dir": "bidir"
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "temperature",
+        "humidity"
+      ],
+      "libraries": [
+        "DHT.h"
+      ],
+      "notes": "DHT22 temperature/humidity: VCC=5V, GND, SDA to any GPIO with a 10k pull-up to 5V, read at most every 2 s with the DHT library. The NC pin is unused."
+    },
+    "hc-sr04": {
+      "class": "sensor-range",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "TRIG": {
+          "dir": "in"
+        },
+        "ECHO": {
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "distance"
+      ],
+      "notes": "HC-SR04 ultrasonic: TRIG gets a 10 us pulse from a GPIO, ECHO returns a pulse whose width is the distance (pulseIn; cm = width / 58)."
+    },
+    "pir-motion-sensor": {
+      "class": "sensor-digital",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "OUT": {
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "trigger"
+      ],
+      "notes": "PIR motion module: OUT goes HIGH while motion is detected. Give it a second to settle after power-up."
+    },
+    "photoresistor-sensor": {
+      "class": "sensor-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "AO": {
+          "cap": "analog",
+          "dir": "out"
+        },
+        "DO": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "lux"
+      ],
+      "notes": "LDR module: AO is an analog light level (A0-A5), DO is a comparator output whose threshold comes from its trimpot."
+    },
+    "photodiode": {
+      "class": "sensor-analog",
+      "selfShortPairs": [
+        [
+          "A",
+          "C"
+        ]
+      ],
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "lux"
+      ],
+      "notes": "Photodiode: reverse-biased (C toward the higher potential) it produces a small photocurrent — amplify it, or use an LDR module."
+    },
+    "ntc-temperature-sensor": {
+      "class": "sensor-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "OUT": {
+          "cap": "analog",
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "temperature"
+      ],
+      "notes": "NTC thermistor module: OUT to an analog pin; the voltage tracks temperature."
+    },
+    "heart-beat-sensor": {
+      "class": "sensor-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "OUT": {
+          "cap": "analog",
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "bpm"
+      ],
+      "notes": "Pulse sensor: OUT is an analog waveform, one peak per heartbeat. Threshold it in software to count beats per minute."
+    },
+    "flame-sensor": {
+      "class": "sensor-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "AOUT": {
+          "cap": "analog",
+          "dir": "out"
+        },
+        "DOUT": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "intensity"
+      ],
+      "notes": "Flame sensor: AOUT is the analog intensity, DOUT a threshold output (usually active LOW)."
+    },
+    "gas-sensor": {
+      "class": "sensor-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "AOUT": {
+          "cap": "analog",
+          "dir": "out"
+        },
+        "DOUT": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "gasLevel"
+      ],
+      "notes": "Gas sensor: AOUT is the analog level, DOUT trips at the trimpot threshold. It needs a warm-up before readings settle."
+    },
+    "big-sound-sensor": {
+      "class": "sensor-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "AOUT": {
+          "cap": "analog",
+          "dir": "out"
+        },
+        "DOUT": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "soundLevel"
+      ],
+      "notes": "Sound sensor (big): AOUT is the audio envelope, DOUT a threshold output. Sample AOUT with analogRead."
+    },
+    "small-sound-sensor": {
+      "class": "sensor-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "AOUT": {
+          "cap": "analog",
+          "dir": "out"
+        },
+        "DOUT": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "soundLevel"
+      ],
+      "notes": "Sound sensor (small): the same pins as the big one, lower gain."
+    },
+    "ir-receiver": {
+      "class": "sensor-digital",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "DAT": {
+          "dir": "out"
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "address",
+        "command",
+        "send"
+      ],
+      "libraries": [
+        "IRremote.h",
+        "IRremote.hpp"
+      ],
+      "notes": "IR receiver module: DAT to any GPIO (the carrier is already demodulated). Decode with the IRremote library."
+    },
+    "ir-remote": {
+      "class": "source-ir",
+      "notes": "IR remote handset: no wires — place it next to an IR receiver and stimulate the RECEIVER with address/command to send a frame."
+    },
+    "bmp280": {
+      "class": "sensor-i2c",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "SDA": {
+          "cap": "i2c-sda",
+          "dir": "bidir"
+        },
+        "SCL": {
+          "cap": "i2c-scl",
+          "dir": "bidir"
+        }
+      },
+      "bus": [
+        {
+          "type": "i2c",
+          "pins": {
+            "SDA": "i2c-sda",
+            "SCL": "i2c-scl"
+          }
+        }
+      ],
+      "addressProperty": "i2cAddress",
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "temperature",
+        "pressure"
+      ],
+      "libraries": [
+        "Wire.h",
+        "Adafruit_BMP280.h"
+      ],
+      "notes": "BMP280 barometer over I2C: VCC=5V (module) or 3.3V, GND, SDA=A4, SCL=A5, address 0x76/0x77 (SDO picks it)."
+    },
+    "mpu6050": {
+      "class": "sensor-i2c",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "SDA": {
+          "cap": "i2c-sda",
+          "dir": "bidir"
+        },
+        "SCL": {
+          "cap": "i2c-scl",
+          "dir": "bidir"
+        },
+        "INT": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "bus": [
+        {
+          "type": "i2c",
+          "pins": {
+            "SDA": "i2c-sda",
+            "SCL": "i2c-scl"
+          }
+        }
+      ],
+      "addressProperty": "i2cAddress",
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "accelX",
+        "accelY",
+        "accelZ",
+        "gyroX",
+        "gyroY",
+        "gyroZ",
+        "temp"
+      ],
+      "libraries": [
+        "Wire.h",
+        "MPU6050.h"
+      ],
+      "notes": "MPU6050 IMU over I2C: VCC=5V (module), GND, SDA=A4, SCL=A5, address 0x68/0x69 (AD0 picks it). INT is optional."
+    },
+    "ds1307": {
+      "class": "sensor-i2c",
+      "power": {
+        "5V": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "SDA": {
+          "cap": "i2c-sda",
+          "dir": "bidir"
+        },
+        "SCL": {
+          "cap": "i2c-scl",
+          "dir": "bidir"
+        },
+        "SQW": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "bus": [
+        {
+          "type": "i2c",
+          "pins": {
+            "SDA": "i2c-sda",
+            "SCL": "i2c-scl"
+          }
+        }
+      ],
+      "addressProperty": "i2cAddress",
+      "libraries": [
+        "Wire.h",
+        "RTClib.h"
+      ],
+      "notes": "DS1307 RTC over I2C at 0x68: 5V, GND, SDA=A4, SCL=A5. SQW can clock an interrupt pin. Set the time with RTClib's adjust()."
+    },
+    "ds3231": {
+      "class": "sensor-i2c",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "SDA": {
+          "cap": "i2c-sda",
+          "dir": "bidir"
+        },
+        "SCL": {
+          "cap": "i2c-scl",
+          "dir": "bidir"
+        }
+      },
+      "bus": [
+        {
+          "type": "i2c",
+          "pins": {
+            "SDA": "i2c-sda",
+            "SCL": "i2c-scl"
+          }
+        }
+      ],
+      "addressProperty": "i2cAddress",
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "temperature"
+      ],
+      "libraries": [
+        "Wire.h",
+        "RTClib.h"
+      ],
+      "notes": "DS3231 RTC over I2C at 0x68: VCC=5V, GND, SDA=A4, SCL=A5. It also reports temperature."
+    },
+    "hx711": {
+      "class": "sensor-analog",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "DT": {
+          "dir": "out"
+        },
+        "SCK": {
+          "dir": "in"
+        }
+      },
+      "libraries": [
+        "HX711.h"
+      ],
+      "notes": "HX711 load-cell amplifier: DT is the data output, SCK is clocked by the GPIO (HX711 library). Decode its own protocol — there is no sensor knob for it in the browser."
+    },
+    "gps-neo6m": {
+      "class": "sensor-uart",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "TX": {
+          "dir": "out"
+        },
+        "RX": {
+          "dir": "in"
+        }
+      },
+      "interactions": [
+        "stimulus"
+      ],
+      "stimulusKeys": [
+        "lat",
+        "lng",
+        "altitude",
+        "speed"
+      ],
+      "libraries": [
+        "SoftwareSerial.h",
+        "TinyGPSPlus.h"
+      ],
+      "notes": "NEO-6M GPS: TX to a GPIO used as SoftwareSerial RX (RX to a GPIO used as TX if you send commands). 9600 baud NMEA."
+    },
+    "ssd1306": {
+      "class": "display-i2c",
+      "power": {
+        "GND": "ground"
+      },
+      "signal": {
+        "CLK": {
+          "cap": "i2c-scl",
+          "dir": "in",
+          "optional": true
+        },
+        "DATA": {
+          "cap": "i2c-sda",
+          "dir": "in",
+          "optional": true
+        },
+        "CS": {
+          "dir": "in",
+          "optional": true
+        },
+        "DC": {
+          "dir": "in",
+          "optional": true
+        },
+        "RST": {
+          "dir": "in",
+          "optional": true
+        }
+      },
+      "bus": [
+        {
+          "type": "i2c",
+          "pins": {
+            "CLK": "i2c-scl",
+            "DATA": "i2c-sda"
+          }
+        }
+      ],
+      "addressProperty": "i2cAddress",
+      "libraries": [
+        "Wire.h",
+        "Adafruit_GFX.h",
+        "Adafruit_SSD1306.h"
+      ],
+      "notes": "SSD1306 128x64 OLED. I2C mode: CLK=SCL (A5), DATA=SDA (A4), the 3V3/VIN pin to a supply, address 0x3C. SPI mode uses CS/DC/RST instead — pick one mode and wire it completely."
+    },
+    "ssd1306-i2c-4pin": {
+      "class": "display-i2c",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "SDA": {
+          "cap": "i2c-sda",
+          "dir": "in"
+        },
+        "SCL": {
+          "cap": "i2c-scl",
+          "dir": "in"
+        }
+      },
+      "bus": [
+        {
+          "type": "i2c",
+          "pins": {
+            "SDA": "i2c-sda",
+            "SCL": "i2c-scl"
+          }
+        }
+      ],
+      "addressProperty": "i2cAddress",
+      "libraries": [
+        "Wire.h",
+        "Adafruit_GFX.h",
+        "Adafruit_SSD1306.h"
+      ],
+      "notes": "4-pin I2C OLED (VCC, GND, SDA=A4, SCL=A5), address 0x3C — the easiest display to add to a project."
+    },
+    "ili9341": {
+      "class": "display-spi",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "CS": {
+          "dir": "in"
+        },
+        "D/C": {
+          "dir": "in"
+        },
+        "RST": {
+          "dir": "in"
+        },
+        "MOSI": {
+          "cap": "spi-mosi",
+          "dir": "in"
+        },
+        "SCK": {
+          "cap": "spi-sck",
+          "dir": "in"
+        },
+        "MISO": {
+          "cap": "spi-miso",
+          "dir": "out",
+          "optional": true
+        },
+        "LED": {
+          "dir": "in",
+          "optional": true
+        }
+      },
+      "bus": [
+        {
+          "type": "spi",
+          "pins": {
+            "SCK": "spi-sck",
+            "MOSI": "spi-mosi",
+            "CS": "gpio",
+            "D/C": "gpio",
+            "RST": "gpio"
+          }
+        }
+      ],
+      "libraries": [
+        "SPI.h",
+        "Adafruit_GFX.h",
+        "Adafruit_ILI9341.h"
+      ],
+      "notes": "ILI9341 TFT over SPI: SCK=13, MOSI=11, CS/DC/RST on free GPIOs, MISO optional, LED (backlight) to 5V or a PWM pin. 3.3V logic — level-shift if you power it from 5V."
+    },
+    "microsd-card": {
+      "class": "storage-spi",
+      "power": {
+        "VCC": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "CS": {
+          "dir": "in"
+        },
+        "DI": {
+          "cap": "spi-mosi",
+          "dir": "in"
+        },
+        "DO": {
+          "cap": "spi-miso",
+          "dir": "out"
+        },
+        "SCK": {
+          "cap": "spi-sck",
+          "dir": "in"
+        },
+        "CD": {
+          "dir": "out",
+          "optional": true
+        }
+      },
+      "bus": [
+        {
+          "type": "spi",
+          "pins": {
+            "SCK": "spi-sck",
+            "DI": "spi-mosi",
+            "DO": "spi-miso",
+            "CS": "gpio"
+          }
+        }
+      ],
+      "libraries": [
+        "SPI.h",
+        "SD.h"
+      ],
+      "notes": "microSD over SPI: SCK=13, DI=MOSI=11, DO=MISO=12, CS on GPIO 10 (the SD library default) or another pin. 3.3V supply and logic."
+    },
+    "power-supply": {
+      "class": "source",
+      "power": {
+        "GND": "ground"
+      },
+      "powerOut": [
+        "SIG"
+      ],
+      "notes": "Bench supply: GND is the ground rail, SIG is the regulated output (set its voltage with the property). Use it instead of the Uno's 5V pin for anything that draws real current."
+    },
+    "signal-generator": {
+      "class": "source",
+      "power": {
+        "GND": "ground"
+      },
+      "notes": "Signal generator: GND plus a SIG output you can configure (waveform, frequency, amplitude). Feed it into a GPIO (or a load with a safe amplitude)."
+    },
+    "relay": {
+      "class": "relay",
+      "signal": {
+        "COIL+": {
+          "dir": "in"
+        }
+      },
+      "externalDriver": {
+        "pins": [
+          "COIL+",
+          "COIL-"
+        ],
+        "why": "a relay coil draws far more current than a GPIO can source and kicks back when it switches off",
+        "via": [
+          "bjt-2n2222",
+          "bjt-bc547",
+          "mosfet-2n7000",
+          "motor-driver-l293d"
+        ]
+      },
+      "notes": "Relay: COIL+/COIL- is the coil — drive it through a transistor (with a flyback diode), never straight from a GPIO. COM/NO/NC are the isolated contacts that switch your load."
+    },
+    "ks2e-m-dc5": {
+      "class": "relay",
+      "externalDriver": {
+        "pins": [
+          "COIL1",
+          "COIL2"
+        ],
+        "why": "a relay coil draws more current than a GPIO can source and needs a flyback diode",
+        "via": [
+          "bjt-2n2222",
+          "mosfet-2n7000"
+        ]
+      },
+      "notes": "Two-pole relay: COIL1/COIL2 is the coil (drive it through a transistor); P1 with NO1/NC1 and P2 with NO2/NC2 are the two isolated poles."
+    },
+    "motor-driver-l293d": {
+      "class": "driver-motor",
+      "power": {
+        "VCC1": "supply",
+        "VCC2": "supply",
+        "GND.1": "ground",
+        "GND.2": "ground"
+      },
+      "pinPatterns": [
+        {
+          "match": "^EN[12]$",
+          "cap": "pwm",
+          "dir": "in",
+          "severity": "warning"
+        },
+        {
+          "match": "^IN[1-4]$",
+          "dir": "in"
+        }
+      ],
+      "notes": "L293D dual H-bridge: VCC1=5V logic, VCC2=motor supply, the GND pins to GND. IN1-4 choose the direction, EN1/EN2 take PWM for speed, OUT1-4 go to the motors."
+    },
+    "a4988": {
+      "class": "driver-stepper",
+      "power": {
+        "VDD": "supply",
+        "VMOT": "supply",
+        "GND": "ground",
+        "GND.2": "ground"
+      },
+      "signal": {
+        "STEP": {
+          "dir": "in"
+        },
+        "DIR": {
+          "dir": "in"
+        },
+        "ENABLE": {
+          "dir": "in",
+          "optional": true
+        }
+      },
+      "pinPatterns": [
+        {
+          "match": "^(MS[123]|RESET|SLEEP)$",
+          "dir": "in",
+          "severity": "warning"
+        }
+      ],
+      "externalDriver": {
+        "pins": [
+          "1A",
+          "1B",
+          "2A",
+          "2B"
+        ],
+        "why": "the stepper coils are driven by the A4988's own H-bridges, not by the board"
+      },
+      "notes": "A4988 stepper driver: VDD=5V logic, VMOT=motor supply (with a 100uF capacitor across it), the GND pins to GND, STEP/DIR from GPIOs, ENABLE optional, MS1-3 set microstepping, 1A/1B/2A/2B to the stepper coils."
+    },
+    "stepper-motor": {
+      "class": "actuator-stepper",
+      "externalDriver": {
+        "pins": [
+          "A+",
+          "A-",
+          "B+",
+          "B-"
+        ],
+        "why": "a stepper coil cannot be driven from a GPIO; it needs a driver (A4988 or L293D)",
+        "via": [
+          "a4988",
+          "motor-driver-l293d"
+        ]
+      },
+      "notes": "Bipolar stepper: A+/A-/B+/B- are the two coils. They go to a driver, never to the board."
+    },
+    "biaxial-stepper": {
+      "class": "actuator-stepper",
+      "externalDriver": {
+        "pins": [
+          "A1+",
+          "A1-",
+          "A2+",
+          "A2-",
+          "B1+",
+          "B1-",
+          "B2+",
+          "B2-"
+        ],
+        "why": "stepper coils need H-bridge drivers, not GPIOs",
+        "via": [
+          "a4988",
+          "motor-driver-l293d"
+        ]
+      },
+      "notes": "Two-phase stepper with two coils per phase: every coil pair goes to a driver channel."
+    },
+    "servo": {
+      "class": "actuator-pwm",
+      "power": {
+        "V+": "supply",
+        "GND": "ground"
+      },
+      "signal": {
+        "PWM": {
+          "cap": "pwm",
+          "dir": "in"
+        }
+      },
+      "libraries": [
+        "Servo.h"
+      ],
+      "notes": "Hobby servo: PWM (the signal) on a PWM-capable pin (3,5,6,9,10,11), V+ and GND to a 5V supply that can deliver the stall current. Servo.h disables analogWrite on pins 9 and 10. Expect ~50 Hz pulses."
+    },
+    "junction": {
+      "class": "wiring",
+      "placeable": false,
+      "why": "a junction merges wires and has no pins to reason about; express nets with direct wires instead"
+    },
+    "breadboard": {
+      "class": "wiring",
+      "placeable": false,
+      "why": "prototyping boards are wiring aids: their rows are nets, not part pins, and the analysis works on direct wires"
+    },
+    "breadboard-mini": {
+      "class": "wiring",
+      "placeable": false,
+      "why": "same as the full breadboard — the agent wires parts directly"
+    },
+    "arduino-uno": {
+      "class": "board",
+      "placeable": false,
+      "why": "the board is the project's `board` field, not a component"
+    },
+    "arduino-nano": {
+      "class": "board",
+      "placeable": false,
+      "why": "only the Arduino Uno is supported as a build target right now"
+    },
+    "arduino-mega": {
+      "class": "board",
+      "placeable": false,
+      "why": "only the Arduino Uno is supported as a build target right now"
+    },
+    "esp32-devkit-v1": {
+      "class": "board",
+      "placeable": false,
+      "why": "the verification pipeline is AVR-only"
+    },
+    "nano-rp2040-connect": {
+      "class": "board",
+      "placeable": false,
+      "why": "the verification pipeline is AVR-only"
+    },
+    "franzininho": {
+      "class": "board",
+      "placeable": false,
+      "why": "only the Arduino Uno is supported as a build target right now"
+    }
+  }
+}

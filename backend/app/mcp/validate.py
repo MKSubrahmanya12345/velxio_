@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.agent import catalog
 from app.agent.analysis import analyse
 from app.agent.models import (
     BOARD_CAPABILITIES,
@@ -26,38 +27,38 @@ from app.agent.models import (
     validate_includes,
 )
 
-# wokwi/velxio type → agent catalog kind. Anything not listed here is outside
-# the agent's catalog and is reported as such instead of being waved through.
-_KIND_MAP = {
-    "led": "led",
-    "resistor": "resistor",
-    "pushbutton": "pushbutton",
-    "potentiometer": "potentiometer",
-    "buzzer": "buzzer",
-}
+# MCP circuits spell parts the Wokwi way (`wokwi-led`) while the agent catalog
+# uses its own ids; `catalog.resolve_id` is the single translation table, so
+# every part the editor can place is checkable here — not just the original five.
+def _kind_of(component: dict[str, Any]) -> str:
+    raw = str(component.get("metadataId") or component.get("type") or component.get("id") or "")
+    return catalog.resolve_id(raw) or ""
 # Board shapes seen in the wild: wokwi part type, FQBN, plain agent id.
 _BOARD_MAP = {
     "wokwi-arduino-uno": "uno",
     "arduino:avr:uno": "uno",
     "uno": "uno",
     "arduino-uno": "uno",
+    "arduino-uno-3v3": "uno",
+    "wokwi-arduino-nano": "uno",   # same AVR core and pin numbering for our rules
+    "arduino-nano": "uno",
 }
 
 
-def _kind_of(component: dict[str, Any]) -> str:
-    raw = str(component.get("metadataId") or component.get("type") or "").strip()
-    return _KIND_MAP.get(raw.removeprefix("wokwi-").removeprefix("wokwi_"), "")
-
 
 def _board_id_of(circuit: dict[str, Any], components: list[dict[str, Any]]) -> str | None:
-    raw = str(circuit.get("board") or circuit.get("board_fqbn") or "").strip()
+    raw = str(circuit.get("board") or circuit.get("board_fqbn") or "").strip().lower()
     mapped = _BOARD_MAP.get(raw)
     if mapped:
         return mapped
+    # Any board component is fine as long as it is one we can check.
     for component in components:
-        board_raw = str(component.get("type") or component.get("metadataId") or "")
+        board_raw = str(component.get("type") or component.get("metadataId") or "").lower()
         if board_raw in _BOARD_MAP:
             return _BOARD_MAP[board_raw]
+        board_kind = catalog.resolve_id(board_raw)
+        if board_kind and catalog.get(board_kind) and catalog.get(board_kind).cls == "board":
+            return _BOARD_MAP.get(board_kind, "uno")
     return None
 
 
@@ -86,8 +87,11 @@ def to_agent_project(circuit: dict[str, Any], files: list[dict[str, str]] | None
     for i, component in enumerate(raw_components):
         # The board part became project.board above — not a catalog candidate.
         raw_type = str(component.get("type") or component.get("metadataId") or "")
-        if raw_type in _BOARD_MAP:
+        if raw_type.lower() in _BOARD_MAP:
             continue
+        board_kind = catalog.resolve_id(raw_type)
+        if board_kind and (spec := catalog.get(board_kind)) and spec.cls == "board":
+            continue  # a board part: the project has one board, this is it
         kind = _kind_of(component)
         if not kind:
             notes.append(f"Part {component.get('id', i)} ({raw_type}) is outside the agent catalog; "
