@@ -19,6 +19,34 @@ import {
 import { runExpectations } from './expectations';
 import { useAgentJournal } from './journal';
 
+/** Active run metadata, set by requestRun() so sendFeedback() can POST mid-run
+ * notes without the caller having to thread run_id through the UI. */
+interface ActiveRun {
+  runId: string;
+  token: string;
+}
+let _active: ActiveRun | null = null;
+
+/** Send a mid-run clarification. Silently no-ops if no run is active or if the
+ * run has already finished (the server returns 404). */
+export async function sendFeedback(note: string): Promise<boolean> {
+  const active = _active;
+  if (!active) return false;
+  try {
+    const res = await fetch(`${getApiBase()}/agent/runs/${encodeURIComponent(active.runId)}/feedback`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(active.token ? { Authorization: `Bearer ${active.token}` } : {}),
+      },
+      body: JSON.stringify({ note: note.slice(0, 1000) }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 function delay(ms: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
     signal.throwIfAborted();
@@ -72,15 +100,19 @@ async function requestRun(
   }
   if (!response.body) throw new Error('Streaming responses are not available in this browser.');
   let terminal: TerminalEvent | null = null;
-  for await (const event of readEvents(response.body)) {
-    signal.throwIfAborted();
-    onEvent(event);
-    if (event.type === 'error')
-      throw new Error([event.message, event.diagnostics].filter(Boolean).join('\n\n'));
-    if (event.type === 'compile') {
-      useCompileLogsStore
-        .getState()
-        .appendLogs([
+  _active = null;
+  try {
+    for await (const event of readEvents(response.body)) {
+      signal.throwIfAborted();
+      if (event.type === 'run_started') {
+        _active = { runId: event.run_id, token: options.token };
+        continue; // internal event, no user-visible handling
+      }
+      onEvent(event);
+      if (event.type === 'error')
+        throw new Error([event.message, event.diagnostics].filter(Boolean).join('\n\n'));
+      if (event.type === 'compile') {
+        useCompileLogsStore.getState().appendLogs([
           {
             timestamp: new Date(),
             type: event.success ? 'success' : 'error',
@@ -92,8 +124,11 @@ async function requestRun(
             .filter(Boolean)
             .map((message) => ({ timestamp: new Date(), type: 'info' as const, message })),
         ]);
+      }
+      if (event.type === 'answer' || event.type === 'result') terminal = event;
     }
-    if (event.type === 'answer' || event.type === 'result') terminal = event;
+  } finally {
+    _active = null;
   }
   if (!terminal) throw new Error('Agent connection ended before a final result. Your workspace was not replaced.');
   return terminal;
