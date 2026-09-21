@@ -31,7 +31,8 @@ from typing import Any
 import httpx
 
 from app.agent import catalog
-from app.agent.models import PINS, PROPERTIES, TOOL_NAMES, Patch, Project, ToolCall, apply_patch
+from app.agent.models import (PINS, TOOL_NAMES, Patch, Project, ToolCall, apply_patch,
+                              describe_error)
 from app.core.config import settings
 
 logger = logging.getLogger("velxio.agent.tools")
@@ -112,12 +113,28 @@ def board_pinout(project: Project, args: dict) -> dict:
 
 def component_info(project: Project, args: dict) -> dict:
     kind = str(args.get("component", ""))[:60]
-    pins = PINS.get(kind)
-    if pins is None:
+    spec = catalog.get(kind)
+    if spec is None:
         return {"ok": False, "error": f"Unknown component kind {kind!r}.",
                 "catalog": sorted(PINS)}
-    return {"ok": True, "component": kind, "pins": pins,
-            "properties": sorted(PROPERTIES.get(kind, []))}
+    raw_properties = args.get("properties")
+    properties = ({key: value for key, value in raw_properties.items()
+                   if isinstance(value, (str, int, float, bool))}
+                  if isinstance(raw_properties, dict) else {})
+    # Pins follow the instance's properties (7segment digits=4, lcd1602
+    # pins=i2c). A flat list handed the model names the validator then rejected,
+    # which is a repair loop it cannot win.
+    info = {"ok": True, "component": kind, "pins": list(spec.pins_for(properties)),
+            "properties": sorted(spec.properties)}
+    if raw_properties:
+        info["for_properties"] = properties
+    if spec.pin_variants:
+        info["pin_variants"] = [{"when": dict(variant.get("when") or {}),
+                                 "pins": list(variant["pins"])}
+                                for variant in spec.pin_variants]
+        info["pin_note"] = ("This part's pins depend on its properties: set the properties "
+                            "first, then wire only pins from the matching set.")
+    return info
 
 
 def check_design(project: Project, args: dict) -> dict:
@@ -199,7 +216,7 @@ def _candidate(project: Project, args: dict) -> tuple[Project | None, dict | Non
     try:
         patch = Patch.model_validate(raw_patch)
     except Exception as exc:  # noqa: BLE001 — schema errors are the model's to read
-        return None, {"ok": False, "stage": "schema", "error": str(exc)[:2000]}
+        return None, {"ok": False, "stage": "schema", "error": describe_error(exc)[:2000]}
     expectations = None
     raw_expectations = args.get("expectations")
     if isinstance(raw_expectations, dict):
@@ -208,11 +225,12 @@ def _candidate(project: Project, args: dict) -> tuple[Project | None, dict | Non
         try:
             expectations = Expectations.model_validate(raw_expectations)
         except Exception as exc:  # noqa: BLE001
-            return None, {"ok": False, "stage": "schema", "error": str(exc)[:2000]}
+            return None, {"ok": False, "stage": "schema", "error": describe_error(exc)[:2000]}
     try:
         candidate = apply_patch(project, patch, expectations)
     except Exception as exc:  # noqa: BLE001 — this is exactly the feedback being asked for
-        return None, {"ok": False, "stage": "static", "accepted": False, "error": str(exc)[:4000]}
+        return None, {"ok": False, "stage": "static", "accepted": False,
+                      "error": describe_error(exc)[:2000]}
     return candidate, None
 
 
@@ -329,7 +347,8 @@ def describe_tools() -> str:
         "Tools you may request in tool_calls (results arrive in the next message; at most 4 calls "
         "per round, nothing is written to the workspace): "
         "read_file{name}; list_files{}; board_pinout{}; "
-        "component_info{component} — pins/properties/notes of one catalog id; "
+        "component_info{component, properties?} — pins/properties/notes of one catalog id; pass "
+        "the properties you intend to set (e.g. {\"digits\": 4}) to get that variant's pins; "
         "search_catalog{query, category?, limit?} — find parts across the whole catalog; "
         "netlist{} — what is connected to what right now; "
         "check_design{} — static coherence analysis of the current project; "

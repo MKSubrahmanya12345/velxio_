@@ -14,6 +14,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the serial batcher, and `lib/proHardwareSerial.ts` lets an installed monitor
   intercept a board's serial input while attached
 
+### Fixed
+- Agent patches survive an obvious pin-name misspelling (`pin1` → `1`, `D13` → `13`):
+  wire endpoints are resolved against the part's real pins before validation, and a
+  pin that still names nothing is reported with the part's pin list instead of dumping
+  the whole project through `str(ValidationError)`, which left the repair loop with
+  nothing to act on
+
 ## [2.0.1] - 2026-04-22
 
 ### Added

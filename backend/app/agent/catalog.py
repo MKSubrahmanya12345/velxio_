@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 _CATALOG_PATH = Path(__file__).with_name("catalog.json")
 _CATALOG: dict[str, Any] = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
@@ -198,6 +198,44 @@ def pins_for(part_id: str, properties: dict[str, Any] | None = None) -> list[str
 def editable(part_id: str) -> set[str]:
     spec = PARTS.get(part_id)
     return set(spec.properties) if spec else set()
+
+
+def _pin_key(name: Any) -> str:
+    """Pin-name key: case and punctuation carry no meaning (COM.1 == com1)."""
+    return re.sub(r"[^a-z0-9]", "", str(name).strip().lower())
+
+
+def resolve_pin(pins: Iterable[str], name: Any) -> str | None:
+    """Canonical pin name for `name`, or None when it names no pin of this part.
+
+    Models spell pins the way their training data does: "pin1" for a resistor's
+    "1", "D13" for the Uno's "13", "com1" for "COM.1". Those are unambiguous
+    misspellings of a pin that exists, so repair them instead of failing the
+    patch. A name is accepted only when it matches exactly ONE pin (the catalog
+    has parts whose "+"/"-" pins collapse to the same loose key), so anything
+    else returns None and the caller reports the real problem.
+    """
+    known = [str(pin) for pin in pins]
+    raw = str("" if name is None else name).strip()
+    if not raw:
+        return None
+    if raw in known:
+        return raw
+    by_key: dict[str, list[str]] = {}
+    for pin in known:
+        by_key.setdefault(_pin_key(pin), []).append(pin)
+    candidates = [raw]
+    without_prefix = re.sub(r"^pin[_\-\s]*", "", raw, flags=re.IGNORECASE)  # "pin1" -> "1"
+    if without_prefix and without_prefix != raw:
+        candidates.append(without_prefix)
+    uno_style = re.fullmatch(r"[dD]\s*(\d{1,2})", raw)  # "D13" -> "13"
+    if uno_style:
+        candidates.append(uno_style.group(1))
+    for candidate in candidates:
+        hits = by_key.get(_pin_key(candidate))
+        if hits and len(hits) == 1:
+            return hits[0]
+    return None
 
 
 def board(board_id: str = DEFAULT_BOARD) -> dict[str, Any]:

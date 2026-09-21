@@ -29,7 +29,7 @@ from pydantic import ValidationError
 
 from app.agent import catalog
 from app.agent.feedback import register as register_feedback, push as push_feedback, unregister
-from app.agent.models import AgentRequest, Proposal, apply_patch
+from app.agent.models import AgentRequest, Proposal, apply_patch, describe_error
 from app.agent.runlog import RunRecord, start as start_run_record
 from app.agent.models import DRAFT_TOOLS
 from app.agent.tools import describe_tools, execute_tool, tool_results_message
@@ -1200,7 +1200,10 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
             messages.append({"role": "assistant", "content": proposal.model_dump_json()})
             logger.info("run %s attempt %d: compile failed, repairing", run_id, attempt + 1)
         except (ValidationError, ValueError) as exc:
-            diagnostics = str(exc)[:6000]
+            # describe_error, not str(exc): a raw ValidationError embeds the whole
+            # offending project (firmware included), so the one actionable line —
+            # "r1 has pins: 1, 2" — was buried and the repair attempts repeated.
+            diagnostics = describe_error(exc)[:6000]
             logger.info("run %s attempt %d: rejected, repairing: %s", run_id, attempt + 1,
                         diagnostics[:200])
         if attempt == final_attempt:
