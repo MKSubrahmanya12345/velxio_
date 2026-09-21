@@ -1,15 +1,5 @@
-// Forge — the Jev decision catalog (J1–J10).
-//
-// Each decision is ONE batched Jev call (the "one call, many questions"
-// doctrine from the TypeSafe docs — questions in a request are evaluated in
-// parallel and in isolation) followed by a pure verdict function that turns
-// raw answers into a structured result the state machine can act on.
-//
-// Confidence gating (J5) is applied in the pipeline off the `confidence`
-// every verdict exposes. One contract detail from the TypeSafe API: Noul
-// answers carry NO separate confidence field — only the yes-probability — so
-// their gating certainty is max(p, 1-p). Choice/Score answers carry an
-// explicit `confidence` derived from the distribution shape.
+// Forge — Jev decision catalog (chat-first + legacy J1-J10).
+// Human is a tool: JEV decides when to call human, what to ask, and whether human's report counts.
 
 const r2 = (x) => Math.round(x * 100) / 100;
 const choice = (a, id) => a?.[id]?.choice;
@@ -18,6 +8,82 @@ const score = (a, id) => a?.[id]?.score ?? 0;
 const certainty = (p) => Math.max(p, 1 - p);
 
 export const DECISIONS = {
+  // ── CHAT: Intent detection (first gate in chat loop) ──────────────────────
+  CHAT_INTENT: {
+    name: 'Chat intent',
+    questions({ message, hasProject }) {
+      return {
+        chat_intent: {
+          type: 'choice',
+          instructions: `Classify this chat message: "${message}". Context: ${hasProject ? 'a build plan already exists' : 'no plan yet, fresh conversation'}.`,
+          criteria: {
+            build_request: 'User wants to build something new (e.g. "I wanna build X", "make me a Y")',
+            question: 'User asks a question about the build, plan, parts, or technique',
+            status_update: 'User reports progress on a physical step (done, failed, have part, etc)',
+            human_tool_result: 'User is responding to a human tool call (completing a requested physical action)',
+            claim_done: 'User claims the whole project is finished',
+            scope_change: 'User wants to change the goal or plan',
+            general: 'General chat, greeting, or off-topic',
+          },
+        },
+        needs_plan: {
+          type: 'noul',
+          instructions: `Does the message "${message}" require creating a new implementation plan?`,
+        },
+        frustration: {
+          type: 'score',
+          instructions: 'How frustrated or stuck is the user?',
+          criteria: ['On track', 'Minor friction', 'Stuck, needs help', 'Overwhelmed'],
+        },
+      };
+    },
+    verdict(a) {
+      const intent = choice(a, 'chat_intent') ?? 'general';
+      const intentConf = a?.chat_intent?.confidence ?? 0;
+      const needsPlan = noul(a, 'needs_plan');
+      const frust = score(a, 'frustration');
+      return {
+        kind: 'chat_intent',
+        summary: `intent=${intent} (conf ${r2(intentConf)}) · needs_plan=${needsPlan >= 0.5} · frustration=${r2(frust)}/3`,
+        confidence: intentConf,
+        intent,
+        intent_confidence: intentConf,
+        needs_plan: needsPlan >= 0.5,
+        frustration: frust,
+      };
+    },
+  },
+
+  // ── CHAT: Goal extraction confidence ──────────────────────────────────────
+  GOAL_PARSE: {
+    name: 'Goal parsing',
+    questions({ message }) {
+      return {
+        goal_clear: {
+          type: 'noul',
+          instructions: `Is the build goal clearly stated in: "${message}"? A clear goal names what to build.`,
+        },
+        goal_specificity: {
+          type: 'score',
+          instructions: `How specific is the build goal in "${message}"?`,
+          criteria: ['Vague (build something cool)', 'Somewhat specific (build a lamp)', 'Specific (build an MP3 player with ESP32)', 'Very detailed with specs'],
+        },
+      };
+    },
+    verdict(a) {
+      const clear = noul(a, 'goal_clear');
+      const spec = score(a, 'goal_specificity');
+      return {
+        kind: 'goal_parse',
+        summary: `goal_clear=${clear >= 0.5} (p=${r2(clear)}) · specificity=${r2(spec)}/3`,
+        confidence: certainty(clear),
+        clear: clear >= 0.5,
+        specificity: spec,
+        certainty: certainty(clear),
+      };
+    },
+  },
+
   // ── J1 · Feasibility gate (intake, once per project) ─────────────────────
   J1: {
     name: 'Feasibility gate',
@@ -132,6 +198,42 @@ export const DECISIONS = {
     },
   },
 
+  // ── HUMAN TOOL: Should we call human? ─────────────────────────────────────
+  HUMAN_TOOL: {
+    name: 'Human tool decision',
+    questions({ stepRef, message, hasPendingHuman }) {
+      const stepDesc = stepRef?.step ? `"${stepRef.step.title}" (${stepRef.step.track})` : 'no active step';
+      return {
+        call_human: {
+          type: 'noul',
+          instructions: `Given current step ${stepDesc} and message "${message}", should we call the human tool to execute a physical action? Pending human calls: ${hasPendingHuman ? 'yes' : 'no'}.`,
+        },
+        human_task_complexity: {
+          type: 'score',
+          instructions: `How complex is the human task for step ${stepDesc}?`,
+          criteria: ['Trivial (seconds)', 'Simple (minutes)', 'Involved (hour)', 'Major (hours)'],
+        },
+        needs_clarification: {
+          type: 'noul',
+          instructions: `Does the agent need clarification from human before proceeding with "${message}"?`,
+        },
+      };
+    },
+    verdict(a) {
+      const call = noul(a, 'call_human');
+      const complexity = score(a, 'human_task_complexity');
+      const clarify = noul(a, 'needs_clarification');
+      return {
+        kind: 'human_tool',
+        summary: `call_human=${call >= 0.5} (p=${r2(call)}) · complexity=${r2(complexity)}/3 · needs_clarify=${clarify >= 0.5}`,
+        confidence: certainty(call),
+        call_human: call >= 0.5,
+        complexity,
+        needs_clarification: clarify >= 0.5,
+      };
+    },
+  },
+
   // ── J3 · Step verification (on "done" reports) ───────────────────────────
   J3: {
     name: 'Step verification',
@@ -166,7 +268,7 @@ export const DECISIONS = {
     },
   },
 
-  // ── J4 · Substitute matching (map-reduce over the builder's inventory) ───
+  // ── J4 · Substitute matching ──────────────────────────────────────────────
   J4: {
     name: 'Substitute matching',
     questions({ substitution }) {
@@ -174,7 +276,7 @@ export const DECISIONS = {
       (substitution?.items || []).slice(0, 12).forEach((it, i) => {
         q[`valid_sub_${i}`] = {
           type: 'noul',
-          instructions: `Given the missing part "${substitution?.need ?? ''}", is "${it.name}${it.note ? ` (${it.note})` : ''}" a valid substitute that will let the build proceed?`,
+          instructions: `Given the missing part "${substitution?.need ?? ''}", is "${it.name}${it.note ? ` (${it.note})` : ''}" a valid substitute?`,
         };
         q[`compat_${i}`] = {
           type: 'score',
@@ -206,7 +308,7 @@ export const DECISIONS = {
     },
   },
 
-  // ── J6 · Safety interlock (per step start, fail-safe direction) ──────────
+  // ── J6 · Safety interlock ─────────────────────────────────────────────────
   J6: {
     name: 'Safety interlock',
     questions({ stepRef }) {
@@ -237,55 +339,55 @@ export const DECISIONS = {
     },
   },
 
-  // ── J8 · Speculative fan-out (next-action probes, one batched call) ──────
+  // ── J8 · Speculative fan-out ──────────────────────────────────────────────
   J8: {
     name: 'Speculative fan-out',
     questions() {
       return {
         next_inventory: {
           type: 'noul',
-          instructions: 'Based on the current step and bill of materials, should the builder be prompted to add parts they already have to their inventory?',
+          instructions: 'Should the builder be prompted to add parts they already have to inventory?',
         },
         next_check: {
           type: 'noul',
-          instructions: 'Before the next step, does the build need a verification checkpoint (measuring a rail, testing a joint) rather than simply proceeding?',
+          instructions: 'Before next step, does build need a verification checkpoint?',
         },
         next_question: {
           type: 'noul',
-          instructions: 'Does the builder appear to have an unanswered question that needs addressing now?',
+          instructions: 'Does builder appear to have an unanswered question?',
         },
       };
     },
     verdict(a) {
       const suggestions = [
-        noul(a, 'next_inventory') >= 0.55 ? 'Add the parts you already have to your inventory (sidebar → Bill of materials) — it powers substitute matching.' : null,
-        noul(a, 'next_check') >= 0.55 ? 'Run a quick checkpoint check (multimeter / visual) before moving on.' : null,
-        noul(a, 'next_question') >= 0.55 ? 'Ask me anything about this step — parts, tools, or technique.' : null,
+        noul(a, 'next_inventory') >= 0.55 ? 'Add the parts you already have to your inventory — it powers substitute matching.' : null,
+        noul(a, 'next_check') >= 0.55 ? 'Run a quick checkpoint check before moving on.' : null,
+        noul(a, 'next_question') >= 0.55 ? 'Ask me anything about this step.' : null,
       ].filter(Boolean);
       return {
         kind: 'fanout',
-        summary: `${suggestions.length} suggestion(s) from ${3} probes`,
+        summary: `${suggestions.length} suggestion(s) from 3 probes`,
         confidence: 1,
         suggestions,
       };
     },
   },
 
-  // ── J9 · Completion acceptance (highest-stakes gate in the system) ───────
+  // ── J9 · Completion acceptance ────────────────────────────────────────────
   J9: {
     name: 'Completion acceptance',
     questions({ state }) {
       const q = {};
-      state.acceptance.slice(0, 8).forEach((c, i) => {
+      (state?.acceptance || []).slice(0, 8).forEach((c, i) => {
         q[`accept_${i}`] = {
           type: 'noul',
-          instructions: `Based on the full build log and the current state of the project, does the finished project satisfy: "${c}"?`,
+          instructions: `Does finished project satisfy: "${c}"?`,
         };
       });
       return q;
     },
     verdict(a, ctx) {
-      const criteria = ctx.state.acceptance.slice(0, 8);
+      const criteria = (ctx.state?.acceptance || []).slice(0, 8);
       const results = criteria.map((c, i) => {
         const p = noul(a, `accept_${i}`);
         return { criterion: c, met: p >= 0.5, certainty: certainty(p) };
@@ -302,14 +404,14 @@ export const DECISIONS = {
     },
   },
 
-  // ── J10 · Plan difficulty match (replan trigger) ─────────────────────────
+  // ── J10 · Plan difficulty match ───────────────────────────────────────────
   J10: {
     name: 'Plan difficulty match',
     questions({ message }) {
       return {
         difficulty: {
           type: 'score',
-          instructions: `The builder's latest message: "${message}". How well does the current plan difficulty match the builder's skill?`,
+          instructions: `Builder message: "${message}". How well does current plan difficulty match skill?`,
           criteria: ['Right level', 'Slightly hard', 'Too hard', 'Over my head'],
         },
       };
@@ -334,5 +436,6 @@ export async function runDecision(id, ctx, deps) {
   const res = await deps.jev({ state: ctx.jevState ?? {}, questions });
   const v = d.verdict(res.answers, ctx);
   if (deps.counters) deps.counters.jevCalls += 1;
+  if (deps.conversationCounters) deps.conversationCounters.jevCalls += 1;
   return { id, name: d.name, kind: v.kind, summary: v.summary, confidence: v.confidence, detail: v };
 }

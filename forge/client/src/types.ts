@@ -1,5 +1,4 @@
-// Forge client — types mirroring the server's ProjectState (schema.js).
-// The server is the source of truth; these exist for the UI only.
+// Forge client — chat-first types
 
 export interface SafetyFlag {
   hazard: string;
@@ -54,32 +53,44 @@ export interface Decision {
   detail: Record<string, unknown>;
 }
 
-export interface Proposal {
-  type: 'substitute' | 'replan';
-  need?: string;
-  item?: { id?: string; name: string; note?: string };
-  compatibility?: number;
-  confidence?: number;
-  stepId?: string;
-  text?: string;
+export interface HumanToolCall {
+  id: string;
+  name: 'human';
+  status: 'requires_action' | 'completed' | 'failed';
+  at: string;
+  arguments: {
+    task: string;
+    instructions: string;
+    materials: string[];
+    tools: string[];
+    safety: SafetyFlag[];
+    definition_of_done: string[];
+    track: string;
+    phase: string;
+    stepId: string;
+    reason?: string;
+    attempt?: number;
+  };
+  result?: string | null;
+  completedAt?: string;
 }
 
-export interface Constraints {
-  budget_usd: number | null;
-  time: string;
-  skill: string;
-  notes: string;
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content: string;
+  at: string;
+  decisions?: Decision[];
+  toolCalls?: HumanToolCall[];
+  toolCallId?: string | null;
+  plan?: ProjectState | null;
+  meta?: Record<string, unknown>;
 }
 
 export interface ProjectState {
   goal: string;
-  constraints: Constraints;
-  feasibility: {
-    category: string;
-    buildability: string;
-    risk_tier: string;
-    complexity: number;
-  };
+  constraints: { budget_usd: number | null; time: string; skill: string; notes: string };
+  feasibility: { category: string; buildability: string; risk_tier: string; complexity: number };
   status: 'planning' | 'active' | 'paused' | 'complete' | 'aborted';
   phases: Phase[];
   current: { phaseId: string | null; stepId: string | null };
@@ -89,16 +100,23 @@ export interface ProjectState {
   log: LogEntry[];
   skill: Record<string, { successes: number; fails: number }>;
   safetyAcks: Record<string, boolean>;
-  safetyGate: { stepId: string; flags: SafetyFlag[] } | null;
-  counters: {
-    messages: number;
-    jevCalls: number;
-    escalations: number;
-    stepsCompleted: number;
-    substitutions: number;
-  };
+  safetyGate: { stepId: string; flags: SafetyFlag[]; ackRequired?: boolean } | null;
+  counters: { messages: number; jevCalls: number; escalations: number; stepsCompleted: number; substitutions: number; humanCalls?: number };
   confidence: Record<string, number>;
-  proposal: Proposal | null;
+  proposal: any | null;
+}
+
+export interface Conversation {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  title: string;
+  messages: ChatMessage[];
+  projectState: ProjectState | null;
+  pendingHumanTools: HumanToolCall[];
+  counters: { messages: number; jevCalls: number; humanCalls: number; plans: number };
+  // backward compat alias
+  state?: ProjectState | null;
 }
 
 export interface Project {
@@ -115,15 +133,18 @@ export interface ResponsePayload {
 }
 
 export interface MessageResult {
-  project: Project;
-  response: ResponsePayload;
+  conversation: Conversation;
+  response: ChatMessage;
   decisions: Decision[];
+  // legacy
+  project?: Project;
 }
 
 export interface CreateResult {
-  project: Project;
-  response: ResponsePayload;
+  conversation: Conversation;
+  response: ChatMessage;
   decisions: Decision[];
+  project?: Project;
 }
 
 export interface Health {
@@ -131,4 +152,5 @@ export interface Health {
   service: string;
   time: string;
   providers: { jev: string; planner: string; store: string };
+  mode?: string;
 }

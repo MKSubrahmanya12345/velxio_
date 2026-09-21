@@ -1,12 +1,8 @@
-// Forge — API layer. Relative /api base: in dev the Vite proxy
-// forwards to the server; in production Express serves the client itself.
+// Forge — API layer (chat-first)
 
-import type {
-  CreateResult, Health, MessageResult, Project, ProjectState,
-} from './types';
+import type { Conversation, Health, MessageResult, CreateResult } from './types';
 
-const BASE =
-  (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL ?? '/api';
+const BASE = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL ?? '/api';
 
 async function http<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {
@@ -15,81 +11,63 @@ async function http<T>(path: string, opts?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     let detail = '';
-    try { detail = (await res.json() as { error?: string }).error || ''; } catch { /* not json */ }
+    try { detail = (await res.json() as { error?: string }).error || ''; } catch {}
     throw new Error(`API ${res.status}${detail ? `: ${detail}` : ''}`);
   }
   return res.json() as Promise<T>;
 }
 
-export interface ConstraintsIn {
-  budget_usd?: number | null;
-  time?: string;
-  skill?: string;
-  notes?: string;
-}
-
-// Releases of Forge before the project envelope was wired into the REST
-// routes returned ProjectState directly. Normalize both shapes at the API
-// boundary so an old server or an old persisted project cannot take down the
-// React tree while the server is being upgraded.
-function normalizeProject(payload: unknown): Project {
-  if (!payload || typeof payload !== 'object') {
-    throw new Error('API returned an invalid project');
-  }
-
-  const value = payload as Record<string, unknown>;
-  const nested = value.state;
-  if (nested && typeof nested === 'object' && Array.isArray((nested as Record<string, unknown>).phases)) {
-    const now = new Date().toISOString();
+function normalizeConversation(payload: unknown): Conversation {
+  if (!payload || typeof payload !== 'object') throw new Error('invalid conversation');
+  const v = payload as any;
+  // If payload is legacy project
+  if (v.state && !v.messages) {
     return {
-      id: String(value.id || `project-${Date.now()}`),
-      createdAt: String(value.createdAt || now),
-      updatedAt: String(value.updatedAt || value.createdAt || now),
-      state: nested as ProjectState,
+      id: String(v.id),
+      createdAt: String(v.createdAt),
+      updatedAt: String(v.updatedAt),
+      title: String(v.state.goal || 'Imported project'),
+      messages: [],
+      projectState: v.state,
+      pendingHumanTools: [],
+      counters: { messages: 0, jevCalls: 0, humanCalls: 0, plans: 1 },
     };
   }
-
-  if (Array.isArray(value.phases)) {
-    const {
-      id,
-      createdAt,
-      updatedAt,
-      ...state
-    } = value;
-    const now = new Date().toISOString();
+  if (Array.isArray(v.messages)) {
     return {
-      id: String(id || `project-${Date.now()}`),
-      createdAt: String(createdAt || now),
-      updatedAt: String(updatedAt || createdAt || now),
-      state: state as unknown as ProjectState,
+      id: String(v.id),
+      createdAt: String(v.createdAt),
+      updatedAt: String(v.updatedAt || v.createdAt),
+      title: String(v.title || 'New build chat'),
+      messages: Array.isArray(v.messages) ? v.messages : [],
+      projectState: v.projectState || v.state || null,
+      pendingHumanTools: Array.isArray(v.pendingHumanTools) ? v.pendingHumanTools : [],
+      counters: v.counters || { messages: 0, jevCalls: 0, humanCalls: 0, plans: 0 },
     };
   }
-
-  throw new Error('API returned a project without state');
+  throw new Error('API returned invalid conversation');
 }
 
 export const api = {
   health: () => http<Health>('/health'),
-  list: async () => (await http<unknown[]>('/projects')).map(normalizeProject),
-  get: async (id: string) => normalizeProject(await http<unknown>(`/projects/${id}`)),
-  create: async (goal: string, constraints: ConstraintsIn) => {
-    const result = await http<CreateResult>('/projects', {
+  list: async () => (await http<unknown[]>('/chat')).map(normalizeConversation),
+  get: async (id: string) => normalizeConversation(await http<unknown>(`/chat/${id}`)),
+  create: async (goal: string) => {
+    const result = await http<CreateResult>('/chat', {
       method: 'POST',
-      body: JSON.stringify({ goal, constraints }),
+      body: JSON.stringify({ goal }),
     });
-    return { ...result, project: normalizeProject(result.project) };
+    return { ...result, conversation: normalizeConversation(result.conversation) };
   },
   message: async (id: string, body: { text?: string; chip?: string }) => {
-    const result = await http<MessageResult>(`/projects/${id}/messages`, {
+    const result = await http<MessageResult>(`/chat/${id}/messages`, {
       method: 'POST',
       body: JSON.stringify(body),
     });
-    return { ...result, project: normalizeProject(result.project) };
+    return { ...result, conversation: normalizeConversation(result.conversation) };
   },
-  addInventory: async (id: string, items: { name: string; note?: string }[]) =>
-    normalizeProject(await http<unknown>(`/projects/${id}/inventory`, {
-      method: 'POST',
-      body: JSON.stringify({ items }),
-    })),
-  remove: (id: string) => http<{ ok: boolean }>(`/projects/${id}`, { method: 'DELETE' }),
+  remove: (id: string) => http<{ ok: boolean }>(`/chat/${id}`, { method: 'DELETE' }),
+
+  // legacy aliases
+  listProjects: async () => (await http<unknown[]>('/projects')).map(normalizeConversation),
 };
