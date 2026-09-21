@@ -4,25 +4,28 @@ const solo = text => /only (?:me|myself|one|a single)|(?:just|single).*(?:me|per
 const rule = text => /\bonly\b|\bmust\b|\bnever\b|\bno\b|\bcannot\b|\bcan't\b|\brule\b|\balone\b|\bsingle\b/i.test(text);
 const explicitChange = message => /^replace (?:rule|note) note_[\w-]+:/i.test(message.trim());
 const live = memory => memory.notes.filter(n => n.status === 'active');
+const domainOf = text => /character|story|plot|scene|supernatural|ghost|monster|timeline|past self|future self|haunt|demon|voic/i.test(text)
+  ? 'fiction'
+  : /crew|actor|camera|equipment|budget|shoot|location|schedule|phone|monitor|only me|solo/i.test(text) ? 'production' : 'unknown';
 
 export function createDemoReasoner() {
   return {
     async propose({ message, memory }) {
       const replacement = message.match(/^replace (?:rule|note) (note_[\w-]+):\s*([\s\S]+)/i);
-      if (replacement) return { notes: [{ kind: memory.notes.find(n => n.id === replacement[1])?.kind || 'rule', text: replacement[2], quote: replacement[2], supersedes: [replacement[1]] }] };
+      if (replacement) return { notes: [{ kind: memory.notes.find(n => n.id === replacement[1])?.kind || 'rule', domain: domainOf(replacement[2]), text: replacement[2], quote: replacement[2], supersedes: [replacement[1]] }] };
       const notes = [];
       const clauses = message.split(/[.!?\n]+/).map(s => s.trim()).filter(Boolean);
       for (const text of clauses.slice(0, 8)) {
-        if (/\b(wanna|want to|make|build|create|organize|write|launch)\b/i.test(text) && !live(memory).some(n => n.kind === 'goal')) notes.push({ kind: 'goal', text, quote: text });
-        if (rule(text)) notes.push({ kind: 'rule', text, quote: text });
-        else if (/\bi (?:have|own|can use)|my (?:budget|equipment|location)/i.test(text)) notes.push({ kind: 'fact', text, quote: text });
-        else if (/\bi (?:prefer|like|would rather)/i.test(text)) notes.push({ kind: 'preference', text, quote: text });
+        if (/\b(wanna|want to|make|build|create|organize|write|launch)\b/i.test(text) && !live(memory).some(n => n.kind === 'goal')) notes.push({ kind: 'goal', domain: domainOf(text), text, quote: text });
+        if (rule(text)) notes.push({ kind: 'rule', domain: domainOf(text), text, quote: text });
+        else if (/\bi (?:have|own|can use)|my (?:budget|equipment|location)/i.test(text)) notes.push({ kind: 'fact', domain: domainOf(text), text, quote: text });
+        else if (/\bi (?:prefer|like|would rather)/i.test(text)) notes.push({ kind: 'preference', domain: domainOf(text), text, quote: text });
       }
-      if (solo(message)) notes.push({ kind: 'assumption', text: 'Production methods should be operable by one person.', quote: '' });
-      if (/film|movie/i.test(message)) notes.push({ kind: 'suggestion', text: 'Consider a self-recorded scene where the threat is suggested through sound and framing.', quote: '' });
+      if (solo(message)) notes.push({ kind: 'assumption', domain: 'production', text: 'Production methods should be operable by one person.', quote: '' });
+      if (/film|movie/i.test(message)) notes.push({ kind: 'suggestion', domain: 'production', text: 'Consider a self-recorded scene where the threat is suggested through sound and framing.', quote: '' });
       if (/brother|friend|helper|crew/i.test(message) && !rule(message) && !explicitChange(message)) {
         const previous = live(memory).find(n => n.kind === 'rule' && solo(n.text));
-        if (previous) notes.push({ kind: 'rule', text: message, quote: message, supersedes: [previous.id] });
+        if (previous) notes.push({ kind: 'rule', domain: domainOf(message), text: message, quote: message, supersedes: [previous.id] });
       }
       return { notes: notes.slice(0, 8) };
     },
@@ -48,9 +51,12 @@ export function demoMemoryAnswers(ctx, questions) {
     const candidate = ctx.proposals?.[index];
     if (ctx.operation === 'memory_review') {
       const supported = !!candidate?.quote && ctx.message.includes(candidate.quote);
-      if (key.startsWith('kind_')) answers[key] = { type: 'choice', choice: candidate.kind, confidence: .95 };
+      if (key.startsWith('kind_')) answers[key] = { type: 'choice', choice: candidate?.kind || 'question', confidence: .95 };
+      else if (key.startsWith('domain_')) answers[key] = { type: 'choice', choice: candidate?.domain && candidate.domain !== 'unknown' ? candidate.domain : domainOf(`${candidate?.text || ''} ${ctx.message}`), confidence: .9 };
+      else if (key.startsWith('conflicts_with_')) answers[key] = { type: 'choice', choice: 'none', confidence: .95 };
+      else if (key.startsWith('reconcile_')) answers[key] = { type: 'choice', choice: 'open', confidence: .9 };
       else if (key.startsWith('support_')) answers[key] = { type: 'noul', noul: supported ? .98 : .1 };
-      else if (key.startsWith('change_')) answers[key] = { type: 'noul', noul: !candidate.supersedes.length || explicitChange(ctx.message) ? .98 : .1 };
+      else if (key.startsWith('change_')) answers[key] = { type: 'noul', noul: !candidate?.supersedes?.length || explicitChange(ctx.message) ? .98 : .1 };
       else answers[key] = { type: 'noul', noul: .95 };
     } else if (ctx.operation === 'output_review') {
       if (key === 'disposition') answers[key] = { type: 'choice', choice: 'deliver', confidence: .95 };

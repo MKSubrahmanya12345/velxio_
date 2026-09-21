@@ -487,7 +487,10 @@ button:focus-visible, summary:focus-visible, a:focus-visible {
 .fg-memory-note.is-forming { border-style: dashed; }
 .fg-memory-note.is-checking::after { content: ''; position: absolute; inset: 0; background: linear-gradient(100deg, transparent 20%, #8bdfff18 50%, transparent 80%); animation: forge-scan 1.5s linear infinite; pointer-events: none; }
 .fg-memory-check { color: #99ceb9; font-size: 10px; margin: 10px 0; display: flex; gap: 6px; }
-.fg-memory-check.check-conflict, .fg-memory-check.check-uncertain { color: #f1ba72; }
+/* Uncertainty is not contradiction — keep the visual languages distinct. */
+.fg-memory-check.check-conflict { color: #f1ba72; }
+.fg-memory-check.check-uncertain { color: #cfc487; }
+.fg-memory-check.check-unknown { color: #e0a0a0; }
 .fg-memory-source { font-size: 11px; color: #99a7b0; }
 .fg-memory-source summary { cursor: pointer; }
 .fg-memory-source p { line-height: 1.6; }
@@ -507,6 +510,10 @@ button:focus-visible, summary:focus-visible, a:focus-visible {
 .fg-memory-trace small { color: #82939f; font: 9px var(--font-mono); }
 .fg-memory-trace p { font-size: 10px; color: #a2bfb4; margin: 7px 0; }
 .fg-memory-trace p span { color: #94a5ad; }
+.fg-memory-trace .fg-trace-block { color: #f1ba72; }
+.fg-memory-raw { margin-top: 6px; }
+.fg-memory-raw summary { cursor: pointer; font-size: 10px; color: #82939f; }
+.fg-memory-raw pre { font: 9px var(--font-mono); color: #9fb0b8; background: #0d1212; border: 1px solid #2c3539; border-radius: 6px; padding: 8px; overflow: auto; max-height: 220px; margin: 6px 0; }
 .fg-memory-caveat { color: #8b9aa6; font-size: 10px; line-height: 1.7; margin: 16px 0 0; }
 .fg-memory-intake { border: 1px solid #365747; border-radius: 12px; background: #101616; }
 .fg-memory-intake .fg-memory-notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }

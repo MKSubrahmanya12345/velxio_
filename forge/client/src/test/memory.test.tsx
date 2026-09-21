@@ -57,6 +57,25 @@ it('labels animation playback as a replay, not a fresh model call', async () => 
   expect(screen.getByRole('status', { name: 'Memory processing' })).toHaveTextContent('Last turn');
 });
 
+it('separates contradiction from uncertainty and exposes raw JEV answers', async () => {
+  const uncertain: MemoryNote = { ...rule, id: 'note_3', kind: 'fact', domain: 'production', text: 'I have a phone', status: 'pending', reason: 'Compatibility is uncertain — JEV did not identify a contradiction, but did not clear it either.' };
+  const checked = event({
+    checks: [
+      { noteId: uncertain.id, text: uncertain.text, kind: 'fact', value: .4, verdict: 'uncertain', blocking: false },
+      { noteId: rule.id, text: rule.text, kind: 'rule', value: .02, verdict: 'conflict', blocking: true },
+    ],
+    blocking: [{ type: 'contradiction', noteId: rule.id, text: rule.text, value: .02 }],
+    raw: { model: 'jev-x', answers: { respect_0: { type: 'noul', noul: .02 } } },
+  });
+  render(<MemoryPanel memory={{ ...memory, notes: [rule, uncertain], events: [checked] }} />);
+  expect(screen.getAllByText(/uncertain — not a confirmed conflict/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/contradiction found/).length).toBeGreaterThan(0);
+  expect(screen.getByText(/held by: contradiction — Only me, no other actors or crew\./)).toBeInTheDocument();
+  await userEvent.click(screen.getByText(/Decision trail/));
+  await userEvent.click(screen.getByText('Raw JEV response'));
+  expect(screen.getByText(/"noul": 0.02/)).toBeVisible();
+});
+
 it('consumes split UTF-8 progress packets and returns only the confirmed result', async () => {
   const e = event({ label: 'JEV → checking' });
   const raw = new TextEncoder().encode(JSON.stringify({ type: 'progress', event: e }) + '\n' + JSON.stringify({ type: 'result', result: { ok: true } }));

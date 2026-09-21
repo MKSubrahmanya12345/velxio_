@@ -9,6 +9,7 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "smoke": "node scripts/smoke.mjs",
+    "raw-reviews": "node scripts/raw-reviews.mjs",
     "test": "node --test test/*.test.js"
   },
   "engines": {

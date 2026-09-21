@@ -1,6 +1,6 @@
 import { makeConversation, makeMessage, nowIso } from '../schema.js';
 import { createReasoner } from './reasoner.js';
-import { normalizeMemory, normalizeProposals, activeNotes, id } from './model.js';
+import { normalizeMemory, normalizeProposals, activeNotes, id, COMMIT_KINDS } from './model.js';
 import { memoryQuestions, outputQuestions, applyReview, evaluateOutput } from './decisions.js';
 import { handleChatMessage } from '../pipeline.js';
 
@@ -24,11 +24,12 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}) {
     emit(item);
     return item;
   };
+  // The raw JEV response is kept: exact failing values beat inferred ones.
   const ask = async (state, questions) => {
     const response = await deps.jev({ state, questions });
     conversation.counters.jevCalls += 1;
     if (deps.counters) deps.counters.jevCalls += 1;
-    return response.answers || {};
+    return { answers: response.answers || {}, raw: response };
   };
   const knowledge = () => ({ revision: memory.revision, notes: memory.notes.filter(n => !['superseded', 'rejected'].includes(n.status)) });
   // All active notes are supplied even when the transcript exceeds this window.
@@ -38,9 +39,14 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}) {
   if (memory.notes.length + proposals.length > 500) throw new Error('These updates exceed the project memory limit. No notes were discarded or saved.');
   event('extract', 'complete', `${proposals.length} candidate notes formed`, { proposals });
   event('review', 'running', 'JEV is evaluating origin, conflicts, and change authority');
-  const answers = proposals.length ? await ask({ operation: 'memory_review', message, proposals, memory: knowledge() }, memoryQuestions(proposals)) : {};
-  const changed = applyReview(proposals, answers, memory, userMessage.id, nowIso());
-  event('review', 'complete', proposals.length ? 'Memory changes evaluated by JEV' : 'No new notes; existing memory retained', { noteIds: changed.map(n => n.id), notes: changed });
+  // Review also reconciles earlier pending notes/questions against this message,
+  // so it runs even when the proposer formed no new candidates.
+  const mQuestions = memoryQuestions(proposals, memory);
+  const review = Object.keys(mQuestions).length
+    ? await ask({ operation: 'memory_review', message, proposals, memory: knowledge() }, mQuestions)
+    : { answers: {}, raw: null };
+  const changed = applyReview(proposals, review.answers, memory, userMessage.id, nowIso());
+  event('review', 'complete', changed.length ? 'Memory changes evaluated by JEV' : 'No new notes; existing memory retained', { noteIds: changed.map(n => n.id), notes: changed, raw: review.raw });
   event('context', 'complete', 'Project memory supplied to the same generator', { noteIds: activeNotes(memory).map(n => n.id), notes: memory.notes, revision: memory.revision });
 
   // Older structured build conversations keep their execution loop. Its result
@@ -58,26 +64,26 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}) {
   const validateDraft = () => {
     if (typeof draft?.content !== 'string' || !draft.content.trim() || draft.content.length > 24000) throw new Error('Generator returned an invalid response. Nothing was saved.');
   };
-  const notes = activeNotes(memory).filter(n => ['goal', 'rule', 'fact', 'preference'].includes(n.kind));
-  let review;
+  const notes = activeNotes(memory).filter(n => COMMIT_KINDS.includes(n.kind));
+  let verdict;
   for (let attempt = 0; attempt < 2; attempt++) {
     validateDraft();
     event('generate', 'complete', attempt ? 'Revised draft ready' : 'Draft ready for rule checks');
     event('check', 'running', `JEV is checking ${notes.length} active notes`, { noteIds: notes.map(n => n.id), attempt });
     const output = await ask({ operation: 'output_review', message, notes, memory: knowledge(), draft: draft.content, proposedActions: legacyResult?.response.toolCalls || [], proposedPlan: legacyResult?.conversation.projectState || null }, outputQuestions(notes));
-    review = evaluateOutput(notes, output);
-    event('check', review.passed ? 'complete' : 'blocked', review.passed ? 'Response passed the active-memory checks' : 'Response held: conflict or uncertain rule check', { ...review, noteIds: notes.map(n => n.id), attempt });
-    decisions.push({ id: 'MEMORY_CHECK', name: 'Project memory guard', kind: 'memory_guard', summary: `${review.passed ? 'Passed' : 'Held'} · ${review.checks.filter(c => c.verdict === 'pass').length}/${notes.length} active notes · ${providers.jev === 'mock' ? 'demo heuristics' : 'JEV evaluation'}`, confidence: review.checks.length ? Math.min(...review.checks.map(c => c.value ?? 0)) : 0, detail: review });
-    if (review.passed || attempt === 1) break;
-    event('repair', 'running', 'Returning failed checks to the same generator for revision', { noteIds: review.checks.filter(c => c.verdict !== 'pass').map(c => c.noteId) });
+    verdict = evaluateOutput(notes, output.answers);
+    event('check', verdict.passed ? 'complete' : 'blocked', verdict.passed ? 'Response passed the active-memory checks' : `Response held: ${heldHeadline(verdict)}`, { ...verdict, answers: output.answers, raw: output.raw, noteIds: notes.map(n => n.id), attempt });
+    decisions.push({ id: 'MEMORY_CHECK', name: 'Project memory guard', kind: 'memory_guard', summary: checkSummary(verdict, notes.length, providers), confidence: verdict.checks.length ? Math.min(...verdict.checks.map(c => c.value ?? 0)) : (verdict.passed ? .9 : .1), detail: { ...verdict, answers: output.answers } });
+    if (verdict.passed || attempt === 1) break;
+    event('repair', 'running', 'Returning failed checks to the same generator for revision', { noteIds: verdict.blocking.filter(b => b.noteId).map(b => b.noteId) });
     // Never carry an unapproved legacy state change into a repaired prose reply.
     legacyResult = null;
-    draft = await generator.respond({ ...context, projectState: conversation.projectState, repair: { draft: draft.content, checks: review.checks, disposition: review.disposition } });
+    draft = await generator.respond({ ...context, projectState: conversation.projectState, repair: { draft: draft.content, checks: verdict.checks, disposition: verdict.disposition, blocking: verdict.blocking } });
     event('repair', 'complete', 'Generator revision received');
   }
-  const content = review.passed ? draft.content : 'I held back a draft because it did not pass the project-memory checks. Your existing rules remain in force. Please clarify the requirement you want to change, or narrow the next task. No unapproved plan changes were applied.';
-  const response = makeMessage('assistant', content, { decisions, meta: { turnId, memoryRevision: memory.revision, providers, guarded: true, withheld: !review.passed } });
-  if (legacyResult && review.passed) {
+  const content = verdict.passed ? draft.content : withheldNotice(verdict);
+  const response = makeMessage('assistant', content, { decisions, meta: { turnId, memoryRevision: memory.revision, providers, guarded: true, withheld: !verdict.passed } });
+  if (legacyResult && verdict.passed) {
     conversation.projectState = legacyResult.conversation.projectState;
     conversation.pendingHumanTools = legacyResult.conversation.pendingHumanTools;
     conversation.counters.humanCalls = legacyResult.conversation.counters.humanCalls;
@@ -88,7 +94,55 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}) {
   conversation.counters.jevCalls += legacyCalls;
   conversation.counters.messages += 1;
   conversation.updatedAt = nowIso();
-  event('ready', 'complete', review.passed ? 'Checked response ready to save' : 'Clarification response ready; conflicting draft withheld');
+  event('ready', 'complete', verdict.passed ? 'Checked response ready to save' : `Draft withheld: ${heldHeadline(verdict)}`);
   memory.events = [...memory.events, ...events].slice(-120);
   return { conversation, response, decisions };
+}
+
+// A held draft always states the actual blocking reason. Evaluation gaps are
+// labeled as such — never as "your requirements are wrong".
+function heldHeadline(verdict) {
+  const parts = [];
+  const counts = {};
+  for (const b of verdict.blocking) counts[b.type] = (counts[b.type] || 0) + 1;
+  if (counts.contradiction) parts.push(`${counts.contradiction} contradiction${counts.contradiction > 1 ? 's' : ''}`);
+  if (counts['rule-check-uncertain']) parts.push(`${counts['rule-check-uncertain']} uncertain rule check${counts['rule-check-uncertain'] > 1 ? 's' : ''}`);
+  if (counts['check-missing']) parts.push(`${counts['check-missing']} check${counts['check-missing'] > 1 ? 's' : ''} returned no usable value`);
+  if (counts.disposition) parts.push('output disposition: revise');
+  return parts.join(' · ') || 'unresolved memory check';
+}
+
+function checkSummary(verdict, noteCount, providers) {
+  const passed = verdict.checks.filter(c => c.verdict === 'pass').length;
+  const label = providers.jev === 'mock' ? 'demo heuristics' : 'JEV evaluation';
+  const status = verdict.passed ? 'Passed' : 'Held';
+  const scope = noteCount ? `${passed}/${noteCount} active notes passed` : 'no active notes to check';
+  const detail = verdict.passed
+    ? `disposition ${verdict.disposition || 'missing (delivered on checks alone)'}`
+    : heldHeadline(verdict);
+  return `${status} · ${scope} · ${detail} · ${label}`;
+}
+
+function withheldNotice(verdict) {
+  const lines = [
+    '**Project-memory check held this draft.** Your project memory was not changed.',
+    '',
+    '**What blocked it:**',
+  ];
+  for (const b of verdict.blocking) {
+    if (b.type === 'contradiction') {
+      lines.push(`- **Contradiction** with ${b.noteId ? `“${b.text}”` : 'an active note'}${b.value !== null ? ` (JEV ${b.value})` : ''}. Tell me which statement should win, or use **Change this note**.`);
+    } else if (b.type === 'rule-check-uncertain') {
+      lines.push(`- The check on rule “${b.text}” stayed **uncertain**${b.value !== null ? ` (JEV ${b.value})` : ''} — not a confirmed contradiction, but binding rules are checked strictly. Restate the requirement or narrow the task.`);
+    } else if (b.type === 'check-missing') {
+      lines.push(`- The JEV check for “${b.text}” returned **no usable value** — an evaluation failure, not a change to your rules.`);
+    } else if (b.type === 'disposition') {
+      lines.push('- Output disposition was **revise** — the draft itself was judged contradictory or unusable.');
+    }
+  }
+  if (verdict.disposition === null) {
+    lines.push(`- Output disposition returned ${verdict.dispositionMalformed ? '**an unusable value**' : '**no value**'} (the raw answers are in the decision trail). This is an evaluation gap, not a request to change your requirements.`);
+  }
+  lines.push('', 'Keep going — add detail or ask me anything. Only confirmed rules are binding; unresolved notes stay open until you settle them.');
+  return lines.join('\n');
 }
