@@ -1,15 +1,5 @@
-// Forge — deterministic offline Jev (mock provider).
-//
-// Returns EXACTLY the same response shape as the real TypeSafe API (see
-// docs.typesafe.ai quickstart): answers keyed by question id, each with
-// `type` plus the fields for that type:
-//   choice → { choice, confidence, probabilities }
-//   score  → { score, confidence, legend, probabilities }
-//   noul   → { noul }            (no separate confidence in the real API)
-//
-// Pattern-based and seeded on the input text, so the same message always
-// yields the same answers. This lets the whole loop run — including the
-// confidence-gating paths — with zero network and zero keys.
+// Forge — deterministic offline Jev (mock provider) — chat-first version.
+// Returns exact real API shape.
 
 const r2 = (x) => Math.round(x * 10000) / 10000;
 
@@ -57,22 +47,21 @@ function scoreAnswer(levels, pos, seed) {
 
 const noulAnswer = (p) => ({ type: 'noul', noul: r2(Math.min(1, Math.max(0, p))) });
 
-// ── Patterns ─────────────────────────────────────────────────────────────────
-
 const RE = {
   weapon: /\b(gun|rifle|pistol|firearm|bomb|grenade|explosive)\b/i,
+  build: /\b(build|make|create|want to build|wanna build|i wanna|i want to make|can you build|help me build)\b/i,
+  buildNoun: /\b(mp3|helmet|lamp|robot|drone|speaker|amplifier|clock|table|chair|bench|car|boat|plane|pcb|circuit|led|arduino|esp32|raspberry|pi|enclosure|case|stand|holder|mount)\b/i,
   fail: /doesn'?t work|not working|failed|broke|broken|cold joint|no(thing)? (happen|work)|sparks?|smoke|burned|burnt|short(ed)?|error|reads \d/i,
-  donePos: /looks (good|solid|fine|great|perfect)|shiny|secure|clean|identified|all parts|checks? (out|good)|ready|perfect|done\b|meets the definition/i,
+  donePos: /looks (good|solid|fine|great|perfect)|shiny|secure|clean|identified|all parts|checks? (out|good)|ready|perfect|done\b|finished\b|completed\b|it works|working now|meets the definition/i,
   safety: /smoke|burn(t|ing)?\b|spark|shock|hot\b|warm\b|smell|melting|leak|injur|cut (my|me)/i,
   stuck: /\bstuck\b|can'?t (continue|figure|proceed)|overwhelmed|give (it )?up|no clue/i,
   have: /\bi (have|got|own)\b|\binstead of\b|\bno \w+ available\b/i,
-  question: /\?|\b(what|how|why|where|when|which|can you|should i|does)\b/i,
-  claim: /i (think )?(it'?s|this|the (project|build|whole thing) )(is )?(done|complete|finished)|all (done|finished)|i finished everything/i,
+  question: /\?|\b(what|how|why|where|when|which|can you|should i|does|explain|tell me)\b/i,
+  claim: /i (think )?(it'?s|this|the (project|build|whole thing) )(is )?(done|complete|finished)|all (done|finished)|i finished everything|think it'?s done|it'?s done/i,
 };
 
 const STOP = new Set(['a', 'an', 'the', 'of', 'for', 'with', 'and', 'but', 'on', 'in', 'to', 'my', 'i', 'have', 'got', 'is', 'it', 'not', 'no']);
-const tokens = (s) =>
-  String(s).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 1 && !STOP.has(t));
+const tokens = (s) => String(s).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 1 && !STOP.has(t));
 const overlap = (a, b) => {
   const sb = new Set(tokens(b));
   return tokens(a).filter((t) => sb.has(t));
@@ -91,12 +80,9 @@ const CAT_WORDS = {
 const PART_GROUPS = [
   ['resistor', 'potentiometer', 'pot'],
   ['capacitor', 'cap', 'condenser'],
-  ['diode'],
-  ['led'],
-  ['speaker', 'buzzer'],
+  ['diode'], ['led'], ['speaker', 'buzzer'],
   ['battery', 'lipo', 'li-ion', '18650'],
-  ['switch', 'button'],
-  ['motor', 'servo'],
+  ['switch', 'button'], ['motor', 'servo'],
   ['wire', 'cable', 'harness'],
   ['mcu', 'microcontroller', 'esp32', 'atmega', 'rp2040'],
 ];
@@ -106,7 +92,65 @@ function sameGroup(a, b) {
   return PART_GROUPS.some((g) => g.some((w) => ta.has(w)) && g.some((w) => tb.has(w)));
 }
 
-// ── Mock answerer ────────────────────────────────────────────────────────────
+// ── Chat-specific mocks ──────────────────────────────────────────────────────
+
+function mockChatIntent(ctx, msg) {
+  const options = ['build_request', 'question', 'status_update', 'human_tool_result', 'claim_done', 'scope_change', 'general'];
+  const lower = String(msg).toLowerCase();
+  let winner = 'general';
+  if (RE.claim.test(lower)) winner = 'claim_done';
+  else if (RE.build.test(lower) || /i (wanna|want to) build/.test(lower)) winner = 'build_request';
+  else if (RE.fail.test(lower) || RE.donePos.test(lower)) winner = 'status_update';
+  else if (RE.question.test(lower)) winner = 'question';
+  else if (ctx.hasProject && lower.length < 30) winner = 'status_update';
+  // strong prior if hasProject false and mentions build
+  if (!ctx.hasProject && (RE.build.test(lower) || lower.includes('build me') || lower.includes('make me'))) winner = 'build_request';
+  return choiceAnswerSeeded(options, winner, 'chat_intent:' + msg);
+}
+
+function mockNeedsPlan(ctx, msg) {
+  const lower = String(msg).toLowerCase();
+  if (RE.build.test(lower) || lower.includes('build me') || lower.includes('wanna build') || lower.includes('want to build')) {
+    return noulAnswer(band('needs_plan:' + msg, 0.82, 0.96));
+  }
+  return noulAnswer(0.15);
+}
+
+function mockGoalClear(msg) {
+  const lower = String(msg).toLowerCase();
+  if (RE.build.test(lower) && RE.buildNoun.test(lower)) return noulAnswer(band('goal_clear:' + msg, 0.78, 0.94));
+  if (lower.length < 10) return noulAnswer(0.25);
+  return noulAnswer(0.55);
+}
+
+function mockGoalSpec(msg) {
+  const len = String(msg).length;
+  const pos = len > 80 ? 2.2 : len > 40 ? 1.4 : 0.6;
+  return scoreAnswer(['Vague', 'Somewhat specific', 'Specific', 'Very detailed'], pos, 'spec:' + msg);
+}
+
+function mockCallHuman(ctx, msg) {
+  const step = ctx.stepRef?.step || ctx.active_step || null;
+  const hasStep = !!step;
+  const track = step?.track || ctx.active_step?.track || '';
+  const isPhysical = track === 'physical' || !track; // default to physical for first step
+  if (hasStep && isPhysical) return noulAnswer(band('call_human:' + msg, 0.82, 0.96));
+  if (hasStep) return noulAnswer(band('call_human:' + msg, 0.72, 0.88));
+  return noulAnswer(0.3);
+}
+
+function mockHumanComplexity(ctx) {
+  const title = ctx.stepRef?.step?.title || ctx.active_step?.title || '';
+  const pos = /solder|cut|shape|wire/i.test(title) ? 1.8 : 0.8;
+  return scoreAnswer(['Trivial', 'Simple', 'Involved', 'Major'], pos, 'hcomplex:' + title);
+}
+
+function mockNeedsClarify(msg) {
+  if (String(msg).length < 15) return noulAnswer(0.65);
+  return noulAnswer(0.2);
+}
+
+// ── Existing mocks ───────────────────────────────────────────────────────────
 
 function mockCategory(goal) {
   const g = String(goal).toLowerCase();
@@ -146,13 +190,7 @@ function mockBudget(goal) {
   return scoreAnswer(['Under $25', '$25–$100', '$100–$500', '$500+'], pos, 'bud:' + goal);
 }
 
-const CHIP_INTENT = {
-  done: 'step_done',
-  failed: 'step_failed',
-  substitute: 'substitute_request',
-  question: 'question',
-  claim_done: 'claim_done',
-};
+const CHIP_INTENT = { done: 'step_done', failed: 'step_failed', substitute: 'substitute_request', question: 'question', claim_done: 'claim_done' };
 
 function mockIntent(ctx, msg) {
   const options = ['step_done', 'step_failed', 'question', 'deviation', 'substitute_request', 'scope_change', 'claim_done', 'blocked', 'off_topic'];
@@ -169,37 +207,26 @@ function mockIntent(ctx, msg) {
   return choiceAnswerSeeded(options, winner, 'intent:' + msg);
 }
 
-function mockSafetyConcern(msg) {
-  return noulAnswer(RE.safety.test(msg) ? 0.85 : 0.12);
-}
-
+function mockSafetyConcern(msg) { return noulAnswer(RE.safety.test(msg) ? 0.85 : 0.12); }
 function mockFrustration(msg) {
   const pos = RE.stuck.test(msg) ? 2.6 : /ugh|annoying|frustrat/i.test(msg) ? 1.6 : 0.4;
   return scoreAnswer(['On track, no friction', 'Minor friction', 'Stuck, needs help', 'Overwhelmed, plan may not fit'], pos, 'frus:' + msg);
 }
-
 function mockVerified(msg) {
   if (RE.fail.test(msg)) return noulAnswer(0.18);
   if (RE.donePos.test(msg)) return noulAnswer(band('ver:' + msg, 0.78, 0.95));
   return noulAnswer(0.55);
 }
-
 function mockQuality(msg) {
-  const pos = /excellent|perfect|beautiful/i.test(msg) ? 2.6
-    : /good|solid|fine|checks? out/i.test(msg) ? 1.6
-    : /\b(ok|acceptable)\b/i.test(msg) ? 0.9
-    : RE.fail.test(msg) ? 0.3
-    : 1.1;
+  const pos = /excellent|perfect|beautiful/i.test(msg) ? 2.6 : /good|solid|fine|checks? out/i.test(msg) ? 1.6 : /\b(ok|acceptable)\b/i.test(msg) ? 0.9 : RE.fail.test(msg) ? 0.3 : 1.1;
   return scoreAnswer(['Does not meet the definition of done', 'Acceptable, minor flaws', 'Good', 'Excellent'], pos, 'qual:' + msg);
 }
-
 function mockHazard(id, step) {
   const i = Number(id.split('_')[1] || 0);
   const s = (step?.safety || [])[i];
   if (!s) return noulAnswer(0.15);
   return noulAnswer(s.severity === 'high' ? 0.9 : 0.75);
 }
-
 function mockSubstitute(id, ctx) {
   const i = Number(id.split(/_(\d+)$/)[1] || 0);
   const sub = ctx.substitution || {};
@@ -214,7 +241,6 @@ function mockSubstitute(id, ctx) {
   const pos = ov.length ? (sameGroup(name, need) ? 2.4 : 1.3) : 0.3;
   return scoreAnswer(['Incompatible', 'Works with changes', 'Drop-in equivalent'], pos, 'compat:' + item.name + need);
 }
-
 function mockAccept(id, ctx) {
   const i = Number(id.slice('accept_'.length) || 0);
   const prog = ctx.progress || { completed: 0, total: 1 };
@@ -222,38 +248,37 @@ function mockAccept(id, ctx) {
   if (prog.completed >= total) return noulAnswer(0.9 + hash01('acc' + i + total) * 0.08);
   return noulAnswer(0.15 + 0.55 * (prog.completed / total));
 }
-
 function mockDifficulty(ctx, msg) {
-  const pos = RE.stuck.test(msg) || (ctx.active_step?.failed || 0) >= 2 ? 2.7
-    : RE.fail.test(msg) ? 1.6
-    : 0.4;
+  const pos = RE.stuck.test(msg) || (ctx.active_step?.failed || 0) >= 2 ? 2.7 : RE.fail.test(msg) ? 1.6 : 0.4;
   return scoreAnswer(['Right level', 'Slightly hard', 'Too hard', 'Over my head'], pos, 'diff:' + msg);
 }
-
 function mockNextInventory(ctx) {
   const pending = ctx.bom_pending_count || 0;
   const inv = ctx.inventory?.length || 0;
   return noulAnswer(pending > 0 && inv === 0 ? 0.72 : 0.2);
 }
-
 function mockNextCheck(ctx) {
   const ns = ctx.next_step;
   if (!ns) return noulAnswer(0.25);
   const blob = `${ns.title} ${ns.definition_of_done.join(' ')} ${ns.tools.join(' ')}`;
   return noulAnswer(/multimeter|measure|within \d|test/i.test(blob) ? 0.7 : 0.25);
 }
-
-function mockNextQuestion(msg) {
-  return noulAnswer(/\?/.test(msg) ? 0.8 : 0.2);
-}
+function mockNextQuestion(msg) { return noulAnswer(/\?/.test(msg) ? 0.8 : 0.2); }
 
 function mockAnswer(id, q, ctx, msg) {
   switch (id) {
-    case 'category': return mockCategory(ctx.goal);
-    case 'buildability': return mockBuildability(ctx.goal);
-    case 'risky': return mockRisky(ctx.goal);
-    case 'complexity': return mockComplexity(ctx.goal);
-    case 'budget': return mockBudget(ctx.goal);
+    case 'chat_intent': return mockChatIntent(ctx, msg);
+    case 'needs_plan': return mockNeedsPlan(ctx, msg);
+    case 'goal_clear': return mockGoalClear(msg);
+    case 'goal_specificity': return mockGoalSpec(msg);
+    case 'call_human': return mockCallHuman(ctx, msg);
+    case 'human_task_complexity': return mockHumanComplexity(ctx);
+    case 'needs_clarification': return mockNeedsClarify(msg);
+    case 'category': return mockCategory(ctx.goal || msg);
+    case 'buildability': return mockBuildability(ctx.goal || msg);
+    case 'risky': return mockRisky(ctx.goal || msg);
+    case 'complexity': return mockComplexity(ctx.goal || msg);
+    case 'budget': return mockBudget(ctx.goal || msg);
     case 'intent': return mockIntent(ctx, msg);
     case 'safety_concern': return mockSafetyConcern(msg);
     case 'frustration': return mockFrustration(msg);
@@ -263,13 +288,11 @@ function mockAnswer(id, q, ctx, msg) {
     case 'next_inventory': return mockNextInventory(ctx);
     case 'next_check': return mockNextCheck(ctx);
     case 'next_question': return mockNextQuestion(msg);
-    default:
-      break;
+    default: break;
   }
   if (id.startsWith('hazard_')) return mockHazard(id, ctx.active_step);
   if (id.startsWith('valid_sub') || id.startsWith('compat')) return mockSubstitute(id, ctx);
   if (id.startsWith('accept_')) return mockAccept(id, ctx);
-  // Fallback for unknown question ids — keeps the contract honest.
   if (q.type === 'choice') {
     const opts = Object.keys(q.criteria || {});
     return opts.length ? choiceAnswerSeeded(opts, opts[0], id + msg) : noulAnswer(0.5);
@@ -284,16 +307,11 @@ function mockAnswer(id, q, ctx, msg) {
 export function createJevMock() {
   return async function jevMock({ state, questions }) {
     const ctx = typeof state === 'string' ? JSON.parse(state || '{}') : state || {};
-    const msg = String(ctx.message || '');
+    const msg = String(ctx.message || ctx.goal || '');
     const answers = {};
     for (const [id, q] of Object.entries(questions || {})) {
       answers[id] = mockAnswer(id, q, ctx, msg);
     }
-    return {
-      model: 'jev-mock-1.0',
-      provider: 'mock',
-      answers,
-      usage: { input_tokens: 0, output_tokens: 0 },
-    };
+    return { model: 'jev-mock-1.0', provider: 'mock', answers, usage: { input_tokens: 0, output_tokens: 0 } };
   };
 }

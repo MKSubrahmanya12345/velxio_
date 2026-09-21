@@ -1,12 +1,14 @@
 // Forge — data model & constants. Plain ESM, zero dependencies.
-//
-// The ProjectState object is the single source of truth for a build — and it
-// is also the `state` we send to Jev on every interaction. See forge/README.md
-// ("Core idea") for why this dual role is the architectural center.
+// Now chat-first: Conversation is primary, ProjectState is embedded when planning happens.
+// Human is a tool the agent can call.
 
 export const CATEGORIES = [
   'electronics', 'mechanical', 'robotics', 'software',
   'woodwork', 'craft', 'food', 'general',
+];
+
+export const CHAT_INTENTS = [
+  'build_request', 'question', 'status_update', 'human_tool_result', 'general', 'scope_change', 'claim_done'
 ];
 
 export const INTENTS = [
@@ -30,10 +32,7 @@ export const nowIso = now;
 
 const uid = (p = 'id') => `${p}_${crypto.randomUUID().slice(0, 8)}`;
 
-// The API persists a Project envelope around the mutable ProjectState. Keeping
-// this construction in one place prevents the state object from accidentally
-// being returned at the project level (which makes the client look for
-// `project.state` and find undefined).
+// ── Legacy Project envelope (kept for backward compat) ──────────────────────
 export function makeProject(state, metadata = {}) {
   const createdAt = String(metadata.createdAt || now());
   return {
@@ -44,49 +43,96 @@ export function makeProject(state, metadata = {}) {
   };
 }
 
-// Normalize the current envelope and the shape written by early Forge builds.
-// Older versions persisted ProjectState directly, so accepting that shape here
-// lets the server recover existing JSON/Mongo projects without a data wipe.
 export function normalizeProject(raw, fallbackId = '') {
   if (!raw || typeof raw !== 'object') return null;
   const value = raw;
   const id = value.id || value._id || fallbackId;
-  const metadata = {
-    id,
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
-  };
-
+  const metadata = { id, createdAt: value.createdAt, updatedAt: value.updatedAt };
   if (value.state && typeof value.state === 'object' && Array.isArray(value.state.phases)) {
     return makeProject(value.state, metadata);
   }
-
   if (Array.isArray(value.phases)) {
-    const {
-      id: _id,
-      _id: _mongoId,
-      createdAt: _createdAt,
-      updatedAt: _updatedAt,
-      ...state
-    } = value;
+    const { id: _id, _id: _mongoId, createdAt: _createdAt, updatedAt: _updatedAt, ...state } = value;
     return makeProject(state, metadata);
   }
-
   return null;
 }
 
-function strArr(v) {
-  return Array.isArray(v)
-    ? v.map((x) => String(x ?? '').trim()).filter(Boolean)
-    : [];
-}
+// ── Chat types ───────────────────────────────────────────────────────────────
 
+function strArr(v) {
+  return Array.isArray(v) ? v.map((x) => String(x ?? '').trim()).filter(Boolean) : [];
+}
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
-// ── Step / BOM construction ──────────────────────────────────────────────────
+export function makeMessage(role, content, extra = {}) {
+  return {
+    id: extra.id || uid('msg'),
+    role, // user | assistant | system | tool
+    content: String(content || ''),
+    at: extra.at || now(),
+    decisions: extra.decisions || [],
+    toolCalls: extra.toolCalls || [],
+    toolCallId: extra.toolCallId || null,
+    plan: extra.plan || null, // optional embedded plan for rendering
+    meta: extra.meta || {},
+  };
+}
+
+export function makeConversation(input = {}) {
+  const id = input.id || crypto.randomUUID();
+  const createdAt = input.createdAt || now();
+  return {
+    id,
+    createdAt,
+    updatedAt: input.updatedAt || createdAt,
+    title: input.title || (input.goal ? String(input.goal).slice(0, 60) : 'New build chat'),
+    messages: Array.isArray(input.messages) ? input.messages : [],
+    // ProjectState when a build has been planned
+    projectState: input.projectState || input.state || null,
+    // Human tool pending calls
+    pendingHumanTools: Array.isArray(input.pendingHumanTools) ? input.pendingHumanTools : [],
+    counters: input.counters || { messages: 0, jevCalls: 0, humanCalls: 0, plans: 0 },
+    // For backward compat, also expose state alias
+    get state() { return this.projectState; },
+  };
+}
+
+export function normalizeConversation(raw, fallbackId = '') {
+  if (!raw || typeof raw !== 'object') return null;
+  // If it's old project shape, convert to conversation
+  const proj = normalizeProject(raw, fallbackId);
+  if (proj && !raw.messages) {
+    return makeConversation({
+      id: proj.id,
+      createdAt: proj.createdAt,
+      updatedAt: proj.updatedAt,
+      title: proj.state?.goal || 'Imported project',
+      messages: [],
+      projectState: proj.state,
+      counters: proj.state?.counters ? { ...proj.state.counters, humanCalls: 0, plans: 1 } : undefined,
+    });
+  }
+  // Already a conversation
+  if (Array.isArray(raw.messages)) {
+    return makeConversation({
+      id: raw.id || raw._id || fallbackId,
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
+      title: raw.title,
+      messages: raw.messages,
+      projectState: raw.projectState || raw.state || null,
+      pendingHumanTools: raw.pendingHumanTools,
+      counters: raw.counters,
+    });
+  }
+  return null;
+}
+
+// ── Step / BOM construction (same as before, used by planner) ───────────────
 
 export function makeStep(raw, i) {
   const safety = Array.isArray(raw.safety)
@@ -107,8 +153,8 @@ export function makeStep(raw, i) {
     safety,
     definition_of_done: dod.length ? dod : ['Step visibly complete and matching its title'],
     skills: strArr(raw.skills).length ? strArr(raw.skills) : ['general'],
-    status: 'todo',
-    failed: 0,
+    status: raw.status || 'todo',
+    failed: Number(raw.failed) || 0,
     sim: null,
   };
 }
@@ -120,7 +166,7 @@ export function makeBomItem(raw, i) {
     qty: Number.isFinite(Number(raw.qty)) && Number(raw.qty) > 0 ? Number(raw.qty) : 1,
     cost_usd: num(raw.cost_usd ?? raw.cost) ?? 0,
     spec: raw.spec ? String(raw.spec) : undefined,
-    status: 'pending',
+    status: raw.status || 'pending',
   };
 }
 
@@ -132,8 +178,6 @@ export function defaultAcceptance(goal) {
   ];
 }
 
-// Normalizes a raw plan (from the mock KB or an LLM) into the canonical shape.
-// This is the trust boundary: anything the planner returns is coerced here.
 export function sanitizePlan(raw, goal) {
   if (!raw || !Array.isArray(raw.phases) || raw.phases.length === 0) {
     throw new Error('plan: phases[] missing');
@@ -179,16 +223,22 @@ export function normalizeConstraints(c = {}) {
 // ── State helpers ────────────────────────────────────────────────────────────
 
 export function flatSteps(state) {
+  if (!state) return [];
   return state.phases.flatMap((p) => p.steps);
 }
 
 export function phaseIdOf(state, stepId) {
-  return state.phases.find((p) => p.steps.some((s) => s.id === stepId))?.id ?? null;
+  return state?.phases.find((p) => p.steps.some((s) => s.id === stepId))?.id ?? null;
 }
 
 export function activeStepRef(state) {
+  if (!state) return null;
   const steps = flatSteps(state);
-  if (!state.current?.stepId) return null;
+  if (!state.current?.stepId) {
+    const first = steps.find((s) => s.status !== 'done');
+    if (!first) return null;
+    return { step: first, index: steps.indexOf(first), total: steps.length, phase: state.phases.find((p) => p.steps.some((s) => s.id === first.id)) };
+  }
   let idx = steps.findIndex((s) => s.id === state.current.stepId);
   if (idx < 0) idx = steps.findIndex((s) => s.status !== 'done');
   if (idx < 0) return null;
@@ -206,12 +256,48 @@ export function nextIncompleteStep(state) {
 }
 
 export function progress(state) {
+  if (!state) return { completed: 0, total: 0, pct: 0 };
   const all = flatSteps(state);
   const done = all.filter((s) => s.status === 'done').length;
   return { completed: done, total: all.length, pct: all.length ? done / all.length : 0 };
 }
 
 export function log(state, kind, text) {
+  if (!state) return;
+  if (!state.log) state.log = [];
   state.log.push({ at: now(), kind, text });
   if (state.log.length > 400) state.log.splice(0, state.log.length - 400);
+}
+
+// ── Human tool helpers ───────────────────────────────────────────────────────
+
+export function makeHumanToolCall(stepRef, extra = {}) {
+  const step = stepRef?.step;
+  if (!step) return null;
+  return {
+    id: uid('human'),
+    name: 'human',
+    status: 'requires_action',
+    at: now(),
+    arguments: {
+      task: step.title,
+      instructions: step.instructions,
+      materials: step.materials,
+      tools: step.tools,
+      safety: step.safety,
+      definition_of_done: step.definition_of_done,
+      track: step.track,
+      phase: stepRef.phase?.name || '',
+      stepId: step.id,
+      ...extra,
+    },
+    result: null,
+  };
+}
+
+export function completeHumanToolCall(toolCall, resultText, success = true) {
+  toolCall.status = success ? 'completed' : 'failed';
+  toolCall.result = resultText;
+  toolCall.completedAt = now();
+  return toolCall;
 }

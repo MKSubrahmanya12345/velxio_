@@ -1,38 +1,79 @@
-// Forge — the synthesis & message pipeline.
+// Forge — chat-first pipeline with human as a tool.
+// Flow for "I wanna build X":
+// 1. CHAT_INTENT via JEV -> is it build_request?
+// 2. GOAL_PARSE via JEV -> is goal clear?
+// 3. J1 feasibility gate via JEV
+// 4. planner -> implementation plan
+// 5. J6 safety + HUMAN_TOOL decision via JEV -> call human tool for first step
 //
-// This is the "skeleton": deterministic orchestration of Jev decisions (the
-// nervous system) and the planner (the prefrontal cortex). Every branch here
-// is a straight-line rule over structured verdicts — no free-form LLM text is
-// ever parsed for control flow. The response `text` is for the human; the
-// decisions array is for transparency (rendered in the UI).
-//
-// J5 — confidence gating — is the meta-rule: when a Jev verdict's confidence
-// falls below the threshold for its stakes, the pipeline either clarifies
-// (ask the human), refuses to act, or escalates (full mode: wake the LLM).
+// Human as tool: assistant can emit toolCalls[{name: 'human', arguments: {task, instructions...}}]
+// UI renders them as actionable cards. User's next message is treated as tool result.
 
 import {
   activeStepRef, normalizeConstraints, sanitizePlan, progress, log,
-  nowIso, CHIP_LABELS, flatSteps,
+  nowIso, makeMessage, makeHumanToolCall, flatSteps, completeHumanToolCall
 } from './schema.js';
 import { runDecision } from './decisions/catalog.js';
 import { markStepComplete, advanceStep, skillOutcome, needsAck } from './stateMachine.js';
 
-const INTENT_THRESHOLD = 0.55; // below: don't act, ask for rephrase
-const VERIFY_THRESHOLD = 0.6;  // below: verified but not certain → confirm
-const ACCEPT_MIN_CERTAINTY = 0.8; // J9 uses its own; mirrored here for text
+const INTENT_THRESHOLD = 0.55;
+const VERIFY_THRESHOLD = 0.6;
 
-// ── Intake: goal → feasibility gate → plan → first step ─────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-export async function synthesizeProject(deps, input) {
-  const goal = String(input.goal || '').trim();
-  const constraints = normalizeConstraints(input.constraints);
+function buildJevState(state, message, extra = {}) {
+  const stepRef = activeStepRef(state);
+  const all = flatSteps(state);
+  const idx = stepRef ? stepRef.index : -1;
+  const next = all.slice(idx + 1).find((s) => s.status !== 'done') || null;
+  return {
+    goal: state?.goal || extra.goal || message,
+    constraints: state?.constraints || {},
+    status: state?.status || 'active',
+    progress: state ? progress(state) : { completed: 0, total: 0, pct: 0 },
+    active_step: stepRef ? {
+      id: stepRef.step.id,
+      title: stepRef.step.title,
+      track: stepRef.step.track,
+      index: stepRef.index + 1,
+      total: stepRef.total,
+      instructions: stepRef.step.instructions,
+      definition_of_done: stepRef.step.definition_of_done,
+      materials: stepRef.step.materials,
+      tools: stepRef.step.tools,
+      safety: stepRef.step.safety,
+      failed: stepRef.step.failed,
+    } : null,
+    next_step: next ? { title: next.title, track: next.track, tools: next.tools, definition_of_done: next.definition_of_done } : null,
+    inventory: state?.inventory || [],
+    bom_pending_count: state ? state.bom.filter((b) => b.status === 'pending').length : 0,
+    message,
+    hasProject: !!state,
+    hasPendingHuman: extra.hasPendingHuman || false,
+    ...extra,
+  };
+}
+
+async function ensureSafetyGate(deps, state, stepRef, decisions) {
+  if (!stepRef) return null;
+  const j6 = await runDecision('J6', { state, stepRef, message: '', jevState: buildJevState(state, '', { active_step: stepRef.step }) }, deps);
+  decisions?.push(j6);
+  return { stepId: stepRef.step.id, flags: j6.detail.flags, ackRequired: j6.detail.ackRequired };
+}
+
+// ── Chat synthesis: goal -> feasibility -> plan ───────────────────────────────
+
+export async function synthesizeChatProject(deps, conversation, goalText, constraints = {}) {
   const decisions = [];
+  const goal = String(goalText || '').trim();
+  const normConstraints = normalizeConstraints(constraints);
 
-  const j1 = await runDecision(
-    'J1',
-    { goal, constraints, jevState: { goal, constraints } },
-    deps,
-  );
+  // GOAL_PARSE
+  const goalParse = await runDecision('GOAL_PARSE', { message: goal, jevState: { message: goal, goal } }, deps);
+  decisions.push(goalParse);
+
+  // J1 feasibility
+  const j1 = await runDecision('J1', { goal, constraints: normConstraints, jevState: { goal, constraints: normConstraints } }, deps);
   decisions.push(j1);
 
   const feasibility = {
@@ -42,496 +83,411 @@ export async function synthesizeProject(deps, input) {
     complexity: j1.detail.complexity,
   };
 
-  const state = {
+  if (feasibility.buildability === 'no') {
+    const msg = makeMessage('assistant',
+      `I can't take this build on as stated — feasibility gate flagged it as not buildable (risk tier ${feasibility.risk_tier}). If you re-scope — a non-functional replica, or a safer variant — I'll plan that one.`,
+      { decisions, meta: { feasibility } }
+    );
+    conversation.messages.push(msg);
+    conversation.title = goal.slice(0, 60);
+    conversation.updatedAt = nowIso();
+    conversation.counters.jevCalls += decisions.length;
+    return { conversation, response: msg, decisions, projectState: null };
+  }
+
+  // Planner
+  const rawPlan = await deps.planner(goal, normConstraints, feasibility);
+  const plan = sanitizePlan(rawPlan, goal);
+
+  // Build projectState
+  const projectState = {
     goal,
-    constraints,
+    constraints: normConstraints,
     feasibility,
     status: 'active',
-    phases: [],
-    current: { phaseId: null, stepId: null },
+    phases: plan.phases,
+    current: { phaseId: plan.phases[0].id, stepId: plan.phases[0].steps[0].id },
     inventory: [],
-    bom: [],
-    acceptance: [],
+    bom: plan.bom,
+    acceptance: plan.acceptance,
     log: [],
     skill: {},
     safetyAcks: {},
     safetyGate: null,
     counters: { messages: 0, jevCalls: 0, escalations: 0, stepsCompleted: 0, substitutions: 0 },
-    confidence: {},
+    confidence: { J1: j1.confidence },
     proposal: null,
   };
 
-  if (feasibility.buildability === 'no') {
-    state.status = 'aborted';
-    log(state, 'jev', `J1 feasibility: ${j1.summary}`);
-    log(state, 'system', 'Feasibility gate: buildability "no" — project not started.');
-    return {
-      state,
-      decisions,
-      response: {
-        text:
-          `I can't take this build on as stated — the feasibility gate flagged it as not practical or not safe (risk tier ${feasibility.risk_tier}). ` +
-          'If you re-scope the goal — a non-functional replica, or a safer variant — I\'ll plan that one.',
-        suggestions: [],
-      },
-    };
+  log(projectState, 'jev', `J1 feasibility: ${j1.summary}`);
+  log(projectState, 'plan', `Plan synthesized: ${projectState.phases.length} phases · ${flatSteps(projectState).length} steps · ${projectState.bom.length} parts`);
+
+  const stepRef = activeStepRef(projectState);
+  const safetyGate = await ensureSafetyGate(deps, projectState, stepRef, decisions);
+  projectState.safetyGate = safetyGate;
+
+  // HUMAN_TOOL decision for first step
+  const humanDec = await runDecision('HUMAN_TOOL', {
+    stepRef,
+    message: goal,
+    hasPendingHuman: false,
+    jevState: buildJevState(projectState, goal, { hasPendingHuman: false, active_step: stepRef?.step })
+  }, deps);
+  decisions.push(humanDec);
+
+  let humanTool = null;
+  if (humanDec.detail.call_human && stepRef) {
+    humanTool = makeHumanToolCall(stepRef, { reason: 'First step of implementation plan' });
+    conversation.pendingHumanTools = [humanTool];
+    projectState.counters.humanCalls = (projectState.counters.humanCalls || 0) + 1;
   }
 
-  const rawPlan = await deps.planner(goal, constraints, feasibility);
-  const plan = sanitizePlan(rawPlan, goal);
-  Object.assign(state, {
-    phases: plan.phases,
-    bom: plan.bom,
-    acceptance: plan.acceptance,
-    current: { phaseId: plan.phases[0].id, stepId: plan.phases[0].steps[0].id },
+  const est = projectState.bom.reduce((s, b) => s + b.cost_usd, 0);
+  const phaseList = projectState.phases.map((p, i) => `${i + 1}. **${p.name}** — ${p.steps.length} steps`).join('\n');
+
+  const planText =
+`### Implementation plan ready for: "${goal}"
+
+**Category:** ${feasibility.category} · **Risk:** ${feasibility.risk_tier} · **Complexity:** ${feasibility.complexity.toFixed(1)}/3 · **Est. cost:** $${est.toFixed(0)}
+**${projectState.phases.length} phases, ${flatSteps(projectState).length} steps, ${projectState.bom.length} parts**
+
+#### Phases
+${phaseList}
+
+#### Bill of Materials (top)
+${projectState.bom.slice(0, 8).map(b => `- ${b.name} x${b.qty} ($${b.cost_usd})`).join('\n')}${projectState.bom.length > 8 ? `\n- ... and ${projectState.bom.length - 8} more` : ''}
+
+#### Acceptance Criteria
+${projectState.acceptance.map((a, i) => `${i + 1}. ${a}`).join('\n')}
+
+#### Next Step → Human Tool
+${stepRef ? `**${stepRef.step.title}** (${stepRef.step.track === 'sim' ? 'SIM · Velxio' : 'PHYSICAL · human tool'})\n> ${stepRef.step.instructions}\n\n**Done when:** ${stepRef.step.definition_of_done.join('; ')}` : 'No steps'}
+
+${safetyGate?.ackRequired ? `\n⚠️ **Safety:** ${safetyGate.flags.filter(f => f.present && f.severity === 'high').map(f => f.note || f.hazard).join(' · ')} — acknowledge before proceeding.` : ''}
+
+---
+I'm treating you as a tool — when I need physical work, I'll call \`human\` with exact instructions. Report back with what happened and I'll verify via JEV and advance.
+`;
+
+  const assistantMsg = makeMessage('assistant', planText, {
+    decisions,
+    toolCalls: humanTool ? [humanTool] : [],
+    plan: projectState,
+    meta: { feasibility, humanCalled: !!humanTool }
   });
 
-  log(state, 'jev', `J1 feasibility: ${j1.summary}`);
-  log(
-    state, 'plan',
-    `Plan synthesized: ${state.phases.length} phases · ${flatSteps(state).length} steps · ${state.bom.length} parts. ` +
-      `Category: ${feasibility.category} · risk ${feasibility.risk_tier} · planner: ${deps.cfg.planner.provider}.`,
-  );
+  conversation.messages.push(assistantMsg);
+  conversation.projectState = projectState;
+  conversation.title = goal.slice(0, 60);
+  conversation.updatedAt = nowIso();
+  conversation.counters.plans += 1;
+  conversation.counters.jevCalls += decisions.length;
+  if (humanTool) conversation.counters.humanCalls += 1;
 
-  const stepRef = activeStepRef(state);
-  await ensureSafetyGate(deps, state, stepRef, decisions);
-  state.confidence.J1 = j1.confidence;
-
-  const est = state.bom.reduce((s, b) => s + b.cost_usd, 0);
-  return {
-    state,
-    decisions,
-    response: {
-      text:
-        `Plan ready: ${state.phases.length} phases, ${flatSteps(state).length} steps, ${state.bom.length} parts (est. $${est.toFixed(0)}). ` +
-        'We\'ll work it one step at a time — I verify each one as you report back.\n\n' +
-        `First up: "${stepRef.step.title}" (${stepRef.step.track === 'sim' ? 'sim track — Velxio emulator' : 'physical'}).` +
-        safetyLine(state, stepRef.step),
-      suggestions: [
-        'Add the parts you already have to your inventory (sidebar) — it powers substitute matching.',
-        'Report each step with a chip plus a short sentence; I keep one step in front of you at a time.',
-      ],
-    },
-  };
+  return { conversation, response: assistantMsg, decisions, projectState };
 }
 
-// ── The hot path: one human message → Jev decisions → state transition ─────
+// ── Chat message handler (main loop) ─────────────────────────────────────────
 
-export async function handleMessage(deps, project, input) {
-  const state = project.state;
-  const decisions = [];
+export async function handleChatMessage(deps, conversation, input) {
   const text = String(input?.text || '').trim();
   const chip = input?.chip || null;
-  const message = text || (chip ? CHIP_LABELS[chip] || chip : '');
-  state.counters.messages += 1;
-
-  if (state.status === 'complete') {
-    return { project, decisions, response: { text: 'This project is complete. Start a new one to build something else.', suggestions: [] } };
-  }
-  if (state.status === 'aborted') {
-    return { project, decisions, response: { text: 'This project was never started (feasibility gate said no). Create a new project with a re-scoped goal.', suggestions: [] } };
-  }
-
-  // 1) Chip-only structural actions (no Jev needed for these).
-  if (chip === 'accept_proposal' && state.proposal) {
-    applyProposal(state);
-    state.proposal = null;
-    if (!text) return { project, decisions, response: { text: 'Proposal applied — see the log. Continue with the current step.', suggestions: [] } };
-  } else if (chip === 'decline_proposal' && state.proposal) {
-    log(state, 'system', `Proposal declined: ${state.proposal.type}.`);
-    state.proposal = null;
-    if (!text) return { project, decisions, response: { text: 'Proposal declined. Back to the current step — report back when you have an update.', suggestions: [] } };
-  }
-  if (chip === 'safety_ack') {
-    const stepRef = activeStepRef(state);
-    if (stepRef) {
-      state.safetyAcks[stepRef.step.id] = true;
-      log(state, 'system', `Safety acknowledged for "${stepRef.step.title}".`);
-    }
-    if (!text) return { project, decisions, response: { text: 'Noted — safety acknowledged. Proceed with the step and report back when done.', suggestions: [] } };
-  }
+  const message = text || (chip ? String(chip) : '');
+  const decisions = [];
 
   if (!message) {
-    return { project, decisions, response: { text: 'Send a report-back — a chip plus a short sentence works best.', suggestions: [] } };
+    const errMsg = makeMessage('assistant', 'Send a message — e.g. "I wanna build an MP3 player" or report back on the current human tool task.', { decisions });
+    return { conversation, response: errMsg, decisions };
   }
 
-  log(state, 'user', text ? text : `(${chip})`);
+  // Add user message
+  const userMsg = makeMessage('user', message, { meta: { chip } });
+  conversation.messages.push(userMsg);
+  conversation.counters.messages += 1;
 
-  const stepRef = activeStepRef(state);
-  await ensureSafetyGate(deps, state, stepRef, decisions);
+  const hasProject = !!conversation.projectState;
+  const hasPendingHuman = (conversation.pendingHumanTools || []).some(t => t.status === 'requires_action');
 
-  const ctx = { state, message, chip, stepRef, jevState: buildJevState(state, message, chip) };
+  // CHAT_INTENT via JEV
+  const chatIntent = await runDecision('CHAT_INTENT', {
+    message,
+    hasProject,
+    jevState: buildJevState(conversation.projectState, message, { hasProject, hasPendingHuman })
+  }, deps);
+  decisions.push(chatIntent);
 
-  // 2) Triage (J2) — one batched call: intent + safety + frustration.
-  const j2 = await runDecision('J2', ctx, deps);
-  decisions.push(j2);
-  const intent = j2.detail.intent;
-  const intentConf = j2.detail.intent_confidence;
-  state.confidence.triage = intentConf;
+  const intent = chatIntent.detail.intent;
+  const intentConf = chatIntent.detail.intent_confidence;
 
-  let response;
+  // Low confidence → clarify
   if (intentConf < INTENT_THRESHOLD) {
-    // J5: uncertain triage → do not act (full mode: escalate to the LLM).
-    deps.counters.escalations += 1;
-    log(state, 'jev', `J2 triage: intent=${intent} but confidence ${intentConf} < ${INTENT_THRESHOLD} — not acting (full mode would escalate to the LLM).`);
-    response = {
-      text: `I'm only ${Math.round(intentConf * 100)}% sure what that meant. Could you rephrase — or use a chip (done / failed / substitute / question)?`,
-      suggestions: [],
-    };
-  } else {
-    switch (intent) {
-      case 'step_done': {
-        if (!stepRef) {
-          response = { text: 'No active step — all steps are complete. Hit "I think it\'s done" to run the acceptance check.', suggestions: [] };
-          break;
-        }
-        if (needsAck(state, stepRef.step)) {
-          response = {
-            text: `Before "${stepRef.step.title}" can count as done, acknowledge its safety notes — the button is on the step card.`,
-            suggestions: [],
-          };
-          break;
-        }
-        const j3 = await runDecision('J3', ctx, deps);
-        decisions.push(j3);
-        state.confidence.verify = j3.detail.certainty;
-        if (!j3.detail.verified) {
-          stepRef.step.failed += 1;
-          skillOutcome(state, stepRef.step, false);
-          log(state, 'jev', `J3 verify: not verified (certainty ${j3.detail.certainty}) — step "${stepRef.step.title}" retried (fail ${stepRef.step.failed}).`);
-          if (stepRef.step.failed >= 2) {
-            response = await offerSubstitution(deps, state, stepRef, decisions,
-              `This step has failed twice — before you retry, tell me what parts you actually have and I'll score substitutes. `);
+    const clarifyMsg = makeMessage('assistant',
+      `I'm only ${Math.round(intentConf * 100)}% sure what that meant (JEV triage low confidence). Could you rephrase? If you want to build something, say "I wanna build X" with what X is.`,
+      { decisions }
+    );
+    conversation.messages.push(clarifyMsg);
+    conversation.updatedAt = nowIso();
+    return { conversation, response: clarifyMsg, decisions };
+  }
+
+  // ── Build request path ───────────────────────────────────────────────────
+  if (intent === 'build_request' || chatIntent.detail.needs_plan) {
+    // If already has project, treat as scope change unless user explicitly wants new
+    if (hasProject && !/new|different|instead|change|other/i.test(message)) {
+      // Maybe they want to add to existing? For simplicity, if message is clearly new build, create new plan
+      // Check if goal is different
+      const isNewGoal = message.length > 20 && !conversation.projectState.goal.toLowerCase().includes(message.toLowerCase().slice(0, 15));
+      if (isNewGoal) {
+        // New plan overrides
+        const result = await synthesizeChatProject(deps, conversation, message, {});
+        // Merge decisions
+        result.decisions = [...decisions, ...result.decisions];
+        result.response.decisions = result.decisions;
+        return result;
+      }
+    }
+    if (!hasProject) {
+      const result = await synthesizeChatProject(deps, conversation, message, {});
+      result.decisions = [...decisions, ...result.decisions];
+      result.response.decisions = result.decisions;
+      return result;
+    }
+    // Has project but wants new build
+    const result = await synthesizeChatProject(deps, conversation, message, {});
+    result.decisions = [...decisions, ...result.decisions];
+    result.response.decisions = result.decisions;
+    return result;
+  }
+
+  // If no project yet and intent is not build_request → guide to build request
+  if (!hasProject) {
+    const guideMsg = makeMessage('assistant',
+      `I don't have a build plan yet. Tell me what you wanna build — e.g. "I wanna build an MP3 player" or "Build me an LED desk lamp" — and I'll run feasibility via JEV, then give you the full implementation plan with human tool calls.\n\n**Human as tool:** Once planning is done, I'll call you as \`human\` for each physical step, with exact instructions and definition-of-done. You report back, I verify via JEV, and we advance.`,
+      { decisions }
+    );
+    conversation.messages.push(guideMsg);
+    conversation.updatedAt = nowIso();
+    return { conversation, response: guideMsg, decisions };
+  }
+
+  // ── Has project from here ─────────────────────────────────────────────────
+  const state = conversation.projectState;
+  const stepRef = activeStepRef(state);
+
+  // Safety incident check via J2
+  const j2 = await runDecision('J2', {
+    stepRef,
+    message,
+    chip,
+    jevState: buildJevState(state, message, { chip, hasPendingHuman })
+  }, deps);
+  decisions.push(j2);
+
+  if (j2.detail.safety_concern >= 0.5) {
+    log(state, 'system', 'SAFETY: builder reported safety concern');
+    const safetyMsg = makeMessage('assistant',
+      `⚠️ **Safety first:** Stop the step and address what you described before continuing. Tell me it's resolved and we pick back up.\n\nCurrent step: "${stepRef?.step.title || 'N/A'}"`,
+      { decisions }
+    );
+    conversation.messages.push(safetyMsg);
+    conversation.updatedAt = nowIso();
+    return { conversation, response: safetyMsg, decisions };
+  }
+
+  // Handle by triage intent
+  let responseText = '';
+  let toolCalls = [];
+  let shouldAdvance = false;
+
+  switch (j2.detail.intent) {
+    case 'step_done':
+    case 'human_tool_result':
+    case 'status_update': {
+      // If pending human tool, complete it
+      if (hasPendingHuman && conversation.pendingHumanTools.length) {
+        const pending = conversation.pendingHumanTools.find(t => t.status === 'requires_action');
+        if (pending) {
+          // Verify via J3
+          const j3 = await runDecision('J3', {
+            stepRef,
+            message,
+            jevState: buildJevState(state, message, { chip })
+          }, deps);
+          decisions.push(j3);
+
+          if (!j3.detail.verified) {
+            stepRef.step.failed += 1;
+            skillOutcome(state, stepRef.step, false);
+            completeHumanToolCall(pending, message, false);
+            responseText = `JEV verification: **not verified** (certainty ${Math.round(j3.detail.certainty * 100)}%). Step "${stepRef.step.title}" needs retry (fail ${stepRef.step.failed}).\n\n**Hint:** ${stepRef.step.safety.length ? `Check safety: ${stepRef.step.safety.map(s => s.hazard).join(', ')}` : 'Check DOD: ' + stepRef.step.definition_of_done.join('; ')}\n\nI'll call human tool again for retry.`;
+            // Re-call human
+            const retryTool = makeHumanToolCall(stepRef, { reason: 'Retry after verification failed', attempt: stepRef.step.failed });
+            toolCalls = [retryTool];
+            conversation.pendingHumanTools = [retryTool];
+          } else if (j3.detail.certainty < VERIFY_THRESHOLD) {
+            responseText = `I'm only ${Math.round(j3.detail.certainty * 100)}% sure that's actually done (JEV certainty low). Quick re-check: ${stepRef.step.definition_of_done[0]}\n\nConfirm with more detail?`;
           } else {
-            response = { text: retryText(stepRef), suggestions: [] };
+            // Success
+            completeHumanToolCall(pending, message, true);
+            markStepComplete(state, stepRef.step);
+            skillOutcome(state, stepRef.step, true);
+            state.counters.stepsCompleted += 1;
+            const doneRef = stepRef;
+            const next = advanceStep(state);
+            if (next) {
+              const nextRef = activeStepRef(state);
+              const safetyGate = await ensureSafetyGate(deps, state, nextRef, decisions);
+              state.safetyGate = safetyGate;
+              // Decide if next step needs human tool
+              const humanDec = await runDecision('HUMAN_TOOL', {
+                stepRef: nextRef,
+                message,
+                hasPendingHuman: false,
+                jevState: buildJevState(state, message, { active_step: nextRef.step })
+              }, deps);
+              decisions.push(humanDec);
+
+              let nextHumanTool = null;
+              if (humanDec.detail.call_human) {
+                nextHumanTool = makeHumanToolCall(nextRef, { reason: 'Next step in plan' });
+                conversation.pendingHumanTools = [nextHumanTool];
+                toolCalls = [nextHumanTool];
+                conversation.counters.humanCalls += 1;
+              }
+
+              responseText = `✅ **Step ${doneRef.index + 1}/${doneRef.total} verified** — "${doneRef.step.title}" (JEV quality ${j3.detail.quality.toFixed(1)}/3, certainty ${Math.round(j3.detail.certainty * 100)}%)\n\n**Next:** "${nextRef.step.title}" (${nextRef.step.track === 'sim' ? 'SIM · Velxio' : 'PHYSICAL · human tool required'})\n> ${nextRef.step.instructions}\n\n**Done when:** ${nextRef.step.definition_of_done.join('; ')}\n${safetyGate?.ackRequired ? `\n⚠️ Safety ack required: ${safetyGate.flags.filter(f => f.present && f.severity === 'high').map(f => f.note || f.hazard).join(' · ')}` : ''}`;
+
+              if (nextHumanTool) {
+                responseText += `\n\n🔧 **Human tool called** — see card below. Execute and report back.`;
+              }
+            } else {
+              conversation.pendingHumanTools = [];
+              responseText = `🎉 **That was the last step!** All ${doneRef.total} steps done. Say "I think it's done" and I'll run acceptance via JEV (J9).`;
+            }
           }
-        } else if (j3.detail.certainty < VERIFY_THRESHOLD) {
-          // J5: verified but not certain → confirm, don't auto-advance.
-          log(state, 'jev', `J3 verify: verified but certainty ${j3.detail.certainty} < ${VERIFY_THRESHOLD} — asking for confirmation.`);
-          response = {
-            text: `I'm only ${Math.round(j3.detail.certainty * 100)}% sure that's actually done. Quick re-check: ${stepRef.step.definition_of_done[0]}`,
-            suggestions: [],
-          };
         } else {
-          markStepComplete(state, stepRef.step);
-          skillOutcome(state, stepRef.step, true);
-          const doneRef = stepRef;
-          const next = advanceStep(state);
-          log(state, 'system', `Step ${doneRef.index + 1}/${doneRef.total} complete: "${doneRef.step.title}".`);
-          if (next) {
-            const nextRef = activeStepRef(state);
-            await ensureSafetyGate(deps, state, nextRef, decisions);
-            const j8 = await runDecision('J8', { state, stepRef: nextRef, message, jevState: buildJevState(state, message, chip) }, deps);
-            decisions.push(j8);
-            response = { text: advanceText(doneRef, nextRef, state), suggestions: j8.detail.suggestions };
+          responseText = `No pending human tool, but noted: "${message}". Current step: "${stepRef?.step.title || 'none'}".`;
+        }
+      } else {
+        // No pending human, but user reports done → verify current step
+        if (!stepRef) {
+          responseText = `No active step — all done. Claim done to run acceptance check (J9).`;
+        } else {
+          const j3 = await runDecision('J3', { stepRef, message, jevState: buildJevState(state, message) }, deps);
+          decisions.push(j3);
+          if (j3.detail.verified && j3.detail.certainty >= VERIFY_THRESHOLD) {
+            markStepComplete(state, stepRef.step);
+            const next = advanceStep(state);
+            if (next) {
+              const nextRef = activeStepRef(state);
+              const nextTool = makeHumanToolCall(nextRef);
+              conversation.pendingHumanTools = [nextTool];
+              toolCalls = [nextTool];
+              responseText = `✅ Verified "${stepRef.step.title}". Next: "${nextRef.step.title}" — human tool called.`;
+            } else {
+              responseText = `All steps complete. Claim done for acceptance.`;
+            }
           } else {
-            response = {
-              text: 'That was the last step. If everything works, hit "I think it\'s done" and I\'ll run the acceptance check.',
-              suggestions: [],
-            };
+            responseText = `Not yet verified for "${stepRef.step.title}" — ${j3.detail.certainty < VERIFY_THRESHOLD ? 'low certainty, need more detail' : 'does not meet DOD'}.`;
           }
         }
+      }
+      break;
+    }
+    case 'step_failed': {
+      if (!stepRef) {
+        responseText = `No active step to fail.`;
         break;
       }
-      case 'step_failed': {
-        if (!stepRef) {
-          response = { text: 'No active step to fail — all steps are complete. Claim done to run acceptance.', suggestions: [] };
-          break;
-        }
-        stepRef.step.failed += 1;
-        skillOutcome(state, stepRef.step, false);
-        const j10 = await runDecision('J10', ctx, deps);
-        decisions.push(j10);
-        log(state, 'jev', `J10 difficulty: level ${j10.detail.level}/3 (fail ${stepRef.step.failed} on this step)`);
-        if (stepRef.step.failed >= 2) {
-          response = await offerSubstitution(deps, state, stepRef, decisions,
-            `Two failures on "${stepRef.step.title}" — `);
-        } else if (j10.detail.level >= 2.5) {
-          state.proposal = {
-            type: 'replan', confidence: j10.confidence,
-            text: `The plan may be above your current comfort level for "${stepRef.step.title}". Re-plan at a finer, easier granularity?`,
-          };
-          response = {
-            text: 'This is landing harder than it should. I can re-plan at a finer, easier granularity — confirm in the proposal card.',
-            suggestions: [],
-          };
-        } else {
-          response = { text: failureText(stepRef), suggestions: [] };
-        }
-        break;
+      stepRef.step.failed += 1;
+      skillOutcome(state, stepRef.step, false);
+      const j10 = await runDecision('J10', { message, jevState: buildJevState(state, message) }, deps);
+      decisions.push(j10);
+      const retryTool = makeHumanToolCall(stepRef, { reason: `Retry after failure ${stepRef.step.failed}`, attempt: stepRef.step.failed });
+      toolCalls = [retryTool];
+      conversation.pendingHumanTools = [retryTool];
+      responseText = `Logged failure on "${stepRef.step.title}" (attempt ${stepRef.step.failed}). JEV difficulty: ${j10.detail.level.toFixed(1)}/3\n\n**Try:** ${stepRef.step.definition_of_done.join('; ')}\n\n🔧 Human tool re-called for retry.`;
+      break;
+    }
+    case 'question': {
+      // Answer from plan context
+      const s = stepRef?.step;
+      responseText = s
+        ? `**Q:** ${message}\n\n**About current step "${s.title}":** ${s.instructions}\n\n**Materials:** ${s.materials.join(', ') || '—'}\n**Tools:** ${s.tools.join(', ') || '—'}\n**Done when:** ${s.definition_of_done.join('; ')}\n\n*If this doesn't answer, ask more specifically — in full mode this goes to LLM planner.*`
+        : `**Q:** ${message}\n\nNo active step — question is about project "${state.goal}".\n\nPhases: ${state.phases.map(p => p.name).join(' → ')}\nBOM: ${state.bom.length} parts\nAcceptance: ${state.acceptance.join('; ')}`;
+      break;
+    }
+    case 'claim_done': {
+      const j9 = await runDecision('J9', { state, jevState: buildJevState(state, message) }, deps);
+      decisions.push(j9);
+      const unmet = j9.detail.results.filter(r => !r.met || r.certainty < 0.8);
+      if (j9.detail.allMet) {
+        state.status = 'complete';
+        responseText = `🏁 **Acceptance passed** — ${j9.detail.results.length} criteria (min certainty ${Math.round(j9.confidence * 100)}%). "${state.goal}" is done. Well built.`;
+      } else {
+        responseText = `Not yet — ${unmet.length} criterion unmet:\n${unmet.map(r => `• ${r.criterion} (certainty ${Math.round(r.certainty * 100)}%)`).join('\n')}\n\nFinish those and claim done again.`;
       }
-      case 'substitute_request':
-      case 'deviation': {
-        if (!stepRef) {
-          response = { text: 'No active step right now — tell me which part you\'re swapping and I\'ll note it.', suggestions: [] };
-          break;
-        }
-        const { need } = extractNeed(message, stepRef);
-        response = await offerSubstitution(deps, state, stepRef, decisions, null, need);
-        break;
+      break;
+    }
+    case 'scope_change': {
+      responseText = `Scope change noted: "${message}". Want me to re-plan "${state.goal}" with new scope? Say "Replan: <new goal>" and I'll run feasibility + planner again via JEV.`;
+      break;
+    }
+    case 'blocked': {
+      responseText = `You're blocked on "${stepRef?.step.title || 'project'}". Here's plan context:\n\n${stepRef ? `**Instructions:** ${stepRef.step.instructions}\n**DOD:** ${stepRef.step.definition_of_done.join('; ')}\n**Tools:** ${stepRef.step.tools.join(', ')}` : `Goal: ${state.goal}\nPhases: ${state.phases.map(p => p.name).join(', ')}`}\n\nTell me what you have on hand and I'll score substitutes via J4, or ask specific question.`;
+      // Offer human tool again
+      if (stepRef) {
+        const tool = makeHumanToolCall(stepRef, { reason: 'Unblock attempt' });
+        toolCalls = [tool];
+        conversation.pendingHumanTools = [tool];
       }
-      case 'question': {
-        if (!stepRef) {
-          response = { text: 'All steps are done — if the question is about the finished build, I\'ll answer from the plan context.', suggestions: [] };
-          break;
-        }
-        response = { text: questionText(state, stepRef, message), suggestions: [] };
-        break;
-      }
-      case 'claim_done': {
-        const j9 = await runDecision('J9', { state, jevState: buildJevState(state, message, chip) }, deps);
-        decisions.push(j9);
-        const unmet = j9.detail.results.filter((r) => !r.met || r.certainty < ACCEPT_MIN_CERTAINTY);
-        if (j9.detail.allMet) {
-          state.status = 'complete';
-          log(state, 'system', `Acceptance passed: ${j9.detail.results.length} criteria. Project complete.`);
-          response = { text: doneText(state, j9.detail), suggestions: [] };
-        } else {
-          log(state, 'jev', `J9 acceptance: ${unmet.length} criterion(s) unmet or below certainty ${ACCEPT_MIN_CERTAINTY}.`);
-          response = {
-            text: notYetText(unmet),
-            suggestions: ['Get back to the earliest unmet item and report it once it checks out.'],
-          };
-        }
-        break;
-      }
-      case 'scope_change': {
-        state.proposal = {
-          type: 'replan', confidence: intentConf,
-          text: `Scope change noted. Re-plan "${state.goal}" with the new scope?`,
-        };
-        log(state, 'system', 'Scope change detected — replan proposal created.');
-        response = {
-          text: 'Scope change logged. Confirm the replan in the proposal card, or tell me more about what changed.',
-          suggestions: [],
-        };
-        break;
-      }
-      case 'blocked': {
-        deps.counters.escalations += 1;
-        log(state, 'jev', 'Blocked — escalating (mock mode answers from plan context; full mode wakes the LLM).');
-        response = {
-          text: blockedText(stepRef),
-          suggestions: [
-            'Tell me what you have on hand and I\'ll score it as a substitute.',
-            'If it\'s a knowledge gap, ask me the specific question and I\'ll answer from the plan.',
-          ],
-        };
-        break;
-      }
-      default:
-        response = {
-          text: 'Let\'s keep the build moving — a chip (done / failed / substitute / question) or a short sentence is all I need.',
-          suggestions: [],
-        };
+      break;
+    }
+    default: {
+      responseText = `Got it: "${message}". Current step: "${stepRef?.step.title || 'none'}" (${stepRef?.total ? `${progress(state).completed}/${progress(state).total}` : 'no plan'}).\n\nIf you're working on a human tool task, report what happened. If you wanna build something new, say "I wanna build X".`;
     }
   }
 
-  // 3) Safety incident override — layered on top of whatever the branch said.
-  if (j2.detail.safety_concern >= 0.5) {
-    log(state, 'system', 'SAFETY: builder reported a safety incident/concern — pause and resolve before continuing.');
-    response = {
-      text:
-        `⚠️ Safety first: stop the step and address what you described before continuing. ` +
-        'Tell me it\'s resolved and we pick back up where we left off.\n\n' + response.text,
-      safety: true,
-      suggestions: response.suggestions,
-    };
-  }
+  const assistantMsg = makeMessage('assistant', responseText, { decisions, toolCalls, meta: { intent, stepId: stepRef?.step.id } });
+  conversation.messages.push(assistantMsg);
+  conversation.updatedAt = nowIso();
+  conversation.counters.jevCalls += decisions.length;
 
-  project.updatedAt = nowIso();
-  return { project, decisions, response };
+  return { conversation, response: assistantMsg, decisions };
 }
 
-// ── Jev state builder — the ProjectState's "nervous system view" ────────────
+// ── Legacy compatibility: keep old synthesizeProject/handleMessage wrappers ───
 
-function buildJevState(state, message, chip, extra = {}) {
-  const stepRef = activeStepRef(state);
-  const all = flatSteps(state);
-  const idx = stepRef ? stepRef.index : -1;
-  const next = all.slice(idx + 1).find((s) => s.status !== 'done') || null;
-  return {
-    goal: state.goal,
-    constraints: state.constraints,
-    status: state.status,
-    progress: progress(state),
-    active_step: stepRef
-      ? {
-          id: stepRef.step.id,
-          title: stepRef.step.title,
-          track: stepRef.step.track,
-          index: stepRef.index + 1,
-          total: stepRef.total,
-          instructions: stepRef.step.instructions,
-          definition_of_done: stepRef.step.definition_of_done,
-          materials: stepRef.step.materials,
-          tools: stepRef.step.tools,
-          safety: stepRef.step.safety,
-          failed: stepRef.step.failed,
-        }
-      : null,
-    next_step: next
-      ? { title: next.title, track: next.track, tools: next.tools, definition_of_done: next.definition_of_done }
-      : null,
-    inventory: state.inventory,
-    bom_pending_count: state.bom.filter((b) => b.status === 'pending').length,
-    message,
-    chip,
-    ...extra,
+export async function synthesizeProject(deps, input) {
+  // For old /api/projects route — create a conversation then extract state
+  const conv = deps._tempConv || { messages: [], pendingHumanTools: [], counters: { messages: 0, jevCalls: 0, humanCalls: 0, plans: 0 }, projectState: null, title: input.goal, id: 'tmp', createdAt: nowIso(), updatedAt: nowIso() };
+  const result = await synthesizeChatProject(deps, conv, input.goal, input.constraints);
+  return { state: result.projectState, decisions: result.decisions, response: { text: result.response.content, suggestions: [] } };
+}
+
+export async function handleMessage(deps, project, input) {
+  // Convert old project to conversation
+  const conv = {
+    id: project.id,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+    title: project.state.goal,
+    messages: [],
+    projectState: project.state,
+    pendingHumanTools: [],
+    counters: { messages: project.state.counters?.messages || 0, jevCalls: 0, humanCalls: 0, plans: 1 },
   };
-}
-
-async function ensureSafetyGate(deps, state, stepRef, decisions) {
-  if (!stepRef || state.safetyGate?.stepId === stepRef.step.id) return state.safetyGate;
-  const j6 = await runDecision('J6', { state, stepRef, message: '', jevState: buildJevState(state, '', null) }, deps);
-  decisions?.push(j6);
-  state.safetyGate = { stepId: stepRef.step.id, flags: j6.detail.flags };
-  if (j6.detail.ackRequired) {
-    log(state, 'system',
-      `Safety gate on "${stepRef.step.title}": ${j6.detail.flags.filter((f) => f.present && f.severity === 'high').map((f) => f.note || f.hazard).join(', ')}`);
+  // If pending human tool from old state, reconstruct
+  const stepRef = activeStepRef(project.state);
+  if (stepRef) {
+    conv.pendingHumanTools = [makeHumanToolCall(stepRef)];
   }
-  return state.safetyGate;
-}
-
-// ── Substitute flow (J4) ─────────────────────────────────────────────────────
-
-function extractNeed(text, stepRef) {
-  const dm = /don'?t have|no |missing/i.test(text)
-    ? /(?:don'?t have|no |missing)\s+([^.!?,]+)/i.exec(text)
-    : null;
-  let need = dm ? dm[1].trim() : null;
-  if (!need) need = stepRef?.step?.materials?.[0] || 'the required part';
-  return { need };
-}
-
-async function offerSubstitution(deps, state, stepRef, decisions, prefix, need) {
-  const needFinal = need || extractNeed(state.log.at(-1)?.text || '', stepRef).need;
-  const items = state.inventory;
-  const jevState = buildJevState(state, state.log.at(-1)?.text || '', null, {
-    substitution: { need: needFinal, items },
-  });
-  const j4 = await runDecision('J4', { state, stepRef, substitution: { need: needFinal, items }, jevState }, deps);
-  decisions.push(j4);
-
-  if (!items.length) {
-    log(state, 'jev', `J4 substitution: nothing in inventory to score (need: "${needFinal}").`);
-    return {
-      text:
-        `For "${needFinal}": add the parts you actually have to your inventory (sidebar → Bill of materials) ` +
-        'and I\'ll score each one as a substitute.',
-      suggestions: [],
-    };
-  }
-
-  const best = j4.detail.best;
-  if (!best) {
-    deps.counters.escalations += 1;
-    log(state, 'jev', `J4 substitution: no inventory item scored valid for "${needFinal}" — escalating (mock mode: sourcing advice).`);
-    return {
-      text:
-        `None of the items in your inventory scores as a valid substitute for "${needFinal}". ` +
-        'In full mode this goes to the LLM for a design workaround — for now, either source the part or tell me about another item you have.',
-      suggestions: [],
-    };
-  }
-
-  state.proposal = {
-    type: 'substitute', need: needFinal, item: best.item,
-    compatibility: best.compatibility, confidence: j4.confidence, stepId: stepRef.step.id,
+  const result = await handleChatMessage(deps, conv, input);
+  const updatedProject = {
+    id: conv.id,
+    createdAt: conv.createdAt,
+    updatedAt: conv.updatedAt,
+    state: result.conversation.projectState,
   };
-  log(state, 'jev', `J4 substitution: best match "${best.item.name}" for "${needFinal}" (p=${best.probability.toFixed(2)}, compat ${best.compatibility}/2) — proposal pending.`);
-  const label = best.compatibility >= 2 ? 'drop-in equivalent' : 'works with changes';
-  return {
-    text:
-      `${prefix || ''}I scored your inventory: "${best.item.name}" substitutes for "${needFinal}" — ${label} ` +
-      `(confidence ${Math.round(j4.confidence * 100)}%). Accept the proposal to use it.`,
-    suggestions: [],
-  };
-}
-
-function applyProposal(state) {
-  const p = state.proposal;
-  if (p.type === 'substitute') {
-    const bom = state.bom.find(
-      (b) =>
-        b.name.toLowerCase().includes(p.need.toLowerCase().slice(0, 12)) ||
-        p.need.toLowerCase().includes(b.name.toLowerCase().slice(0, 12)),
-    );
-    if (bom) bom.status = 'substituted';
-    state.counters.substitutions += 1;
-    log(state, 'system', `Substitution applied: using "${p.item.name}" in place of "${p.need}".`);
-  } else if (p.type === 'replan') {
-    log(state, 'system', 'Replan accepted (mock planner keeps the current structure — full mode regenerates with the LLM).');
-  }
-}
-
-// ── Response text (the human-facing voice of the skeleton) ──────────────────
-
-function safetyLine(state, step) {
-  const gate = state.safetyGate?.stepId === step.id ? state.safetyGate.flags : step.safety;
-  const high = gate.filter((f) => f.present !== false && f.severity === 'high');
-  if (!high.length) return '';
-  return `\n⚠️ Safety: ${high.map((f) => f.note || f.hazard).join(' · ')} — acknowledge on the step card before starting.`;
-}
-
-function advanceText(doneRef, nextRef, state) {
-  return (
-    `✓ Step ${doneRef.index + 1}/${doneRef.total} complete — "${doneRef.step.title}".\n` +
-    `Next: "${nextRef.step.title}" (${nextRef.step.track === 'sim' ? 'sim track — Velxio emulator' : 'physical'}).` +
-    safetyLine(state, nextRef.step)
-  );
-}
-
-function retryText(stepRef) {
-  const s = stepRef.step;
-  const hint = s.safety.length
-    ? `Usual suspects for this step: ${s.safety.map((f) => f.hazard).join(', ')} — check those first.`
-    : 'Check the last instruction line, your tool setup, and the usual suspects (reversed polarity, cold joint, wrong pin).';
-  return `Not quite there yet on "${s.title}". ${hint} Take it slow and report back exactly what happens.`;
-}
-
-function failureText(stepRef) {
-  const s = stepRef.step;
-  const safety = s.safety.length ? ` Safety notes for this step: ${s.safety.map((f) => f.note || f.hazard).join('; ')}.` : '';
-  return (
-    `Logged the failure on "${s.title}" (attempt ${s.failed + 1}).${safety} ` +
-    `Try again with the definition of done in mind: ${s.definition_of_done.join('; ')}. ` +
-    'If it fails again, tell me what parts you actually have and I\'ll score substitutes.'
-  );
-}
-
-function questionText(state, stepRef, msg) {
-  const s = stepRef.step;
-  const m = s.materials.find((x) => msg.toLowerCase().includes(x.split(' ')[0].toLowerCase()));
-  const parts = m ? `About "${m}": it's on the bill of materials for this step. ` : '';
-  return (
-    `${parts}The step is "${s.title}" — ${s.instructions} ` +
-    'If that doesn\'t answer it, in full mode your question goes to the LLM planner (the mock planner answers from plan context only).'
-  );
-}
-
-function blockedText(stepRef) {
-  if (!stepRef) return 'No active step — describe what\'s blocking the project as a whole.';
-  const s = stepRef.step;
-  return (
-    `Here's everything the plan knows about "${s.title}": ${s.instructions}\n` +
-    `Done when: ${s.definition_of_done.join('; ')}.\n` +
-    `Tools: ${s.tools.join(', ') || '—'}. If you're stuck on a part, say what you have instead.`
-  );
-}
-
-function doneText(state, detail) {
-  const met = detail.results.filter((r) => r.met).length;
-  return (
-    `🏁 Acceptance passed — ${met}/${detail.results.length} criteria ` +
-    `(min certainty ${Math.round(detail.confidence * 100)}%). "${state.goal}" is done. Well built.`
-  );
-}
-
-function notYetText(unmet) {
-  return (
-    `Not yet — ${unmet.length} acceptance criterion${unmet.length === 1 ? '' : 'a'} still unmet:\n` +
-    unmet.map((r) => `• ${r.criterion}`).join('\n') +
-    '\nFinish those and claim done again.'
-  );
+  return { project: updatedProject, response: { text: result.response.content, suggestions: [] }, decisions: result.decisions };
 }
