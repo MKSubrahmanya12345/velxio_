@@ -1,8 +1,8 @@
-// Forge client — API layer. Relative /api base: in dev the Vite proxy
+// Forge — API layer. Relative /api base: in dev the Vite proxy
 // forwards to the server; in production Express serves the client itself.
 
 import type {
-  CreateResult, Health, MessageResult, Project,
+  CreateResult, Health, MessageResult, Project, ProjectState,
 } from './types';
 
 const BASE =
@@ -28,15 +28,68 @@ export interface ConstraintsIn {
   notes?: string;
 }
 
+// Releases of Forge before the project envelope was wired into the REST
+// routes returned ProjectState directly. Normalize both shapes at the API
+// boundary so an old server or an old persisted project cannot take down the
+// React tree while the server is being upgraded.
+function normalizeProject(payload: unknown): Project {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('API returned an invalid project');
+  }
+
+  const value = payload as Record<string, unknown>;
+  const nested = value.state;
+  if (nested && typeof nested === 'object' && Array.isArray((nested as Record<string, unknown>).phases)) {
+    const now = new Date().toISOString();
+    return {
+      id: String(value.id || `project-${Date.now()}`),
+      createdAt: String(value.createdAt || now),
+      updatedAt: String(value.updatedAt || value.createdAt || now),
+      state: nested as ProjectState,
+    };
+  }
+
+  if (Array.isArray(value.phases)) {
+    const {
+      id,
+      createdAt,
+      updatedAt,
+      ...state
+    } = value;
+    const now = new Date().toISOString();
+    return {
+      id: String(id || `project-${Date.now()}`),
+      createdAt: String(createdAt || now),
+      updatedAt: String(updatedAt || createdAt || now),
+      state: state as unknown as ProjectState,
+    };
+  }
+
+  throw new Error('API returned a project without state');
+}
+
 export const api = {
   health: () => http<Health>('/health'),
-  list: () => http<Project[]>('/projects'),
-  get: (id: string) => http<Project>(`/projects/${id}`),
-  create: (goal: string, constraints: ConstraintsIn) =>
-    http<CreateResult>('/projects', { method: 'POST', body: JSON.stringify({ goal, constraints }) }),
-  message: (id: string, body: { text?: string; chip?: string }) =>
-    http<MessageResult>(`/projects/${id}/messages`, { method: 'POST', body: JSON.stringify(body) }),
-  addInventory: (id: string, items: { name: string; note?: string }[]) =>
-    http<Project>(`/projects/${id}/inventory`, { method: 'POST', body: JSON.stringify({ items }) }),
+  list: async () => (await http<unknown[]>('/projects')).map(normalizeProject),
+  get: async (id: string) => normalizeProject(await http<unknown>(`/projects/${id}`)),
+  create: async (goal: string, constraints: ConstraintsIn) => {
+    const result = await http<CreateResult>('/projects', {
+      method: 'POST',
+      body: JSON.stringify({ goal, constraints }),
+    });
+    return { ...result, project: normalizeProject(result.project) };
+  },
+  message: async (id: string, body: { text?: string; chip?: string }) => {
+    const result = await http<MessageResult>(`/projects/${id}/messages`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    return { ...result, project: normalizeProject(result.project) };
+  },
+  addInventory: async (id: string, items: { name: string; note?: string }[]) =>
+    normalizeProject(await http<unknown>(`/projects/${id}/inventory`, {
+      method: 'POST',
+      body: JSON.stringify({ items }),
+    })),
   remove: (id: string) => http<{ ok: boolean }>(`/projects/${id}`, { method: 'DELETE' }),
 };

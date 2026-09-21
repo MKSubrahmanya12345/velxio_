@@ -12,6 +12,7 @@ import { createJevProvider } from '../src/providers/jev.js';
 import { createPlanner } from '../src/providers/planner.js';
 import { signV4 } from '../src/providers/sigv4.js';
 import { synthesizeProject, handleMessage } from '../src/pipeline.js';
+import { makeProject } from '../src/schema.js';
 
 const cfg = loadConfig({}); // defaults → mock/mock
 const counters = { jevCalls: 0, escalations: 0 };
@@ -27,7 +28,7 @@ const { state, decisions, response } = await synthesizeProject(deps, {
   goal: 'Build me an MP3 player',
   constraints: { skill: 'intermediate' },
 });
-const project = { id: state.id, createdAt: state.createdAt, updatedAt: state.updatedAt, state };
+const project = makeProject(state);
 assert.equal(project.state.status, 'active');
 assert.ok(project.state.phases.length >= 3, 'has phases');
 assert.ok(project.state.bom.length >= 5, 'has bom');

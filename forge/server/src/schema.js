@@ -30,6 +30,51 @@ export const nowIso = now;
 
 const uid = (p = 'id') => `${p}_${crypto.randomUUID().slice(0, 8)}`;
 
+// The API persists a Project envelope around the mutable ProjectState. Keeping
+// this construction in one place prevents the state object from accidentally
+// being returned at the project level (which makes the client look for
+// `project.state` and find undefined).
+export function makeProject(state, metadata = {}) {
+  const createdAt = String(metadata.createdAt || now());
+  return {
+    id: String(metadata.id || crypto.randomUUID()),
+    createdAt,
+    updatedAt: String(metadata.updatedAt || createdAt),
+    state,
+  };
+}
+
+// Normalize the current envelope and the shape written by early Forge builds.
+// Older versions persisted ProjectState directly, so accepting that shape here
+// lets the server recover existing JSON/Mongo projects without a data wipe.
+export function normalizeProject(raw, fallbackId = '') {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw;
+  const id = value.id || value._id || fallbackId;
+  const metadata = {
+    id,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+  };
+
+  if (value.state && typeof value.state === 'object' && Array.isArray(value.state.phases)) {
+    return makeProject(value.state, metadata);
+  }
+
+  if (Array.isArray(value.phases)) {
+    const {
+      id: _id,
+      _id: _mongoId,
+      createdAt: _createdAt,
+      updatedAt: _updatedAt,
+      ...state
+    } = value;
+    return makeProject(state, metadata);
+  }
+
+  return null;
+}
+
 function strArr(v) {
   return Array.isArray(v)
     ? v.map((x) => String(x ?? '').trim()).filter(Boolean)
