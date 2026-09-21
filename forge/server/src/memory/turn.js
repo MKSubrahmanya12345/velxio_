@@ -58,9 +58,9 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}) {
     legacyResult = await handleChatMessage(legacyDeps, makeConversation(JSON.parse(JSON.stringify(conversation))), { text: message });
     legacyCalls = Math.max(0, legacyResult.conversation.counters.jevCalls - conversation.counters.jevCalls);
   }
-  event('generate', 'running', legacyResult && providers.generator === 'mock' ? 'Preparing a structured-build response (demo)' : 'Generator is drafting with the current project memory');
+  event('generate', 'running', legacyResult ? 'Preparing a structured-build response draft' : 'Generator is drafting with the current project memory');
   const context = { message, memory: knowledge(), history, projectState: legacyResult?.conversation.projectState || conversation.projectState };
-  let draft = legacyResult && providers.generator === 'mock' ? { content: legacyResult.response.content } : await generator.respond({ ...context, structuredBuildDraft: legacyResult?.response || null });
+  let draft = await generator.respond({ ...context, structuredBuildDraft: legacyResult?.response || null });
   const validateDraft = () => {
     if (typeof draft?.content !== 'string' || !draft.content.trim() || draft.content.length > 24000) throw new Error('Generator returned an invalid response. Nothing was saved.');
   };
@@ -114,7 +114,7 @@ function heldHeadline(verdict) {
 
 function checkSummary(verdict, noteCount, providers) {
   const passed = verdict.checks.filter(c => c.verdict === 'pass').length;
-  const label = providers.jev === 'mock' ? 'demo heuristics' : 'JEV evaluation';
+  const label = 'JEV evaluation';
   const status = verdict.passed ? 'Passed' : 'Held';
   const scope = noteCount ? `${passed}/${noteCount} active notes passed` : 'no active notes to check';
   const detail = verdict.passed

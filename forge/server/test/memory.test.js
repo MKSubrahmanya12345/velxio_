@@ -4,8 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config.js';
-import { createJevProvider } from '../src/providers/jev.js';
-import { createPlanner } from '../src/providers/planner.js';
+import { createJevMock } from './fixtures/jevMock.js';
+import { createPlannerMock } from './fixtures/plannerMock.js';
+import { createDemoReasoner } from './fixtures/demo.js';
 import { makeConversation, normalizeConversation } from '../src/schema.js';
 import { runMemoryTurn } from '../src/memory/turn.js';
 import { emptyMemory } from '../src/memory/model.js';
@@ -13,7 +14,7 @@ import { applyReview, evaluateOutput, memoryQuestions, outputQuestions } from '.
 import { FileStore } from '../src/store.js';
 
 const cfg = loadConfig({});
-const dependencies = () => ({ cfg, jev: createJevProvider(cfg), planner: createPlanner(cfg), counters: { jevCalls: 0 } });
+const dependencies = () => ({ cfg, jev: createJevMock(), planner: createPlannerMock(), reasoner: createDemoReasoner(), counters: { jevCalls: 0 } });
 const noul = value => ({ type: 'noul', noul: value });
 const choice = (value, confidence = .99) => ({ type: 'choice', choice: value, confidence });
 const candidate = (extra = {}) => ({ id: 'note_1', kind: 'rule', text: 'Only me, no crew', quote: 'Only me, no crew', supersedes: [], ...extra });

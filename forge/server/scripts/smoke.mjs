@@ -3,15 +3,15 @@
 
 import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
-import { createJevProvider } from '../src/providers/jev.js';
-import { createPlanner } from '../src/providers/planner.js';
+import { createJevMock } from '../test/fixtures/jevMock.js';
+import { createPlannerMock } from '../test/fixtures/plannerMock.js';
 import { signV4 } from '../src/providers/sigv4.js';
 import { synthesizeChatProject, handleChatMessage } from '../src/pipeline.js';
 import { makeConversation } from '../src/schema.js';
 
 const cfg = loadConfig({});
 const counters = { jevCalls: 0, escalations: 0 };
-const deps = { cfg, jev: createJevProvider(cfg), planner: createPlanner(cfg), counters };
+const deps = { cfg, jev: createJevMock(), planner: createPlannerMock(), counters };
 
 let n = 0;
 const pass = (msg) => console.log(`  PASS ${String(++n).padStart(2, '0')}  ${msg}`);
@@ -110,12 +110,15 @@ assert.equal(
 );
 pass('SigV4 signer matches official AWS vector');
 
-// 11 ── Provider selection
-assert.equal(loadConfig({ PLANNER_PROVIDER: 'bedrock', AWS_REGION: 'us-east-1', AWS_ACCESS_KEY_ID: 'x', AWS_SECRET_ACCESS_KEY: 'y' }).planner.provider, 'bedrock');
-assert.equal(loadConfig({ PLANNER_PROVIDER: 'bedrock' }).planner.provider, 'mock');
-assert.equal(loadConfig({ PLANNER_PROVIDER: 'llm', LLM_API_KEY: 'x' }).planner.provider, 'llm');
-assert.equal(loadConfig({}).planner.provider, 'mock');
-pass('planner provider selection works');
+// 11 ── Provider selection (live-only; unconfigured providers never resolve to mock)
+const configured = (partial) => ({ ...{ TYPESAFE_API_KEY: 'x', AWS_REGION: 'us-east-1', AWS_ACCESS_KEY_ID: 'x', AWS_SECRET_ACCESS_KEY: 'y', LLM_API_KEY: 'x' }, ...partial });
+assert.equal(loadConfig(configured({ PLANNER_PROVIDER: 'bedrock' })).planner.provider, 'bedrock');
+assert.equal(loadConfig(configured({ PLANNER_PROVIDER: 'llm' })).planner.provider, 'llm');
+assert.equal(loadConfig({ PLANNER_PROVIDER: 'bedrock' }).planner.provider, '', 'missing AWS credentials resolve to no provider, never mock');
+assert.equal(loadConfig({}).planner.provider, '');
+assert.equal(loadConfig({ TYPESAFE_API_KEY: 'x' }).jev.provider, 'typesafe');
+assert.equal(loadConfig({}).jev.provider, '', 'missing JEV key resolves to no provider, never mock');
+pass('provider selection is live-only (no mock fallback)');
 
 console.log(`\n  counters: ${counters.jevCalls} Jev calls · ${n} checks`);
 console.log('\nALL CHECKS PASSED — chat-first loop with human as tool works end-to-end.\n');

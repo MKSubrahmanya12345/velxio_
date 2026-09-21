@@ -1,4 +1,4 @@
-// Forge — the shared planner system prompt (mock + LLM + Bedrock all plan
+// Forge — the shared planner system prompt (LLM + Bedrock both plan
 // into the same shape, coerced by sanitizePlan()).
 
 export const PLANNER_SYSTEM_PROMPT = `You are the planning engine of Velxio Forge, a project synthesizer that turns a build goal into an executable plan for a human builder.

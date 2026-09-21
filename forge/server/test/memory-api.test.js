@@ -6,16 +6,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRouter } from '../src/routes.js';
 import { loadConfig } from '../src/config.js';
-import { createJevProvider } from '../src/providers/jev.js';
-import { createPlanner } from '../src/providers/planner.js';
-import { createDemoReasoner } from '../src/memory/demo.js';
+import { createJevMock } from './fixtures/jevMock.js';
+import { createPlannerMock } from './fixtures/plannerMock.js';
+import { createDemoReasoner } from './fixtures/demo.js';
 import { FileStore } from '../src/store.js';
 
 async function setup(t) {
   const dir = await mkdtemp(join(tmpdir(), 'forge-api-'));
   const cfg = loadConfig({});
   const store = new FileStore(join(dir, 'projects.json')); await store.init();
-  const deps = { cfg, store, jev: createJevProvider(cfg), planner: createPlanner(cfg), reasoner: createDemoReasoner() };
+  const deps = { cfg, store, jev: createJevMock(), planner: createPlannerMock(), reasoner: createDemoReasoner() };
   const app = express(); app.use(express.json()); app.use(createRouter(deps));
   app.use((err, req, res, next) => res.status(err.status || 500).json({ error: err.message }));
   const server = app.listen(0, '127.0.0.1');

@@ -1,16 +1,16 @@
 // Forge — Jev provider factory.
 //
-// Two implementations with the identical contract:
-//   ask({ state, questions }) → { answers: { [id]: { type, …fields } }, model, provider, usage }
+// Contract: ask({ state, questions }) → { answers: { [id]: { type, …fields } }, model, provider, usage }
 //
-// `state` is serialized to JSON before the real call (the TypeSafe API takes
-// unstructured program state as a string); the mock accepts either shape.
-
-import { createJevMock } from './jevMock.js';
+// `state` is serialized to JSON before the call (the TypeSafe API takes
+// unstructured program state as a string).
 
 export function createJevProvider(cfg) {
   if (cfg.jev.provider === 'typesafe' && cfg.jev.apiKey) return typesafeJev(cfg);
-  return createJevMock();
+  throw new Error(
+    'JEV: no live provider configured. Set TYPESAFE_API_KEY in forge/server/.env (JEV_PROVIDER=typesafe). ' +
+    'Mocks were removed — JEV only runs against the real TypeSafe API.'
+  );
 }
 
 function typesafeJev(cfg) {

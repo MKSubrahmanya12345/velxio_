@@ -1,7 +1,7 @@
 // Prints one raw memory-review response and one raw output-review response so
 // exact failing values can be inspected instead of inferred. Runs against the
-// configured JEV provider — the deterministic mock by default (no credentials),
-// or real TypeSafe JEV when JEV_PROVIDER=typesafe and TYPESAFE_API_KEY are set.
+// real TypeSafe JEV provider when TYPESAFE_API_KEY is configured; otherwise it
+// falls back to the deterministic test fixture (dev-only, never used by the server).
 //
 //   node scripts/raw-reviews.mjs
 //
@@ -11,11 +11,12 @@
 
 import { loadConfig } from '../src/config.js';
 import { createJevProvider } from '../src/providers/jev.js';
+import { createJevMock } from '../test/fixtures/jevMock.js';
 import { emptyMemory, normalizeProposals, COMMIT_KINDS } from '../src/memory/model.js';
 import { memoryQuestions, outputQuestions, applyReview, evaluateOutput, T } from '../src/memory/decisions.js';
 
-const cfg = loadConfig({});
-const jev = createJevProvider(cfg);
+const cfg = loadConfig();
+const jev = cfg.jev.provider === 'typesafe' ? createJevProvider(cfg) : createJevMock();
 
 const message = 'the movie is like a student doesnt study for an exam, and the future self finds a way to communicate with that past self. the mechanism is: past self has a moniter and the future self has a phone. its both ways, the communication. also undecidable elements, its supernatural';
 

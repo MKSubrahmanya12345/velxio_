@@ -1,4 +1,4 @@
-import { demoMemoryAnswers } from '../memory/demo.js';
+import { demoMemoryAnswers } from './demo.js';
 // Forge — deterministic offline Jev (mock provider) — chat-first version.
 // Returns exact real API shape.
 

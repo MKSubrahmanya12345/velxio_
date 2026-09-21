@@ -45,7 +45,7 @@ app.use((err, req, res, next) => {
 
 app.listen(cfg.port, () => {
   console.log(`Velxio Forge server → http://localhost:${cfg.port}`);
-  console.log(`  JEV:     ${cfg.jev.provider}${cfg.jev.provider === 'typesafe' ? ` (${cfg.jev.model} @ ${cfg.jev.baseUrl})` : ' (deterministic offline mock)'}`);
-  console.log(`  PLANNER: ${cfg.planner.provider}${cfg.planner.provider === 'llm' ? ` (${cfg.planner.model})` : cfg.planner.provider === 'bedrock' ? ` (bedrock ${cfg.bedrock.model} @ ${cfg.bedrock.region})` : ' (offline knowledge base)'}`);
+  console.log(`  JEV:     ${cfg.jev.provider} (${cfg.jev.model} @ ${cfg.jev.baseUrl})`);
+  console.log(`  PLANNER: ${cfg.planner.provider}${cfg.planner.provider === 'llm' ? ` (${cfg.planner.model})` : ` (bedrock ${cfg.bedrock.model} @ ${cfg.bedrock.region})`}`);
   console.log(`  STORE:   ${cfg.db.kind}${cfg.db.kind === 'mongo' ? ' (mongodb)' : ` (${cfg.db.dataFile})`}`);
 });

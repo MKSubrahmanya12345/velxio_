@@ -60,7 +60,8 @@ the live memory pipeline. JEV receives `{ state, questions }` with typed `choice
 - **Exact values are visible.** Raw JEV responses are recorded on review/check
   events and in decision detail, a held draft lists what actually blocked it, and
   `npm --prefix forge/server run raw-reviews` prints one raw memory-review and one
-  raw output-review response (mock by default — no credentials needed).
+  raw output-review response (live TypeSafe when configured, otherwise a
+  read-only test fixture — the server itself never runs on mocks).
 
 ### What memory remembers
 
@@ -116,7 +117,11 @@ from **Project memory** on smaller screens.
 
 ## Try the solo-film example
 
-With the default offline providers:
+The Forge server runs **live AI providers only** — there are no mocks in the
+app. JEV must point at TypeSafe and the planner at a real generation model; the
+server refuses to boot without them (see [Real providers](#real-providers)).
+Provider selection is credential-driven: a provider that is not fully configured
+throws instead of silently switching to a fake one.
 
 1. Start: `I want to make a horror film. Only me, no other actors or crew.`
 2. Inspect the binding solo-production rule and the separate AI suggestion.
@@ -128,11 +133,6 @@ With the default offline providers:
 6. Inspect the new rule and the retired original, then reopen the conversation.
 7. Use **Replay recorded turn** to watch the evaluated sequence.
 
-**Important:** offline mode is a deliberately limited deterministic demo. The
-solo-film response and extraction heuristics are examples, not unrestricted AI.
-Both the provider badges and panel label this. Open-ended semantic extraction,
-contextual generation, and rule checking require real generation and JEV providers.
-
 ## Running
 
 Client development/tests: Node 22.12+ on 22.x, Node 24.x, or Node 26+.
@@ -142,15 +142,17 @@ The standalone server declares Node ≥18 support.
 # Separate terminals, from repository root
 cd forge/server
 npm install
-npm run dev                 # API :4321; exported environment variables
+npm run dev                 # API :4321; loads forge/server/.env, real providers only
 
 cd forge/client
 npm install
 npm run dev                 # UI :5174; same-origin /api proxy
 ```
 
-No keys are needed for the demo. Vite binds to `0.0.0.0` and accepts preview hosts.
-`VITE_API_PROXY` changes its server-side API target; browser requests stay relative.
+`server/.env` (copy from `server/.env.example`) supplies the credentials;
+`config.js` loads it automatically on import. Vite binds to `0.0.0.0` and accepts
+preview hosts. `VITE_API_PROXY` changes its server-side API target; browser
+requests stay relative.
 
 ### Real providers
 
@@ -165,13 +167,12 @@ Configure the server environment using `server/.env.example`:
 
 Despite its legacy name, `PLANNER_PROVIDER` selects the same generation model for
 memory proposal, response generation, and repair. JEV remains a separate decision
-model. Each provider can be configured independently; mixed/demo modes are labeled.
-Missing credentials fall back to mock per `config.js`; check the displayed badges.
+model. Each provider can be configured independently. The provider badges always
+show the real configured provider — the app never silently runs on a mock.
 
-`.env` is **not automatically loaded by `npm run dev`**. On Node 22+, after creating
-it locally, use `node --env-file=.env --watch src/index.js` from `forge/server`, or
-export variables through your normal deployment secret configuration. Do not
-commit credentials.
+`.env` is loaded by `config.js` on import (real environment variables win). On
+Node 22+, you can alternatively use `node --env-file=.env --watch src/index.js`
+from `forge/server`. Do not commit credentials.
 
 ### Storage and deployment
 
@@ -228,8 +229,9 @@ Existing conversations with `projectState` keep their structured execution loop.
 Its state transition and tool cards are treated as a draft: they only commit if
 memory checks pass. On repair, unapproved plan changes are discarded. Legacy
 message endpoints also use the memory guard once a conversation has memory.
-The existing mock-build smoke suite still tests feasibility, step reports, retries,
-safety paths, final acceptance, and the SigV4 signer.
+The existing offline smoke suite (test fixtures, dev-only) still tests
+feasibility, step reports, retries, safety paths, final acceptance, and the
+SigV4 signer.
 
 This change does not add external tool execution, photo evidence, simulation
 integration, accounts, or guaranteed factual/physical verification.
@@ -240,7 +242,6 @@ integration, accounts, or guaranteed factual/physical verification.
 - `server/src/providers/jsonModel.js`: shared configured LLM/Bedrock generator.
 - `server/src/memory/decisions.js`: typed JEV questions and conservative application.
 - `server/src/memory/turn.js`: propose → review → contextualize → draft → check/repair.
-- `server/src/memory/demo.js`: explicitly limited offline examples.
 - `server/src/schema.js`, `store.js`: persistence and backward compatibility.
 - `client/src/components/MemoryPanel.tsx`: live stages, note provenance, checks, replay.
 - `client/src/api.ts`: incremental NDJSON parser and final-result handling.
@@ -249,7 +250,7 @@ integration, accounts, or guaranteed factual/physical verification.
 
 ```bash
 npm --prefix forge/server test       # memory, API, persistence, provider contracts
-npm --prefix forge/server run smoke # original mock-build loop (11 checks)
+npm --prefix forge/server run smoke # original build loop (11 checks, offline fixtures)
 npm --prefix forge/server run raw-reviews # one raw memory-review + one raw output-review response
 npm --prefix forge/client test       # workspace, memory UI, streaming parser
 npm --prefix forge/client run build # TypeScript + production bundle
