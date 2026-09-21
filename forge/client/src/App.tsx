@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
-import type { Conversation, Health } from './types';
+import { MemoryPanel } from './components/MemoryPanel';
+import type { MemoryEvent, Conversation, Health } from './types';
 import { ProviderStrip } from './components/ProviderStrip';
 import { ChatView } from './components/ChatView';
 import { ConversationList } from './components/ConversationList';
@@ -12,108 +13,193 @@ export default function App() {
   const [offline, setOffline] = useState(false);
   const [initialGoal, setInitialGoal] = useState('');
 
-  const refresh = useCallback(async () => {
-    try {
-      const list = await api.list();
-      setConversations(list);
-      setOffline(false);
-      // Update current if it exists
-      if (current) {
-        const updated = list.find(c => c.id === current.id);
-        if (updated) setCurrent(updated);
-      }
-    } catch {
-      setOffline(true);
-    }
-  }, [current?.id]);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [creationEvents, setCreationEvents] = useState<MemoryEvent[]>([]);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const activeId = useRef<string | null>(null);
+  const navigation = useRef(0);
+  const refreshVersion = useRef(0);
+  const createInFlight = useRef(false);
+  const deletedIds = useRef(new Set<string>());
 
-  useEffect(() => {
-    api.health().then(setHealth).catch(() => setOffline(true));
-    refresh();
+  // A history refresh must never replace an open conversation with an older snapshot.
+  const refresh = useCallback(async () => {
+    const version = ++refreshVersion.current;
+    setLoading(true);
+    try {
+      const [list, status] = await Promise.all([api.list(), api.health()]);
+      if (version !== refreshVersion.current) return;
+      setConversations(list);
+      setHealth(status);
+      setOffline(false);
+    } catch {
+      if (version === refreshVersion.current) setOffline(true);
+    } finally {
+      if (version === refreshVersion.current) setLoading(false);
+    }
   }, []);
 
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSidebarOpen(false);
+    };
+    window.addEventListener('keydown', dismiss);
+    return () => window.removeEventListener('keydown', dismiss);
+  }, [sidebarOpen]);
+
+  const updateConversation = (conversation: Conversation) => {
+    if (deletedIds.current.has(conversation.id)) return;
+    ++refreshVersion.current;
+    setLoading(false);
+    setConversations(list => [conversation, ...list.filter(c => c.id !== conversation.id)]);
+    if (activeId.current === conversation.id) {
+      // A send may finish while this same build is being reopened. Its result is
+      // newer than the pending GET snapshot, so invalidate that navigation too.
+      ++navigation.current;
+      setLoadingId(null);
+      setCurrent(conversation);
+    }
+  };
+
+  const newChat = () => {
+    ++navigation.current;
+    activeId.current = null;
+    setCurrent(null);
+    setLoadingId(null);
+    setInitialGoal('');
+    setError('');
+    setSidebarOpen(false);
+  };
+
   const handleNewChat = async (goal: string) => {
-    if (!goal.trim()) return;
+    if (!goal.trim() || createInFlight.current) return;
+    createInFlight.current = true;
+    setCreating(true);
+    setCreationEvents([]);
+    setError('');
+    const version = ++navigation.current;
     try {
-      const r = await api.create(goal.trim());
-      setCurrent(r.conversation);
-      refresh();
+      const r = await api.create(goal.trim(), undefined, event => {
+        if (version === navigation.current) setCreationEvents(list => [...list, event]);
+      });
+      if (version === navigation.current) {
+        activeId.current = r.conversation.id;
+        setCurrent(r.conversation);
+        setInitialGoal('');
+      }
+      updateConversation(r.conversation);
     } catch (e) {
-      console.error(e);
-      alert(String((e as Error).message));
+      if (version === navigation.current) setError((e as Error).message);
+    } finally {
+      createInFlight.current = false;
+      setCreating(false);
     }
   };
 
   const handleSelect = async (id: string) => {
+    const version = ++navigation.current;
+    activeId.current = id;
+    setCurrent(null);
+    setLoadingId(id);
+    setError('');
+    setSidebarOpen(false);
     try {
       const conv = await api.get(id);
-      setCurrent(conv);
+      if (version === navigation.current) setCurrent(conv);
     } catch (e) {
-      console.error(e);
+      if (version === navigation.current) {
+        activeId.current = null;
+        setError((e as Error).message);
+      }
+    } finally {
+      if (version === navigation.current) setLoadingId(null);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this conversation?')) return;
-    await api.remove(id);
-    if (current?.id === id) setCurrent(null);
-    refresh();
+    if (!confirm('Delete this conversation? This cannot be undone.')) return;
+    try {
+      await api.remove(id);
+      deletedIds.current.add(id);
+      ++refreshVersion.current;
+      setLoading(false);
+      setConversations(list => list.filter(c => c.id !== id));
+      if (activeId.current === id) newChat();
+    } catch (e) {
+      setError(`Could not delete conversation: ${(e as Error).message}`);
+    }
   };
 
   return (
     <div className="fg-shell">
       <header className="fg-header">
         <div className="fg-header-inner">
-          <button className="fg-logo" onClick={() => { setCurrent(null); setInitialGoal(''); refresh(); }}>
-            Velxio <span>Forge</span> <em className="fg-logo-sub">chat · human as tool</em>
+          <button className="fg-logo" onClick={newChat}>
+            Velxio <span>Forge</span>
+            {(health?.providers.jev === 'mock' || health?.providers.planner === 'mock') && <small className="fg-mobile-demo" title="Demo: simulated decision or planning provider">Demo</small>}
+            <em className="fg-logo-sub">your build workspace</em>
           </button>
-          <ProviderStrip health={health} offline={offline} />
+          <div className="fg-header-actions">
+            <button className="fg-btn fg-btn-secondary fg-history-toggle" aria-expanded={sidebarOpen} aria-controls="build-history" onClick={() => setSidebarOpen(v => !v)}>Build history</button>
+            <ProviderStrip health={health} offline={offline} />
+          </div>
         </div>
       </header>
 
       <main className="fg-main-chat">
         {offline && (
           <div className="fg-banner fg-banner-warn" style={{ margin: 16 }}>
-            Server unreachable — start API (<code>cd forge/server && npm install && npm run dev</code>)
+            Could not connect to Forge. Check the API server and try again.
+            <button className="fg-btn fg-btn-secondary" onClick={refresh} disabled={loading}>{loading ? 'Connecting…' : 'Reconnect'}</button>
           </div>
         )}
 
+        {error && <div className="fg-banner fg-banner-error fg-app-error" role="alert">{error}<button className="fg-back" aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
         <div className="fg-chat-layout">
-          <aside className="fg-chat-sidebar">
+          <aside id="build-history" className={`fg-chat-sidebar${sidebarOpen ? ' fg-mobile-open' : ''}`} aria-label="Build history">
             <div className="fg-sidebar-head">
-              <button className="fg-btn fg-btn-primary fg-btn-block" onClick={() => { setCurrent(null); setInitialGoal(''); }}>
+              <button className="fg-btn fg-btn-primary fg-btn-block" onClick={newChat}>
                 + New build chat
               </button>
               <div className="fg-sidebar-hint">
-                JEV in between every turn. Human is a tool the agent calls.
+                Your ideas, plans, and progress. All in one place.
               </div>
             </div>
-            <ConversationList conversations={conversations} currentId={current?.id || null} onSelect={handleSelect} onDelete={handleDelete} />
+            <ConversationList loading={loading} conversations={conversations} currentId={loadingId || current?.id || null} onSelect={handleSelect} onDelete={handleDelete} />
             <div className="fg-sidebar-foot">
               <div className="fg-jargon">
-                <div><strong>Flow:</strong> you → JEV intent → feasibility → planner → human tool</div>
-                <div className="fg-muted">Try: “I wanna build an MP3 player”</div>
+                <div><strong>From idea to working build.</strong></div>
+                <div className="fg-muted">Plan it. Build it. Check each step.</div>
               </div>
             </div>
           </aside>
 
           <section className="fg-chat-main">
-            {current ? (
-              <ChatView conversation={current} onUpdate={(c) => { setCurrent(c); refresh(); }} onBack={() => setCurrent(null)} />
+            {loadingId ? (
+              <div className="fg-empty" role="status">Opening your build…</div>
+            ) : current ? (
+              <ChatView key={current.id} conversation={current} onUpdate={updateConversation} onBack={newChat} />
             ) : (
               <div className="fg-empty">
                 <div className="fg-hero-chat">
-                  <h1>What do you <em>wanna build</em>?</h1>
-                  <p className="fg-sub">Chat interface. Human is a tool. I plan, JEV decides, you execute.</p>
+                  <div className="fg-eyebrow">YOUR IDEA. YOUR RULES. A SHARED MEMORY.</div>
+                  <h1>What will you <em>build next</em>?</h1>
+                  <p className="fg-sub">Tell Forge what you want to create—and what matters. Your rules become project memory. JEV uses them to guide what comes next.</p>
 
                   <div className="fg-example-grid">
                     {[
+                      'I want to make a horror film. Only me, no other actors or crew.',
+                      'Build a study app. It must work offline. No paid tools.',
+                      'Help me organize a community event. My budget is $200.',
                       'I wanna build an MP3 player with ESP32',
-                      'Build me an LED desk lamp that runs on 5V',
-                      'I wanna build an iron man helmet with LED matrix',
-                      'Build a line-following robot',
                     ].map(ex => (
-                      <button key={ex} className="fg-example-card" onClick={() => setInitialGoal(ex)}>
+                      <button key={ex} className="fg-example-card" disabled={creating} onClick={() => setInitialGoal(ex)}>
                         <span className="fg-example-icon">⚒</span>
                         <span>{ex}</span>
                       </button>
@@ -123,33 +209,39 @@ export default function App() {
                   <div className="fg-composer fg-composer-hero">
                     <textarea
                       className="fg-input fg-textarea"
-                      rows={2}
-                      placeholder='e.g. "I wanna build an MP3 player" — I will run JEV feasibility, then give implementation plan'
+                      rows={3}
+                      aria-label="Describe your build"
+                      disabled={creating}
+                      placeholder="Describe your idea. Include parts you have, your budget, or what you want to learn…"
                       value={initialGoal}
                       onChange={e => setInitialGoal(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { handleNewChat(initialGoal); } }}
+                      onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void handleNewChat(initialGoal); } }}
                     />
-                    <button className="fg-btn fg-btn-primary" disabled={!initialGoal.trim()} onClick={() => handleNewChat(initialGoal)}>
-                      Plan it →
+                    <button className="fg-btn fg-btn-primary" disabled={creating || !initialGoal.trim()} onClick={() => handleNewChat(initialGoal)}>
+                      {creating ? 'Starting your project…' : 'Start project →'}
                     </button>
                   </div>
+
+                  <p className="fg-hero-note" role="status">{creating ? 'Forming project notes, evaluating them with JEV, and checking the response.' : 'Start with an example, or make it your own. Ctrl / ⌘ + Enter to plan.'}</p>
+
+                  {creating && <div className="fg-memory-intake"><MemoryPanel events={creationEvents} busy /></div>}
 
                   <div className="fg-how">
                     <div className="fg-hip">
                       <div className="fg-hip-card">
-                        <div className="fg-hip-num">01 · JEV</div>
-                        <div className="fg-hip-title">Intent & Feasibility</div>
-                        <div className="fg-hip-desc">Every message goes through JEV: chat intent (build_request?), goal clarity, feasibility gate (category, risk, complexity). Low confidence → clarify.</div>
+                        <div className="fg-hip-num">01 · UNDERSTAND</div>
+                        <div className="fg-hip-title">Memory that forms</div>
+                        <div className="fg-hip-desc">The LLM extracts goals, rules, facts, and possibilities from your words. No fixed domain or project form.</div>
                       </div>
                       <div className="fg-hip-card">
-                        <div className="fg-hip-num">02 · PLANNER</div>
-                        <div className="fg-hip-title">Implementation Plan</div>
-                        <div className="fg-hip-desc">If feasible, planner synthesizes phases → steps → BOM → acceptance. Plan is rendered in chat with cost & safety.</div>
+                        <div className="fg-hip-num">02 · DECIDE</div>
+                        <div className="fg-hip-title">JEV at the gate</div>
+                        <div className="fg-hip-desc">JEV evaluates which notes are grounded, what conflicts, and whether you authorized a change.</div>
                       </div>
                       <div className="fg-hip-card">
-                        <div className="fg-hip-num">03 · HUMAN TOOL</div>
-                        <div className="fg-hip-title">Human as a Tool</div>
-                        <div className="fg-hip-desc">Agent calls <code>human</code> tool for each physical step. You execute, report back, JEV verifies, we advance. Like an agent loop where human is the actuator.</div>
+                        <div className="fg-hip-num">03 · CONTINUE</div>
+                        <div className="fg-hip-title">Generation with memory</div>
+                        <div className="fg-hip-desc">The same LLM uses that memory. JEV checks the draft, sending conflicts back for revision before you see it.</div>
                       </div>
                     </div>
                   </div>

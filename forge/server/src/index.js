@@ -39,7 +39,8 @@ if (fs.existsSync(distDir)) {
 
 app.use((err, req, res, next) => {
   console.error('[forge] error:', err.message);
-  res.status(500).json({ error: err.message });
+  if (res.headersSent) return next(err);
+  res.status(err.status || 500).json({ error: err.message });
 });
 
 app.listen(cfg.port, () => {

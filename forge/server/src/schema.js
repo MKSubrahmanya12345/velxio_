@@ -1,3 +1,4 @@
+import { normalizeMemory } from './memory/model.js';
 // Forge — data model & constants. Plain ESM, zero dependencies.
 // Now chat-first: Conversation is primary, ProjectState is embedded when planning happens.
 // Human is a tool the agent can call.
@@ -91,6 +92,7 @@ export function makeConversation(input = {}) {
     updatedAt: input.updatedAt || createdAt,
     title: input.title || (input.goal ? String(input.goal).slice(0, 60) : 'New build chat'),
     messages: Array.isArray(input.messages) ? input.messages : [],
+    memory: normalizeMemory(input.memory),
     // ProjectState when a build has been planned
     projectState: input.projectState || input.state || null,
     // Human tool pending calls
@@ -126,6 +128,7 @@ export function normalizeConversation(raw, fallbackId = '') {
       messages: raw.messages,
       projectState: raw.projectState || raw.state || null,
       pendingHumanTools: raw.pendingHumanTools,
+      memory: raw.memory,
       counters: raw.counters,
     });
   }

@@ -1,3 +1,4 @@
+import { demoMemoryAnswers } from '../memory/demo.js';
 // Forge — deterministic offline Jev (mock provider) — chat-first version.
 // Returns exact real API shape.
 
@@ -307,6 +308,7 @@ function mockAnswer(id, q, ctx, msg) {
 export function createJevMock() {
   return async function jevMock({ state, questions }) {
     const ctx = typeof state === 'string' ? JSON.parse(state || '{}') : state || {};
+    if (['memory_review', 'output_review'].includes(ctx.operation)) return demoMemoryAnswers(ctx, questions);
     const msg = String(ctx.message || ctx.goal || '');
     const answers = {};
     for (const [id, q] of Object.entries(questions || {})) {

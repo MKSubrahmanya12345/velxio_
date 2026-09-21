@@ -1,6 +1,6 @@
 // Forge — API layer (chat-first)
 
-import type { Conversation, Health, MessageResult, CreateResult } from './types';
+import type { Conversation, Health, MessageResult, CreateResult, Project, ProjectState, MemoryEvent } from './types';
 
 const BASE = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL ?? '/api';
 
@@ -41,6 +41,7 @@ function normalizeConversation(payload: unknown): Conversation {
       title: String(v.title || 'New build chat'),
       messages: Array.isArray(v.messages) ? v.messages : [],
       projectState: v.projectState || v.state || null,
+      memory: v.memory || { version: 1, revision: 0, notes: [], events: [] },
       pendingHumanTools: Array.isArray(v.pendingHumanTools) ? v.pendingHumanTools : [],
       counters: v.counters || { messages: 0, jevCalls: 0, humanCalls: 0, plans: 0 },
     };
@@ -48,25 +49,67 @@ function normalizeConversation(payload: unknown): Conversation {
   throw new Error('API returned invalid conversation');
 }
 
+export async function streamTurn<T>(path: string, body: unknown, onProgress: (event: MemoryEvent) => void): Promise<T> {
+  const response = await fetch(BASE + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' }, body: JSON.stringify(body) });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(detail.error || `API ${response.status}`);
+  }
+  if (!response.headers.get('content-type')?.includes('application/x-ndjson')) return response.json() as Promise<T>;
+  if (!response.body) throw new Error('No response stream. Reopen this project to check whether the turn was saved.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: T | undefined;
+  const consume = (line: string) => {
+    if (!line.trim()) return;
+    const data = JSON.parse(line);
+    if (data.type === 'progress') onProgress(data.event);
+    if (data.type === 'result') result = data.result;
+    if (data.type === 'error') throw new Error(data.error);
+  };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let end;
+      while ((end = buffer.indexOf('\n')) !== -1) {
+        consume(buffer.slice(0, end));
+        buffer = buffer.slice(end + 1);
+      }
+      if (done) { consume(buffer); break; }
+    }
+  } finally { reader.releaseLock(); }
+  if (!result) throw new Error('Connection ended before confirmation. Reopen the project to check whether the turn was saved.');
+  return result;
+}
+
 export const api = {
   health: () => http<Health>('/health'),
   list: async () => (await http<unknown[]>('/chat')).map(normalizeConversation),
   get: async (id: string) => normalizeConversation(await http<unknown>(`/chat/${id}`)),
-  create: async (goal: string) => {
-    const result = await http<CreateResult>('/chat', {
+  create: async (goal: string, constraints?: Partial<ProjectState['constraints']>, onProgress?: (event: MemoryEvent) => void) => {
+    const result = onProgress ? await streamTurn<CreateResult>('/chat', { goal, constraints }, onProgress) : await http<CreateResult>('/chat', {
       method: 'POST',
-      body: JSON.stringify({ goal }),
+      body: JSON.stringify({ goal, constraints }),
     });
     return { ...result, conversation: normalizeConversation(result.conversation) };
   },
-  message: async (id: string, body: { text?: string; chip?: string }) => {
-    const result = await http<MessageResult>(`/chat/${id}/messages`, {
+  message: async (id: string, body: { text?: string; chip?: string }, onProgress?: (event: MemoryEvent) => void) => {
+    const result = onProgress ? await streamTurn<MessageResult>(`/chat/${id}/messages`, body, onProgress) : await http<MessageResult>(`/chat/${id}/messages`, {
       method: 'POST',
       body: JSON.stringify(body),
     });
     return { ...result, conversation: normalizeConversation(result.conversation) };
   },
   remove: (id: string) => http<{ ok: boolean }>(`/chat/${id}`, { method: 'DELETE' }),
+
+  createProject: (goal: string, constraints?: Partial<ProjectState['constraints']>) => http<CreateResult>('/projects', { method: 'POST', body: JSON.stringify({ goal, constraints }) }),
+
+  addInventory: (id: string, items: { name: string; note?: string }[]) => http<Project>(`/projects/${id}/inventory`, {
+    method: 'POST',
+    body: JSON.stringify({ items }),
+  }),
 
   // legacy aliases
   listProjects: async () => (await http<unknown[]>('/projects')).map(normalizeConversation),

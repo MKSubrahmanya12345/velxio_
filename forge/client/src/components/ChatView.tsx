@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import Markdown from 'react-markdown';
+import { progressOf } from '../state';
 import { api } from '../api';
-import type { Conversation, ChatMessage, HumanToolCall } from '../types';
+import { MemoryPanel } from './MemoryPanel';
+import type { MemoryEvent, MemoryNote, Conversation, ChatMessage, HumanToolCall } from '../types';
 
 function MessageBubble({ msg }: { msg: ChatMessage }) {
   const isUser = msg.role === 'user';
@@ -12,8 +15,9 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
         <span className="fg-msg-time">{new Date(msg.at).toLocaleTimeString()}</span>
       </div>
       <div className="fg-msg-content">
-        {/* Render markdown-ish: keep pre-wrap, but bold headers */}
-        <div className="fg-md" style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+        <div className={`fg-md${isUser ? ' fg-md-plain' : ''}`}>
+          {isUser ? msg.content : <Markdown skipHtml>{msg.content}</Markdown>}
+        </div>
       </div>
       {msg.decisions && msg.decisions.length > 0 && (
         <div className="fg-msg-decisions">
@@ -42,8 +46,8 @@ function HumanToolCard({ tool }: { tool: HumanToolCall }) {
     <div className={tool.status === 'requires_action' ? 'fg-human-card fg-human-pending' : 'fg-human-card fg-human-done'}>
       <div className="fg-human-head">
         <span className="fg-human-icon">🔧</span>
-        <span className="fg-human-title">human tool · {a.task}</span>
-        <span className={`fg-human-status fg-human-${tool.status}`}>{tool.status}</span>
+        <span className="fg-human-title">{a.task}</span>
+        <span className={`fg-human-status fg-human-${tool.status}`}>{{ requires_action: 'Your next step', completed: 'Completed', failed: 'Needs attention' }[tool.status]}</span>
       </div>
       <div className="fg-human-body">
         <div className="fg-human-section">
@@ -104,45 +108,76 @@ export function ChatView({
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [events, setEvents] = useState<MemoryEvent[]>([]);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const sending = useRef(false);
+  const nearBottom = useRef(true);
+  const progress = progressOf(conversation.projectState);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [conversation.messages.length]);
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (nearBottom.current || busy) endRef.current?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'end' });
+  }, [conversation.messages.length, busy]);
 
   const send = async (text: string) => {
-    if (!text.trim() || busy) return;
+    if (!text.trim() || sending.current) return;
+    sending.current = true;
     setBusy(true);
     setError('');
-    setInput('');
+    setEvents([]);
     try {
-      const r = await api.message(conversation.id, { text: text.trim() });
+      const r = await api.message(conversation.id, { text: text.trim() }, event => setEvents(list => [...list, event]));
+      setInput('');
       onUpdate(r.conversation);
+      setEvents([]);
     } catch (e) {
       setError(String((e as Error).message));
     } finally {
+      sending.current = false;
       setBusy(false);
     }
+  };
+
+  // Quick actions prepare a report; only the user can supply evidence of completion.
+  const prepareReport = (prefix: string) => {
+    setInput(value => value.trim() ? value : prefix);
+    inputRef.current?.focus();
+  };
+
+  const changeNote = (note: MemoryNote) => {
+    if (input.trim() && !window.confirm('Replace your current draft with a note-change request?')) return;
+    const target = note.status === 'pending' && note.supersedes.length ? note.supersedes[0] : note.id;
+    setInput(`Replace note ${target}: `);
+    setMemoryOpen(false);
+    inputRef.current?.focus();
   };
 
   const pendingTool = conversation.pendingHumanTools?.find(t => t.status === 'requires_action');
 
   return (
+    <div className="fg-chat-workspace">
     <div className="fg-chat">
       <div className="fg-chat-head">
-        <button className="fg-back" onClick={onBack}>← all chats</button>
+        <button className="fg-back" onClick={onBack}>← new build</button>
         <div className="fg-chat-title">
           <strong>{conversation.title}</strong>
-          <span className="fg-muted">{conversation.counters?.jevCalls || 0} JEV calls · {conversation.counters?.humanCalls || 0} human calls · {conversation.projectState ? `${conversation.projectState.phases.length} phases` : 'no plan yet'}</span>
+          <span className="fg-muted">{conversation.counters?.jevCalls || 0} JEV calls · {conversation.counters?.humanCalls || 0} human calls · {conversation.projectState ? `${conversation.projectState.phases.length} phases` : `${conversation.memory?.notes.filter(n => n.status === 'active').length || 0} active notes`}</span>
         </div>
+        <button className="fg-btn fg-btn-secondary fg-memory-toggle" aria-expanded={memoryOpen} onClick={() => setMemoryOpen(v => !v)}>Project memory</button>
         {conversation.projectState && (
           <div className="fg-chat-progress">
-            <span>{conversation.projectState.counters?.stepsCompleted || 0}/{conversation.projectState.phases?.flatMap(p => p.steps).length || 0} steps</span>
+            <span>{progress.completed}/{progress.total} steps · {Math.round(progress.pct * 100)}%</span>
+            <progress aria-label="Build progress" value={progress.completed} max={progress.total || 1} />
           </div>
         )}
       </div>
 
-      <div className="fg-chat-messages">
+      <div className="fg-chat-messages" onScroll={e => {
+        const el = e.currentTarget;
+        nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+      }}>
         {conversation.messages.length === 0 && (
           <div className="fg-msg fg-msg-system">
             <div className="fg-msg-content">
@@ -154,43 +189,45 @@ export function ChatView({
         {conversation.messages.map(m => (
           <MessageBubble key={m.id} msg={m} />
         ))}
+        {busy && <div className="fg-working" role="status" aria-label="Message processing"><span className="fg-working-dot" />Forge is reviewing your message…</div>}
         <div ref={endRef} />
       </div>
 
       {pendingTool && (
         <div className="fg-pending-banner">
-          🔧 Human tool pending: <strong>{pendingTool.arguments.task}</strong> — execute and report back below. JEV will verify.
+          🔧 Up next: <strong>{pendingTool.arguments.task}</strong> — follow the checks above, then share your observations.
         </div>
       )}
 
       <div className="fg-composer-area">
         <div className="fg-composer">
           <textarea
+            ref={inputRef}
+            aria-label="Message Forge"
+            aria-describedby="composer-hint"
             className="fg-input fg-textarea fg-textarea-chat"
             rows={2}
-            placeholder={pendingTool ? `Report back on "${pendingTool.arguments.task}" — e.g. "done, ${pendingTool.arguments.definition_of_done[0]}" or "it failed, ..." ` : 'Say what you wanna build, or report back on human tool task...'}
+            placeholder={pendingTool ? 'What did you observe? Include checks, measurements, or anything that went wrong…' : 'Ask a question or describe what you want to build…'}
             value={input}
             disabled={busy}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send(input);
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(input); }
             }}
           />
           <div className="fg-composer-actions">
-            <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => send('I have a question about the current step')}>? Question</button>
-            <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => send('done, it looks good and meets definition of done')}>✅ Done</button>
-            <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => send('it failed, not working as expected')}>✗ Failed</button>
-            <button className="fg-btn fg-btn-primary" disabled={busy || !input.trim()} onClick={() => send(input)}>{busy ? '…' : 'Send'}</button>
+            <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => prepareReport('My question is: ')}>Ask a question</button>
+            {pendingTool && <>
+              <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => prepareReport('I completed the step. Here is what I checked: ')}>Report progress</button>
+              <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => prepareReport('The step failed. Here is what happened: ')}>Report a problem</button>
+            </>}
+            <button className="fg-btn fg-btn-primary" disabled={busy || !input.trim()} onClick={() => send(input)}>{busy ? 'Reviewing…' : 'Send →'}</button>
           </div>
         </div>
-        <div className="fg-composer-hints">
-          <span><kbd>⌘+Enter</kbd> to send</span>
-          <span>·</span>
-          <span>JEV decides intent, feasibility, verification in between</span>
-          <span>·</span>
-          <span>Human as tool: I call, you execute</span>
+        <div className="fg-composer-hints" id="composer-hint">
+          <span><kbd>Ctrl / ⌘ + Enter</kbd> to send · Include real observations so Forge can check your progress.</span>
         </div>
-        {error && <div className="fg-banner fg-banner-error" style={{ marginTop: 8 }}>{error}</div>}
+        {error && <div className="fg-banner fg-banner-error" role="alert" style={{ marginTop: 8 }}>{error} Your draft is still here. If the connection dropped, reopen this build to check whether the message arrived before sending again.</div>}
       </div>
 
       {conversation.projectState && (
@@ -212,6 +249,11 @@ export function ChatView({
           </div>
         </details>
       )}
+    </div>
+    <div className={`fg-memory-wrap${memoryOpen ? ' is-open' : ''}`}>
+      <button className="fg-memory-close fg-btn fg-btn-secondary" onClick={() => setMemoryOpen(false)}>Close memory ×</button>
+      <MemoryPanel memory={conversation.memory} events={events} busy={busy} error={error} onChange={changeNote} />
+    </div>
     </div>
   );
 }

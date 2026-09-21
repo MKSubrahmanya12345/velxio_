@@ -107,6 +107,7 @@ export interface ProjectState {
 }
 
 export interface Conversation {
+  memory?: ProjectMemory;
   id: string;
   createdAt: string;
   updatedAt: string;
@@ -153,4 +154,49 @@ export interface Health {
   time: string;
   providers: { jev: string; planner: string; store: string };
   mode?: string;
+}
+
+export type NoteKind = 'goal' | 'rule' | 'fact' | 'preference' | 'assumption' | 'suggestion' | 'question';
+export interface MemoryNote {
+  id: string;
+  kind: NoteKind;
+  text: string;
+  quote: string;
+  origin: 'user' | 'ai';
+  status: 'active' | 'pending' | 'proposed' | 'rejected' | 'superseded' | 'candidate';
+  reason: string;
+  supersedes: string[];
+  supersededBy?: string;
+  sourceMessageId: string;
+  createdAt: string;
+  review?: { classification: string | null; support: number | null; compatible: number | null; authorized: number | null };
+}
+export interface RuleCheck {
+  noteId: string;
+  text: string;
+  kind: NoteKind;
+  value: number | null;
+  verdict: 'pass' | 'conflict' | 'uncertain';
+}
+export interface MemoryEvent {
+  id: string;
+  turnId: string;
+  stage: 'extract' | 'review' | 'context' | 'generate' | 'check' | 'repair' | 'ready';
+  status: 'running' | 'complete' | 'blocked';
+  label: string;
+  at: string;
+  providers: { generator: string; jev: string };
+  proposals?: Pick<MemoryNote, 'id' | 'kind' | 'text' | 'quote' | 'supersedes'>[];
+  notes?: MemoryNote[];
+  noteIds?: string[];
+  checks?: RuleCheck[];
+  passed?: boolean;
+  disposition?: string | null;
+  attempt?: number;
+}
+export interface ProjectMemory {
+  version: number;
+  revision: number;
+  notes: MemoryNote[];
+  events: MemoryEvent[];
 }
