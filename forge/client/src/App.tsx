@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { MemoryPanel } from './components/MemoryPanel';
-import type { MemoryEvent, Conversation, Health } from './types';
+import type { MemoryEvent, Conversation, Health, GeneratorInfo } from './types';
 import { ProviderStrip } from './components/ProviderStrip';
 import { ChatView } from './components/ChatView';
 import { ConversationList } from './components/ConversationList';
 
+const PROVIDER_KEY = 'forge.generator';
+
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
+  const [providers, setProviders] = useState<GeneratorInfo[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<string>(() => {
+    try { return localStorage.getItem(PROVIDER_KEY) || ''; } catch { return ''; }
+  });
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [current, setCurrent] = useState<Conversation | null>(null);
   const [offline, setOffline] = useState(false);
@@ -30,10 +36,12 @@ export default function App() {
     const version = ++refreshVersion.current;
     setLoading(true);
     try {
-      const [list, status] = await Promise.all([api.list(), api.health()]);
+      const [list, status, info] = await Promise.all([api.list(), api.health(), api.providers().catch(() => null)]);
       if (version !== refreshVersion.current) return;
       setConversations(list);
       setHealth(status);
+      setProviders(info?.providers || []);
+      setSelectedProvider(cur => cur || info?.default || '');
       setOffline(false);
     } catch {
       if (version === refreshVersion.current) setOffline(true);
@@ -77,6 +85,11 @@ export default function App() {
     setSidebarOpen(false);
   };
 
+  const handleProviderChange = (id: string) => {
+    setSelectedProvider(id);
+    try { localStorage.setItem(PROVIDER_KEY, id); } catch { /* private mode */ }
+  };
+
   const handleNewChat = async (goal: string) => {
     if (!goal.trim() || createInFlight.current) return;
     createInFlight.current = true;
@@ -87,7 +100,7 @@ export default function App() {
     try {
       const r = await api.create(goal.trim(), undefined, event => {
         if (version === navigation.current) setCreationEvents(list => [...list, event]);
-      });
+      }, selectedProvider || undefined);
       if (version === navigation.current) {
         activeId.current = r.conversation.id;
         setCurrent(r.conversation);
@@ -147,7 +160,7 @@ export default function App() {
           </button>
           <div className="fg-header-actions">
             <button className="fg-btn fg-btn-secondary fg-history-toggle" aria-expanded={sidebarOpen} aria-controls="build-history" onClick={() => setSidebarOpen(v => !v)}>Build history</button>
-            <ProviderStrip health={health} offline={offline} />
+            <ProviderStrip health={health} offline={offline} providers={providers} selected={selectedProvider} onChange={handleProviderChange} />
           </div>
         </div>
       </header>
@@ -184,7 +197,7 @@ export default function App() {
             {loadingId ? (
               <div className="fg-empty" role="status">Opening your build…</div>
             ) : current ? (
-              <ChatView key={current.id} conversation={current} onUpdate={updateConversation} onBack={newChat} />
+              <ChatView key={current.id} conversation={current} onUpdate={updateConversation} onBack={newChat} provider={selectedProvider} />
             ) : (
               <div className="fg-empty">
                 <div className="fg-hero-chat">

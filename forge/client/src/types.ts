@@ -156,6 +156,18 @@ export interface Health {
   mode?: string;
 }
 
+export interface GeneratorInfo {
+  id: string;
+  name: string;
+  model: string;
+  type: string;
+}
+
+export interface ProvidersInfo {
+  default: string;
+  providers: GeneratorInfo[];
+}
+
 export type NoteKind = 'goal' | 'rule' | 'fact' | 'preference' | 'assumption' | 'suggestion' | 'question';
 export type NoteDomain = 'production' | 'fiction' | 'creative' | 'meta' | 'unknown';
 export interface MemoryNote {

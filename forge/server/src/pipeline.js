@@ -63,7 +63,7 @@ async function ensureSafetyGate(deps, state, stepRef, decisions) {
 
 // ── Chat synthesis: goal -> feasibility -> plan ───────────────────────────────
 
-export async function synthesizeChatProject(deps, conversation, goalText, constraints = {}) {
+export async function synthesizeChatProject(deps, conversation, goalText, constraints = {}, provider) {
   const decisions = [];
   const goal = String(goalText || '').trim();
   const normConstraints = normalizeConstraints(constraints);
@@ -96,7 +96,9 @@ export async function synthesizeChatProject(deps, conversation, goalText, constr
   }
 
   // Planner
-  const rawPlan = await deps.planner(goal, normConstraints, feasibility);
+  const planner = (provider && deps.plannerFor ? deps.plannerFor(provider) : null) || deps.planner;
+  if (!planner) throw Object.assign(new Error('No generation provider is configured for planning. Set at least one provider key (e.g. OPENCODE_API_KEY, GEMINI_API_KEY, GROQ_API_KEY) in forge/server/.env.'), { status: 400 });
+  const rawPlan = await planner(goal, normConstraints, feasibility);
   const plan = sanitizePlan(rawPlan, goal);
 
   // Build projectState
@@ -192,6 +194,7 @@ I'm treating you as a tool — when I need physical work, I'll call \`human\` wi
 export async function handleChatMessage(deps, conversation, input) {
   const text = String(input?.text || '').trim();
   const chip = input?.chip || null;
+  const provider = input?.provider || null;
   const message = text || (chip ? String(chip) : '');
   const decisions = [];
 
@@ -239,7 +242,7 @@ export async function handleChatMessage(deps, conversation, input) {
       const isNewGoal = message.length > 20 && !conversation.projectState.goal.toLowerCase().includes(message.toLowerCase().slice(0, 15));
       if (isNewGoal) {
         // New plan overrides
-        const result = await synthesizeChatProject(deps, conversation, message, {});
+        const result = await synthesizeChatProject(deps, conversation, message, {}, provider);
         // Merge decisions
         result.decisions = [...decisions, ...result.decisions];
         result.response.decisions = result.decisions;
@@ -247,13 +250,13 @@ export async function handleChatMessage(deps, conversation, input) {
       }
     }
     if (!hasProject) {
-      const result = await synthesizeChatProject(deps, conversation, message, {});
+      const result = await synthesizeChatProject(deps, conversation, message, {}, provider);
       result.decisions = [...decisions, ...result.decisions];
       result.response.decisions = result.decisions;
       return result;
     }
     // Has project but wants new build
-    const result = await synthesizeChatProject(deps, conversation, message, {});
+    const result = await synthesizeChatProject(deps, conversation, message, {}, provider);
     result.decisions = [...decisions, ...result.decisions];
     result.response.decisions = result.decisions;
     return result;

@@ -12,10 +12,10 @@ import { PLANNER_SYSTEM_PROMPT, plannerUserPrompt } from './plannerPrompt.js';
 
 export function createPlanner(cfg) {
   if (cfg.planner.provider === 'bedrock') return createBedrockPlanner(cfg);
-  if (cfg.planner.provider === 'llm' && cfg.planner.apiKey) return llmPlanner(cfg);
+  if (cfg.planner.provider && cfg.planner.apiBase && (cfg.planner.apiKey || cfg.planner.provider === 'ollama')) return llmPlanner(cfg);
   throw new Error(
-    'Planner/generator: no live provider configured. Set PLANNER_PROVIDER=llm with LLM_API_KEY, ' +
-    'or PLANNER_PROVIDER=bedrock with AWS credentials (region + access key + secret). ' +
+    `Planner/generator: provider '${cfg.planner.provider}' is not fully configured at factory time. ` +
+    'Set its API key (or OLLAMA_MODEL for Ollama) in forge/server/.env. ' +
     'Mocks were removed — planning only runs against a real model.'
   );
 }

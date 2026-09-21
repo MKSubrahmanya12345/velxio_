@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
 import { createReasoner } from '../src/memory/reasoner.js';
 import { createJevProvider } from '../src/providers/jev.js';
+import { providerConfig, listProviders } from '../src/providers/registry.js';
 
 // Request-shape tests, not claims that paid providers have been exercised.
 test('one configured LLM handles proposals, generation, and repair with project memory', async t => {
@@ -48,4 +49,28 @@ test('JEV receives serialized state and typed questions, not a prose-generation 
   assert.equal(typeof request.body.state, 'string');
   assert.equal(request.body.questions.respect_0.type, 'noul');
   assert.equal(result.provider, 'typesafe');
+});
+
+test('generator registry: a provider is ready only when its key/model is set', () => {
+  const cfg = loadConfig({ PLANNER_PROVIDER: 'opencode', OPENCODE_API_KEY: 'key', OPENCODE_MODEL: 'servo' });
+  assert.equal(cfg.planner.provider, 'opencode');
+  assert.equal(cfg.planner.model, 'servo');
+  assert.equal(listProviders(cfg).some((p) => p.id === 'llm'), false);
+  assert.equal(listProviders(cfg).find((p) => p.id === 'opencode').model, 'servo');
+
+  const noKey = loadConfig({ PLANNER_PROVIDER: 'opencode' });
+  assert.equal(noKey.planner.provider, '');
+
+  const defaulted = loadConfig({ GROQ_API_KEY: 'gk' });
+  assert.equal(defaulted.planner.provider, 'groq');
+  assert.equal(defaulted.planner.apiBase, 'https://api.groq.com/openai/v1');
+});
+
+test('providerConfig reconfigures the shared json-model path per provider', () => {
+  const cfg = loadConfig({ GROQ_API_KEY: 'gk', GROQ_MODEL: 'x/y' });
+  const sub = providerConfig(cfg, 'groq');
+  assert.equal(sub.planner.provider, 'groq');
+  assert.equal(sub.planner.model, 'x/y');
+  assert.equal(sub.planner.apiBase, 'https://api.groq.com/openai/v1');
+  assert.equal(providerConfig(cfg, 'nope'), null);
 });

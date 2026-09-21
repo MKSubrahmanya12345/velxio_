@@ -1,8 +1,9 @@
 // Forge — environment config + provider selection.
 //
-// Real providers only. There is no mock fallback: a provider that is asked
-// for but not fully configured throws at factory time (the server refuses to
-// boot), so a "mock" run can never be mistaken for a live AI run.
+// Real providers only. There is no mock fallback: a provider that is not
+// fully configured is simply absent from the registry. A turn that asks for a
+// missing provider is rejected with a clear error, so a "mock" run can never
+// be mistaken for a live AI run.
 //
 // forge/server/.env is loaded on import (real environment variables win).
 
@@ -60,22 +61,34 @@ export function loadConfig(env = process.env) {
     endpoint: (env.BEDROCK_ENDPOINT || '').replace(/\/$/, ''),
   };
   const bedrockReady = Boolean(bedrock.region && bedrock.accessKeyId && bedrock.secretAccessKey);
-  const llmReady = Boolean(env.LLM_API_KEY);
 
-  // PLANNER_PROVIDER is a hint: a requested provider that is not fully
-  // configured never falls back — it resolves to nothing and the factory throws.
-  const requestedPlanner = env.PLANNER_PROVIDER || '';
+  // Named OpenAI-compatible generation providers. `ready` is exactly "has the
+  // credentials/Ollama model needed to make a real request" — never mocked.
+  const strip = (v) => (v || '').replace(/\/$/, '');
+  const providers = [
+    { id: 'opencode', name: 'OpenCode Zen', type: 'llm', ready: Boolean(env.OPENCODE_API_KEY), apiKey: env.OPENCODE_API_KEY || '', model: env.OPENCODE_MODEL || 'servo', apiBase: strip(env.OPENCODE_BASE || 'https://opencode.ai/zen/v1') },
+    { id: 'gemini', name: 'Google Gemini', type: 'llm', ready: Boolean(env.GEMINI_API_KEY), apiKey: env.GEMINI_API_KEY || '', model: env.GEMINI_MODEL || 'gemini-2.0-flash', apiBase: strip(env.GEMINI_BASE || 'https://generativelanguage.googleapis.com/v1beta/openai') },
+    { id: 'openrouter', name: 'OpenRouter', type: 'llm', ready: Boolean(env.OPENROUTER_API_KEY), apiKey: env.OPENROUTER_API_KEY || '', model: env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct', apiBase: strip(env.OPENROUTER_BASE || 'https://openrouter.ai/api/v1') },
+    { id: 'ollama', name: 'Ollama (local)', type: 'llm', ready: Boolean(env.OLLAMA_MODEL), apiKey: '', model: env.OLLAMA_MODEL || '', apiBase: strip(env.OLLAMA_BASE || 'http://localhost:11434/v1') },
+    { id: 'groq', name: 'Groq', type: 'llm', ready: Boolean(env.GROQ_API_KEY), apiKey: env.GROQ_API_KEY || '', model: env.GROQ_MODEL || 'llama-3.3-70b-versatile', apiBase: strip(env.GROQ_BASE || 'https://api.groq.com/openai/v1') },
+    { id: 'llm', name: 'OpenAI-compatible', type: 'llm', ready: Boolean(env.LLM_API_KEY), apiKey: env.LLM_API_KEY || '', model: env.LLM_MODEL || 'gpt-4o', apiBase: strip(env.LLM_API_BASE || 'https://api.openai.com/v1') },
+    { id: 'bedrock', name: 'AWS Bedrock', type: 'bedrock', ready: bedrockReady, apiKey: '', model: bedrock.model, apiBase: bedrock.endpoint },
+  ];
+
+  // PLANNER_PROVIDER is a hint. An explicitly requested provider that is not
+  // ready resolves to nothing (''), never a fallback. With no hint, the first
+  // ready provider becomes the default.
+  const requestedPlanner = (env.PLANNER_PROVIDER || '').toLowerCase();
+  const defaultProvider = requestedPlanner
+    ? providers.find((p) => p.id === requestedPlanner && p.ready)
+    : providers.find((p) => p.ready);
+
   const planner = {
-    provider:
-      (requestedPlanner === 'bedrock' || !requestedPlanner) && bedrockReady
-        ? 'bedrock'
-        : (requestedPlanner === 'llm' || !requestedPlanner) && llmReady
-          ? 'llm'
-          : '',
-    apiKey: env.LLM_API_KEY || '',
-    model: env.LLM_MODEL || 'gpt-4o',
-    apiBase: (env.LLM_API_BASE || 'https://api.openai.com/v1').replace(/\/$/, ''),
+    provider: defaultProvider ? defaultProvider.id : '',
+    apiKey: defaultProvider ? defaultProvider.apiKey : '',
+    model: defaultProvider ? defaultProvider.model : (env.LLM_MODEL || 'gpt-4o'),
+    apiBase: defaultProvider ? defaultProvider.apiBase : strip(env.LLM_API_BASE || 'https://api.openai.com/v1'),
   };
 
-  return { port, db, jev, planner, bedrock, corsOrigin: env.CORS_ORIGIN || '' };
+  return { port, db, jev, planner, bedrock, providers, corsOrigin: env.CORS_ORIGIN || '' };
 }

@@ -129,6 +129,13 @@ button { font-family: inherit; }
 .fg-prov-mock { color: var(--color-feedback-warning); border-color: var(--color-feedback-warning-border); background: var(--color-feedback-warning-soft); }
 .fg-prov-live { color: var(--color-feedback-success); border-color: var(--color-feedback-success-soft); background: var(--color-feedback-success-soft); }
 .fg-prov-off { color: var(--color-feedback-error); border-color: var(--color-feedback-error-border); background: var(--color-feedback-error-soft); }
+.fg-prov-select { padding: 2px 6px 2px 10px; display: inline-flex; align-items: center; }
+.fg-prov-select select {
+  background: transparent; border: none; color: var(--color-fg-default);
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.04em;
+  cursor: pointer; padding: 1px 0; outline: none; max-width: 240px;
+}
+.fg-prov-select option { color: var(--color-fg-default); background: var(--color-surface, #161b22); }
 
 /* ── Banners ───────────────────────────────────────────────────────────── */
 .fg-banner { border-radius: var(--radius-md); padding: 10px 14px; font-size: 13px; }

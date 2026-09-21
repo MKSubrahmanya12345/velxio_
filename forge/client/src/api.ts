@@ -1,6 +1,6 @@
 // Forge — API layer (chat-first)
 
-import type { Conversation, Health, MessageResult, CreateResult, Project, ProjectState, MemoryEvent } from './types';
+import type { Conversation, Health, MessageResult, CreateResult, Project, ProjectState, MemoryEvent, ProvidersInfo } from './types';
 
 const BASE = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL ?? '/api';
 
@@ -86,16 +86,18 @@ export async function streamTurn<T>(path: string, body: unknown, onProgress: (ev
 
 export const api = {
   health: () => http<Health>('/health'),
+  providers: () => http<ProvidersInfo>('/providers'),
   list: async () => (await http<unknown[]>('/chat')).map(normalizeConversation),
   get: async (id: string) => normalizeConversation(await http<unknown>(`/chat/${id}`)),
-  create: async (goal: string, constraints?: Partial<ProjectState['constraints']>, onProgress?: (event: MemoryEvent) => void) => {
-    const result = onProgress ? await streamTurn<CreateResult>('/chat', { goal, constraints }, onProgress) : await http<CreateResult>('/chat', {
+  create: async (goal: string, constraints?: Partial<ProjectState['constraints']>, onProgress?: (event: MemoryEvent) => void, provider?: string) => {
+    const body = { goal, constraints, provider };
+    const result = onProgress ? await streamTurn<CreateResult>('/chat', body, onProgress) : await http<CreateResult>('/chat', {
       method: 'POST',
-      body: JSON.stringify({ goal, constraints }),
+      body: JSON.stringify(body),
     });
     return { ...result, conversation: normalizeConversation(result.conversation) };
   },
-  message: async (id: string, body: { text?: string; chip?: string }, onProgress?: (event: MemoryEvent) => void) => {
+  message: async (id: string, body: { text?: string; chip?: string; provider?: string }, onProgress?: (event: MemoryEvent) => void) => {
     const result = onProgress ? await streamTurn<MessageResult>(`/chat/${id}/messages`, body, onProgress) : await http<MessageResult>(`/chat/${id}/messages`, {
       method: 'POST',
       body: JSON.stringify(body),

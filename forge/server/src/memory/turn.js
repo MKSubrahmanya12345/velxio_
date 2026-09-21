@@ -3,21 +3,25 @@ import { createReasoner } from './reasoner.js';
 import { normalizeMemory, normalizeProposals, activeNotes, id, COMMIT_KINDS } from './model.js';
 import { memoryQuestions, outputQuestions, applyReview, evaluateOutput } from './decisions.js';
 import { handleChatMessage } from '../pipeline.js';
+import { unresolvedError } from '../providers/registry.js';
 
 // All work happens on a clone. The route persists only after the guarded turn
 // completes; extraction/generation/provider failures cannot mutate stored state.
-export async function runMemoryTurn(deps, original, text, emit = () => {}) {
+// `requestedProvider` picks a named generator (from cfg.providers); absent, the
+// default provider is used. A requested-but-unconfigured provider is a 400.
+export async function runMemoryTurn(deps, original, text, emit = () => {}, requestedProvider) {
   const conversation = makeConversation(JSON.parse(JSON.stringify(original)));
   const message = String(text || '').trim();
   if (!message || message.length > 12000) throw Object.assign(new Error('Message must contain 1–12,000 characters.'), { status: 400 });
   const memory = conversation.memory = normalizeMemory(conversation.memory);
   if (memory.notes.length >= 500) throw Object.assign(new Error('This project has reached its memory limit. Start a new conversation; existing rules have not been removed.'), { status: 400 });
+  const provider = resolveProvider(deps, requestedProvider);
   const turnId = id('turn');
   const userMessage = makeMessage('user', message);
   const events = [];
   const decisions = [];
-  const generator = deps.reasoner || createReasoner(deps.cfg);
-  const providers = { generator: deps.cfg.planner.provider, jev: deps.cfg.jev.provider };
+  const generator = (provider && deps.reasonerFor ? deps.reasonerFor(provider) : null) || deps.reasoner || createReasoner(deps.cfg);
+  const providers = { generator: provider || deps.cfg.planner.provider, jev: deps.cfg.jev.provider };
   const event = (stage, status, label, extra = {}) => {
     const item = { id: id('event'), turnId, stage, status, label, at: nowIso(), providers, ...extra };
     events.push(item);
@@ -54,8 +58,10 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}) {
   let legacyResult = null;
   let legacyCalls = 0;
   if (conversation.projectState) {
-    const legacyDeps = { ...deps, planner: (goal, constraints, feasibility) => deps.planner(goal, { ...constraints, notes: `${constraints?.notes || ''}\nPROJECT MEMORY (binding): ${JSON.stringify(activeNotes(memory))}` }, feasibility) };
-    legacyResult = await handleChatMessage(legacyDeps, makeConversation(JSON.parse(JSON.stringify(conversation))), { text: message });
+    const legacyPlanner = (provider && deps.plannerFor ? deps.plannerFor(provider) : null) || deps.planner;
+    if (!legacyPlanner) throw Object.assign(new Error('No generation provider is configured for the structured-build path. Set at least one provider key in forge/server/.env.'), { status: 400 });
+    const legacyDeps = { ...deps, planner: (goal, constraints, feasibility) => legacyPlanner(goal, { ...constraints, notes: `${constraints?.notes || ''}\nPROJECT MEMORY (binding): ${JSON.stringify(activeNotes(memory))}` }, feasibility) };
+    legacyResult = await handleChatMessage(legacyDeps, makeConversation(JSON.parse(JSON.stringify(conversation))), { text: message, provider });
     legacyCalls = Math.max(0, legacyResult.conversation.counters.jevCalls - conversation.counters.jevCalls);
   }
   event('generate', 'running', legacyResult ? 'Preparing a structured-build response draft' : 'Generator is drafting with the current project memory');
@@ -97,6 +103,14 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}) {
   event('ready', 'complete', verdict.passed ? 'Checked response ready to save' : `Draft withheld: ${heldHeadline(verdict)}`);
   memory.events = [...memory.events, ...events].slice(-120);
   return { conversation, response, decisions };
+}
+
+// A requested provider must be in the ready set; otherwise the turn is a
+// clear 400 (never a fallback). With no request, the default provider wins.
+function resolveProvider(deps, requested) {
+  const ready = (deps.cfg?.providers || []).filter((p) => p.ready).map((p) => p.id);
+  if (requested && !ready.includes(requested)) throw Object.assign(new Error(unresolvedError(requested, deps.cfg)), { status: 400 });
+  return requested || deps.cfg?.planner?.provider || '';
 }
 
 // A held draft always states the actual blocking reason. Evaluation gaps are

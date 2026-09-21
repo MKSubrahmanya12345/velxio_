@@ -1,22 +1,38 @@
-import type { Health } from '../types';
+import type { Health, GeneratorInfo } from '../types';
 
-// Live provider badges: which Jev / planner / store are active. Mock badges
-// are amber-ish so nobody mistakes an offline run for a TypeSafe-backed one.
-export function ProviderStrip({ health, offline }: { health: Health | null; offline: boolean }) {
+// Provider strip: which Jev / store are active, plus the generation-provider
+// dropdown. The drop-down lists only *configured* providers (real credentials
+// in forge/server/.env) — selecting one switches generation for the next turn.
+export function ProviderStrip({
+  health,
+  offline,
+  providers,
+  selected,
+  onChange,
+}: {
+  health: Health | null;
+  offline: boolean;
+  providers: GeneratorInfo[];
+  selected: string;
+  onChange: (id: string) => void;
+}) {
   if (offline) return <span className="fg-prov fg-prov-off">offline</span>;
-  if (!health) return null;
-  const items: [string, string][] = [
-    ['JEV', health.providers.jev],
-    ['PLANNER', health.providers.planner],
-    ['STORE', health.providers.store],
-  ];
+  const selectedInfo = providers.find(p => p.id === selected);
   return (
     <div className="fg-provs">
-      {items.map(([k, v]) => (
-        <span key={k} className={v === 'mock' ? 'fg-prov fg-prov-mock' : 'fg-prov fg-prov-live'}>
-          {k} · {v}
-        </span>
-      ))}
+      {providers.length > 0 && (
+        <label className="fg-prov fg-prov-live fg-prov-select" title={selectedInfo ? `Model: ${selectedInfo.model} — hosts generate with this provider` : 'No model selected'}>
+          <select value={selected ?? ''} onChange={e => onChange(e.target.value)} aria-label="Generation model provider">
+            <option value="">MODEL</option>
+            {providers.map(p => (
+              <option key={p.id} value={p.id}>{p.name} · {p.model}</option>
+            ))}
+          </select>
+        </label>
+      )}
+      <span className="fg-prov fg-prov-live">JEV · {health?.providers.jev || 'none'}</span>
+      <span className="fg-prov fg-prov-live">PLANNER · {health?.providers.planner || 'none'}</span>
+      <span className="fg-prov fg-prov-live">STORE · {health?.providers.store}</span>
     </div>
   );
 }
