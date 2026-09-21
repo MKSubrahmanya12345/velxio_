@@ -41,11 +41,46 @@ test('demo film: grounded rules, AI proposals, real events, and future-turn memo
   assert.equal(second.conversation.messages.length, 4);
 });
 
-test('user quotes alone cannot authorize unsupported, conflicting, or uncertain rules', () => {
-  for (const result of [answers({ support_0: noul(.2) }), answers({ compatible_0: noul(.4) }), answers({ kind_0: choice('rule', .6) }), {}, answers({ kind_0: choice('made_up') }), answers({ support_0: { type: 'noul', noul: '1' } })]) {
+test('user quotes alone cannot authorize unsupported, conflicting, or malformed rules', () => {
+  for (const result of [answers({ support_0: noul(.2) }), answers({ compatible_0: noul(.4) }), {}, answers({ kind_0: choice('made_up') }), answers({ support_0: { type: 'noul', noul: '1' } }), answers({ kind_0: { type: 'choice', choice: 'rule', confidence: 'high' } })]) {
     const m = emptyMemory(); accept(m, candidate(), result);
     assert.equal(m.notes[0].status, 'pending');
   }
+});
+
+test('a split kind vote still remembers a grounded declaration', () => {
+  const m = emptyMemory();
+  accept(m, candidate(), answers({ kind_0: choice('rule', .6) }));
+  assert.equal(m.notes[0].status, 'active');
+  assert.equal(m.notes[0].kind, 'rule');
+  assert.equal(m.notes[0].origin, 'user');
+  assert.equal(m.notes[0].review.classification, null, 'the label was not a firm decision');
+  assert.equal(m.notes[0].review.labelLean, 'rule', 'the lean is recorded');
+  assert.match(m.notes[0].reason, /label/i);
+  const firm = emptyMemory();
+  accept(firm, candidate({ id: 'note_9' }), answers({ kind_0: choice('suggestion', .6) }));
+  assert.equal(firm.notes[0].status, 'proposed', 'a tentative lean never becomes a binding rule');
+});
+
+test('compatibility uncertainty is reported as uncertainty, not conflict', () => {
+  const m = emptyMemory();
+  accept(m, candidate(), answers({ compatible_0: noul(.4) }));
+  assert.equal(m.notes[0].status, 'pending');
+  assert.match(m.notes[0].reason, /uncertain/i);
+  assert.doesNotMatch(m.notes[0].reason, /Contradicts/i);
+});
+
+test('an identified contradiction names the affected note', () => {
+  const m = emptyMemory();
+  accept(m, candidate());
+  accept(m, candidate({ id: 'note_2', text: 'Use a full crew' }), answers({ compatible_0: noul(.05), conflicts_with_0: choice('note_1') }));
+  assert.equal(m.notes[1].status, 'pending');
+  assert.match(m.notes[1].reason, /note_1/);
+  const unnamed = emptyMemory();
+  accept(unnamed, candidate());
+  accept(unnamed, candidate({ id: 'note_2', text: 'Use a full crew' }), answers({ compatible_0: noul(.05), conflicts_with_0: choice('unclear') }));
+  assert.match(unnamed.notes[1].reason, /contradiction/i);
+  assert.doesNotMatch(unnamed.notes[1].reason, /note_1/);
 });
 
 test('AI proposals cannot become binding commitments without a grounded quote', () => {
@@ -85,9 +120,84 @@ test('low authorization cannot retire an established rule', () => {
 
 test('dynamic questions cover every active note; missing or malformed output answers block delivery', () => {
   const notes = [candidate(), candidate({ id: 'note_2', text: 'No paid tools' })];
-  assert.equal(Object.keys(memoryQuestions(notes)).length, 8);
+  // Per proposal: kind, domain, support, compatible, conflicts_with, change.
+  assert.equal(Object.keys(memoryQuestions(notes)).length, 12);
   assert.match(outputQuestions(notes).respect_1.instructions, /No paid tools/);
   for (const result of [{}, { disposition: choice('deliver'), respect_0: noul(1) }, { disposition: choice('deliver'), respect_0: noul(2), respect_1: noul(1) }]) assert.equal(evaluateOutput(notes, result).passed, false);
+});
+
+test('a revise disposition holds a clean draft; uncertain or missing dispositions do not', () => {
+  const notes = [candidate()];
+  const clean = { respect_0: noul(.99) };
+  assert.equal(evaluateOutput(notes, { ...clean, disposition: choice('deliver', .5) }).passed, true, 'a split disposition vote still delivers');
+  assert.equal(evaluateOutput(notes, { ...clean, disposition: choice('clarify', .55) }).passed, true, 'questions stay free — clarify is a normal outcome');
+  assert.equal(evaluateOutput(notes, { ...clean, disposition: choice('deliver') }).passed, true);
+  assert.equal(evaluateOutput(notes, clean).passed, true, 'checks are the guard when disposition is absent');
+  assert.equal(evaluateOutput(notes, { ...clean, disposition: choice('revise', .5) }).passed, false, 'a revise lean holds and repairs');
+});
+
+test('uncertain checks on rules are strict; on softer notes they report without freezing conversation', () => {
+  const ruleResult = evaluateOutput([candidate()], { disposition: choice('deliver'), respect_0: noul(.5) });
+  assert.equal(ruleResult.passed, false);
+  assert.equal(ruleResult.blocking[0].type, 'rule-check-uncertain');
+  const factResult = evaluateOutput([candidate({ kind: 'fact', text: 'I have a phone' })], { disposition: choice('deliver'), respect_0: noul(.5) });
+  assert.equal(factResult.passed, true);
+  assert.equal(factResult.soft.length, 1);
+  assert.equal(factResult.soft[0].verdict, 'uncertain', 'uncertainty stays labeled uncertainty');
+  const conflict = evaluateOutput([candidate()], { disposition: choice('deliver'), respect_0: noul(.02) });
+  assert.equal(conflict.passed, false);
+  assert.equal(conflict.checks[0].verdict, 'conflict');
+});
+
+test('answering an open question needs no replacement authorization', () => {
+  const m = emptyMemory();
+  m.notes.push({ id: 'note_q', kind: 'question', text: 'Is the monitor a TV?', quote: '', supersedes: [], origin: 'ai', status: 'proposed', reason: 'Kept tentative. This is not a binding user rule.', sourceMessageId: 'msg_old', createdAt: '2026-09-20T00:00:00Z' });
+  accept(m, candidate({ id: 'note_a', text: 'The monitor is a computer monitor', quote: 'The monitor is a computer monitor', supersedes: ['note_q'] }), answers({ change_0: noul(.05) }));
+  assert.equal(m.notes[1].status, 'active');
+  assert.equal(m.notes[0].status, 'superseded');
+});
+
+test('reconciliation confirms and resolves earlier notes against the latest message', () => {
+  const m = emptyMemory();
+  m.notes.push(
+    { id: 'note_p', kind: 'rule', text: 'Only me, no crew', quote: 'Only me, no crew', supersedes: [], origin: 'user', status: 'pending', reason: 'old', sourceMessageId: 'msg_old', createdAt: '2026-09-20T00:00:00Z' },
+    { id: 'note_q', kind: 'question', text: 'Is the monitor a TV?', quote: '', supersedes: [], origin: 'ai', status: 'proposed', reason: 'old', sourceMessageId: 'msg_old', createdAt: '2026-09-20T00:00:00Z' },
+  );
+  const questions = memoryQuestions([], m);
+  assert.ok(questions.reconcile_note_p && questions.reconcile_note_q, 'unresolved notes are revisited every turn');
+  applyReview([], { reconcile_note_p: choice('established'), reconcile_note_q: choice('answered') }, m, 'msg_new', '2026-09-21T00:00:00Z');
+  assert.equal(m.notes[0].status, 'active');
+  assert.match(m.notes[0].reason, /Confirmed/);
+  assert.equal(m.notes[1].status, 'superseded');
+  assert.match(m.notes[1].reason, /Resolved/);
+  const left = emptyMemory();
+  left.notes.push({ id: 'note_p', kind: 'rule', text: 'Only me, no crew', quote: 'Only me, no crew', supersedes: [], origin: 'user', status: 'pending', reason: 'old', sourceMessageId: 'msg_old', createdAt: '2026-09-20T00:00:00Z' });
+  applyReview([], { reconcile_note_p: choice('open') }, left, 'msg_new', '2026-09-21T00:00:00Z');
+  assert.equal(left.notes[0].status, 'pending', 'open stays open without penalty');
+});
+
+test('a re-stated pending declaration is confirmed in place, not duplicated', () => {
+  const m = emptyMemory();
+  m.notes.push({ id: 'note_old', kind: 'rule', text: 'Communication is bidirectional', quote: 'affects the past', supersedes: [], origin: 'user', status: 'pending', reason: 'old', sourceMessageId: 'msg_1', createdAt: '2026-09-20T00:00:00Z' });
+  accept(m, candidate({ id: 'note_new', text: 'Communication is bidirectional', quote: 'Communication is bidirectional' }));
+  assert.equal(m.notes.length, 1);
+  assert.equal(m.notes[0].id, 'note_old');
+  assert.equal(m.notes[0].status, 'active');
+});
+
+test('raw JEV answers are recorded so exact failing values are visible', async () => {
+  const m = emptyMemory(); accept(m);
+  const deps = { ...dependencies(), reasoner: { propose: async () => ({ notes: [] }), respond: async () => ({ content: 'A checked response.' }) }, jev: async ({ state }) => {
+    assert.equal(state.operation, 'output_review');
+    return { model: 'raw-model', provider: 'typesafe', answers: { disposition: choice('deliver', .4), respect_0: noul(.99) }, usage: { input_tokens: 1, output_tokens: 2 } };
+  } };
+  const result = await runMemoryTurn(deps, makeConversation({ memory: m }), 'Continue');
+  assert.equal(result.response.meta.withheld, false);
+  const check = result.conversation.memory.events.find(e => e.stage === 'check' && e.status !== 'running');
+  assert.equal(check.raw.model, 'raw-model');
+  assert.deepEqual(check.raw.answers.disposition, choice('deliver', .4));
+  assert.deepEqual(result.decisions[0].detail.answers.disposition, choice('deliver', .4));
+  assert.match(result.decisions[0].summary, /Passed · 1\/1 active notes passed · disposition deliver/);
 });
 
 test('same reasoner gets active memory and JEV failures, repairs once, and rechecks', async () => {

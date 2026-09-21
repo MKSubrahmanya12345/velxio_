@@ -157,9 +157,11 @@ export interface Health {
 }
 
 export type NoteKind = 'goal' | 'rule' | 'fact' | 'preference' | 'assumption' | 'suggestion' | 'question';
+export type NoteDomain = 'production' | 'fiction' | 'creative' | 'meta' | 'unknown';
 export interface MemoryNote {
   id: string;
   kind: NoteKind;
+  domain?: NoteDomain | string;
   text: string;
   quote: string;
   origin: 'user' | 'ai';
@@ -169,14 +171,25 @@ export interface MemoryNote {
   supersededBy?: string;
   sourceMessageId: string;
   createdAt: string;
-  review?: { classification: string | null; support: number | null; compatible: number | null; authorized: number | null };
+  review?: {
+    classification: string | null;
+    support: number | null;
+    compatible: number | null;
+    authorized: number | null;
+    labelLean?: string | null;
+    labelConfidence?: number | null;
+    domain?: string | null;
+    conflictsWith?: string | null;
+    reconciled?: string | null;
+  };
 }
 export interface RuleCheck {
   noteId: string;
   text: string;
   kind: NoteKind;
   value: number | null;
-  verdict: 'pass' | 'conflict' | 'uncertain';
+  verdict: 'pass' | 'conflict' | 'uncertain' | 'unknown';
+  blocking?: boolean;
 }
 export interface MemoryEvent {
   id: string;
@@ -193,6 +206,10 @@ export interface MemoryEvent {
   passed?: boolean;
   disposition?: string | null;
   attempt?: number;
+  answers?: Record<string, unknown>;
+  raw?: unknown;
+  blocking?: { type: string; noteId?: string; text?: string; value?: number | null; detail?: string }[];
+  soft?: RuleCheck[];
 }
 export interface ProjectMemory {
   version: number;

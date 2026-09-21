@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import type { MemoryEvent, MemoryNote, ProjectMemory } from '../types';
 
 const labels = { goal: 'Goal', rule: 'User rule', fact: 'Fact', preference: 'Preference', assumption: 'AI inference', suggestion: 'AI suggestion', question: 'Open question' };
+const domains: Record<string, string> = { production: 'Real-world production', fiction: 'Story world', creative: 'Creative direction', meta: 'Collaboration process', unknown: 'Scope not established' };
+const checkLabels: Record<string, string> = { pass: 'respected by response', conflict: 'contradiction found', uncertain: 'uncertain — not a confirmed conflict', unknown: 'no usable JEV value' };
 const stages = [ ['extract', 'Form'], ['review', 'JEV'], ['context', 'Context'], ['generate', 'Draft'], ['check', 'Check'] ] as const;
 
 export function MemoryPanel({ memory, events = [], busy = false, error = '', onChange }: {
@@ -67,10 +69,12 @@ export function MemoryPanel({ memory, events = [], busy = false, error = '', onC
           return <article key={`${note.id}-${note.status}`} className={`fg-memory-note note-${note.kind} status-${note.status}${liveIds.has(note.id) ? ' is-new' : ''}${checking && last.noteIds?.includes(note.id) ? ' is-checking' : ''}`}>
             <header><span>{labels[note.kind]}</span><small>{note.status === 'active' && note.kind === 'rule' ? 'Binding' : note.status}</small></header>
             <p>{note.text}</p>
-            {check && <div className={`fg-memory-check check-${check.verdict}`}><span>{check.verdict === 'pass' ? '✓' : '!'}</span>{mock ? 'Demo check' : 'JEV check'} · {check.verdict === 'pass' ? 'respected by response' : check.verdict}</div>}
+            {check && <div className={`fg-memory-check check-${check.verdict}`}><span>{check.verdict === 'pass' ? '✓' : '!'}</span>{mock ? 'Demo check' : 'JEV check'} · {checkLabels[check.verdict] || check.verdict}</div>}
             <details className="fg-memory-source"><summary>Why is this here?</summary>
               <p>{note.reason}</p>
               {note.quote ? <blockquote>“{note.quote}”</blockquote> : <p>AI-generated, not a statement from you.</p>}
+              {note.domain && note.domain !== 'unknown' && <p>Scope: {domains[note.domain] || note.domain}</p>}
+              {note.review && <small>Review: label {note.review.classification ?? `uncertain (${note.review.labelLean ?? 'no lean'})`} · support {note.review.support ?? '—'} · compatibility {note.review.compatible ?? '—'}{note.review.conflictsWith ? ` · conflicts with ${note.review.conflictsWith}` : ''}</small>}
               {note.supersedes.length > 0 && <p>{note.status === 'active' ? 'Replaces' : 'Proposes replacing'}: {note.supersedes.join(', ')}</p>}
               {note.supersededBy && <p>Replaced by: {note.supersededBy}</p>}
               {note.sourceMessageId && <small>Source: {note.sourceMessageId}</small>}
@@ -82,7 +86,9 @@ export function MemoryPanel({ memory, events = [], busy = false, error = '', onC
       {notes.some(n => ['rejected', 'superseded'].includes(n.status)) && <button className="fg-memory-history" onClick={() => setShowAll(v => !v)}>{showAll ? 'Hide retired notes' : 'Show retired / rejected notes'}</button>}
       {trace.length > 0 && <details className="fg-memory-trace"><summary>Decision trail <span>{trace.length} events</span></summary><ol>
         {trace.map(e => <li key={e.id} className={`trace-${e.status}`}><span className="fg-trace-dot" /><div><strong>{e.label}</strong><small>{new Date(e.at).toLocaleTimeString()} · {e.stage}</small>
-          {e.checks?.map(c => <p key={c.noteId}>{c.verdict === 'pass' ? '✓' : '!'} {c.text} <span>({c.verdict})</span></p>)}
+          {e.checks?.map(c => <p key={c.noteId}>{c.verdict === 'pass' ? '✓' : '!'} {c.text} <span>({checkLabels[c.verdict] || c.verdict}{c.value !== null && c.value !== undefined ? ` · ${c.value}` : ''})</span></p>)}
+          {e.blocking?.map((b, i) => <p key={i} className="fg-trace-block">held by: {b.type}{b.text ? ` — ${b.text}` : ''}{b.detail ? ` — ${b.detail}` : ''}</p>)}
+          {e.raw != null && <details className="fg-memory-raw"><summary>Raw JEV response</summary><pre>{JSON.stringify(e.raw, null, 2)}</pre></details>}
         </div></li>)}
       </ol></details>}
       <p className="fg-memory-caveat">{mock ? 'Demo scores are scripted examples, not semantic verification. Connect JEV and an LLM for open-ended reasoning.' : 'JEV evaluates consistency, not real-world truth. A passed check is not proof that a physical result works.'}</p>

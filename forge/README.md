@@ -10,21 +10,57 @@ A horror film, app, event, or physical build can all start in the same workspace
 
 ```text
 User message + project memory + recent conversation
-    → same configured LLM proposes atomic notes
-    → JEV evaluates origin, support, compatibility, change authorization
-    → code applies accepted changes; uncertain notes stay pending
+    → same configured LLM proposes atomic notes (with a scope/domain)
+    → JEV evaluates origin, support, compatibility, conflicts, change authorization
+      and reconciles earlier pending notes and open questions against this message
+    → code applies accepted changes; uncertain notes stay pending with the exact reason
     → current project memory is supplied to the same LLM
     → LLM drafts a response
     → JEV checks every active goal / rule / fact / preference
-    → pass: save and deliver
-      fail / uncertain: one revision by the same LLM, then check again
-      still unresolved: withhold draft and request clarification
+    → pass (including a clarifying question response): save and deliver
+      confirmed contradiction, unusable check value, or uncertain RULE check:
+        one revision by the same LLM, then check again
+      still unresolved: withhold the draft and state the exact blocking reason
 ```
 
 The data structure is stable, but the **content and rule questions emerge from
 what the user says**. There is no film-specific or electronics-specific schema in
 the live memory pipeline. JEV receives `{ state, questions }` with typed `choice`,
 `noul`, and `score` questions, not a request to write the assistant's response.
+
+### How decisions are applied
+
+- **Remembering is separate from classifying.** An active user commitment needs a
+  grounded quote and a supporting JEV review (`support ≥ 0.85`). A confident kind
+  label is NOT required: if JEV splits between fact/rule/preference, the statement
+  is still remembered under the proposed kind and the lean is recorded. Only an
+  explicit confident rejection, weak/absent support, an identified contradiction,
+  uncertain compatibility, or an unauthorized replacement keeps a note pending.
+- **Uncertainty is not contradiction.** `compatibility ≤ 0.15` is reported as a
+  contradiction and must name the affected note (a `conflicts_with` choice over
+  active note IDs). The middle band is reported as uncertainty — never as a
+  conflict. Missing/malformed JEV values fail closed as "unknown" and say so.
+- **JEV `confidence` is distribution spread, not a probability.** It gates only
+  firm binary decisions (classification, replacement authorization). Disposition
+  `deliver`/`clarify`/`revise` uses the argmax; only `revise` holds a draft, and a
+  missing disposition never blocks a draft whose checks all passed.
+- **Different scopes never conflict.** Every note carries a domain: `production`
+  (real-world making), `fiction` (story world, including the supernatural),
+  `creative` (style), `meta` (collaboration). A one-person production rule does
+  not conflict with two fictional characters. Undecidable/supernatural elements
+  are not explained or over-classified.
+- **Questions stay free.** Asking clarifying questions is a normal, approved
+  outcome (`clarify`), never a defect, and is never limited by the memory guard.
+  Rule replacement and retiring an established commitment still require explicit
+  user authorization (`change ≥ 0.9`); answering an open question does not.
+- **Every turn reconciles memory.** Pending interpretations and open questions are
+  revisited against the latest message (confirm / answer / drop / stay open). A
+  re-stated pending declaration is confirmed in place — same note ID, no
+  duplicates. Answered questions retire to history.
+- **Exact values are visible.** Raw JEV responses are recorded on review/check
+  events and in decision detail, a held draft lists what actually blocked it, and
+  `npm --prefix forge/server run raw-reviews` prints one raw memory-review and one
+  raw output-review response (mock by default — no credentials needed).
 
 ### What memory remembers
 
@@ -38,12 +74,15 @@ the live memory pipeline. JEV receives `{ state, questions }` with typed `choice
 | Suggestion | An option, not an adopted requirement |
 | Question | Something still unresolved |
 
-Each note has a stable ID, text, source-message ID, supporting user quote when
-available, origin, status, timestamps, structured review values, and replacement
-links. Statuses are `active`, `proposed`, `pending`, `rejected`, and `superseded`.
+Each note also carries a **domain** — `production`, `fiction`, `creative`, `meta`,
+or `unknown` — so real-world constraints, story-world facts, and creative
+direction are judged in their own scopes.
 
-- Active user commitments need a quote grounded in the latest message and a
-  sufficiently supported JEV review. A quote alone does not establish meaning.
+Each note has a stable ID, text, source-message ID, supporting user quote when
+available, origin, status, timestamps, structured review values (including the
+recorded label lean and named conflict targets), and replacement links. Statuses
+are `active`, `proposed`, `pending`, `rejected`, and `superseded`.
+
 - AI inferences/suggestions remain tentative; they cannot silently become rules.
 - Changing an established note requires explicit user authorization, checked by
   JEV. Partial exceptions must preserve the old rule's scope or ask clarification.
@@ -63,8 +102,11 @@ from **Project memory** on smaller screens.
 - The stage rail follows actual server events: Form → JEV → Context → Draft → Check.
 - Active rules are prominent; AI ideas are visually tentative.
 - A scan animation highlights notes while JEV checks a draft.
-- Per-note outcomes show respected, conflicting, or uncertain checks.
-- **Why is this here?** reveals source quotes, review explanations, and history.
+- Per-note outcomes show respected, conflicting, or uncertain checks —
+  uncertainty is labeled as such, never as a conflict.
+- **Why is this here?** reveals source quotes, review explanations and values,
+  scope, and history. The decision trail exposes raw JEV responses and the exact
+  blocking reasons for held drafts.
 - **Change this note** prepares a user message; it never mutates memory directly.
 - **Decision trail** lists actual recorded events and checks.
 - **Replay recorded turn** plays the recorded sequence with an explicit replay
@@ -208,13 +250,17 @@ integration, accounts, or guaranteed factual/physical verification.
 ```bash
 npm --prefix forge/server test       # memory, API, persistence, provider contracts
 npm --prefix forge/server run smoke # original mock-build loop (11 checks)
+npm --prefix forge/server run raw-reviews # one raw memory-review + one raw output-review response
 npm --prefix forge/client test       # workspace, memory UI, streaming parser
 npm --prefix forge/client run build # TypeScript + production bundle
 ```
 
-The tests cover grounded notes, uncertain/missing decisions, unauthorized rule
-replacement, repair and recheck, withheld drafts, rollback, concurrent API requests,
-file reloads, streaming interruptions, source visibility, and explicit replay.
+The tests cover grounded notes, label-split and uncertain/missing decisions,
+uncertainty-vs-contradiction wording, named conflict targets, unauthorized rule
+replacement, question answering and turn-end reconciliation, disposition gating,
+repair and recheck, withheld drafts, raw-answer capture, rollback, concurrent API
+requests, file reloads, streaming interruptions, source visibility, and explicit
+replay.
 Provider request shapes are tested with stubbed HTTP, **not paid-provider E2E**.
 Desktop/mobile Chromium checks exercise the actual demo API and UI, including rule
 formation, future turns, scoped changes, replay, persisted reopening, and reduced motion.
