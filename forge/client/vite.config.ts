@@ -9,6 +9,10 @@ const apiTarget = process.env.VITE_API_PROXY || 'http://localhost:4321';
 export default defineConfig({
   plugins: [react()],
   server: {
+    host: '0.0.0.0',
+    // Arena serves the dev app through a generated preview hostname.
+    // Vite otherwise rejects that host with HTTP 403 before React loads.
+    allowedHosts: true,
     port: 5174,
     proxy: {
       '/api': { target: apiTarget, changeOrigin: true },

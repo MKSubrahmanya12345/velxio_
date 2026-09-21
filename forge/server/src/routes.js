@@ -3,7 +3,7 @@
 
 import { Router } from 'express';
 import { synthesizeProject, handleMessage } from './pipeline.js';
-import { nowIso, log } from './schema.js';
+import { makeProject, nowIso, log } from './schema.js';
 
 export function createRouter(deps) {
   const r = Router();
@@ -35,7 +35,7 @@ export function createRouter(deps) {
         goal,
         constraints: req.body?.constraints || {},
       });
-      const project = await deps.store.create(state);
+      const project = await deps.store.create(makeProject(state));
       res.status(201).json({ project, response, decisions });
     } catch (e) { next(e); }
   });

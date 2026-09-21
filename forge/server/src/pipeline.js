@@ -43,9 +43,6 @@ export async function synthesizeProject(deps, input) {
   };
 
   const state = {
-    id: crypto.randomUUID(),
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
     goal,
     constraints,
     feasibility,
