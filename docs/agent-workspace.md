@@ -165,6 +165,37 @@ Docker Compose already loads `backend/.env`; restart/rebuild after changing sett
   sandbox. Run the backend in an unprivileged container with memory/CPU/filesystem
   limits if accepting untrusted users/code.
 
+## Forge project memory (JEV) — optional, opt-out
+
+The agent can be governed by [Velxio Forge](../forge/README.md): every user
+prompt first runs one guarded Forge turn — the same generation LLM proposes
+atomic project notes, JEV (TypeSafe's System One decision model) evaluates
+grounding, conflicts, scope and rule-change authorization, and only
+JEV-accepted, user-quoted notes become **active project memory**. That memory is
+injected into the agent's prompt ("rules are binding"), and the agent run itself
+is checked against it. `GET /agent/forge` reports the state; the panel's
+settings show connected / starting / disabled plus the active notes.
+
+- **Direct connection, no copies.** `app/agent/forge.py` speaks the live Forge
+  HTTP API (`FORGE_BASE_URL`, default `http://127.0.0.1:4321`). Nothing from
+  `forge/` is vendored into the agent, so **any change to forge is instantly
+  the behavior the agent sees**. With `FORGE_AUTOSTART=true` (default) the
+  backend starts the service itself as `node --watch src/index.js`, so forge
+  *code edits* hot-reload too. If you prefer to manage it yourself, run
+  `npm --prefix forge/server run dev` and set `FORGE_AUTOSTART=false`.
+- **Toggle.** `FORGE_ENABLED` is the server default; the agent panel's
+  **FORGE · PROJECT MEMORY** checkbox flips it at runtime
+  (`POST /agent/forge/toggle`, persisted to `backend/data/forge_state.json`,
+  wins over the env). One session key per browser workspace
+  (`forge_session` in the run body) maps to one Forge conversation, so memory
+  persists across runs and reloads.
+- **Fail-open, by contract.** Forge down, unconfigured or mid-repair ⇒
+  the agent runs exactly as before with no memory block; the panel shows why.
+  Real JEV decisions need `forge/server/.env` (`TYPESAFE_API_KEY` + a
+  generation provider key — see [forge/README.md](../forge/README.md));
+  without credentials Forge reports the exact missing key and the agent
+  simply proceeds without memory.
+
 ## How a request works
 
 1. Capture the complete workspace and project identity; derive a canonical design

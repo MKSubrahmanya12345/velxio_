@@ -785,8 +785,15 @@ async def _propose_once_bedrock(messages: list[dict], spec: ProviderSpec) -> Pro
 
 
 def _is_mantle_model(model: str) -> bool:
-    """True for the models the Bedrock Mantle gateway serves instead of Converse."""
-    return model.strip().lower() == "moonshotai.kimi-k2.5"
+    """True for the models the Bedrock Mantle gateway serves instead of Converse.
+
+    Native Converse answers HTTP 400 "Operation not allowed" for Moonshot/Kimi
+    ids on the accounts we run — so every kimi/moonshot variant routes to Mantle,
+    not just one exact string (a suffixed or case-shifted model id must not fall
+    back into the Converse path and reproduce that error).
+    """
+    m = model.strip().lower()
+    return "kimi" in m or "moonshot" in m
 
 
 def _mantle_url(spec: ProviderSpec) -> str:
@@ -837,12 +844,16 @@ def _rejects_json_mode(response: httpx.Response) -> bool:
 
     Only keywords are matched — provider bodies are never logged or surfaced. A
     false positive costs one extra call (the retry without JSON mode) and then
-    reports the real 400, so the keyword list errs on the broad side.
+    reports the real 400, so the keyword list errs on the broad side. Some
+    deployments answer an unimplemented response_format with a generic
+    "Operation not allowed" instead of naming the parameter; without this entry
+    every Mantle call would keep paying that 400 forever.
     """
     body = (response.text or "")[:600].lower()
     return any(hint in body for hint in
                ("response_format", "json_object", "json mode", "unsupported",
-                "invalid", "parameter"))
+                "operation not allowed", "not allowed", "not supported",
+                "does not support", "unimplemented", "invalid", "parameter"))
 
 
 async def _mantle_post(spec: ProviderSpec, payload: dict) -> httpx.Response:
@@ -877,7 +888,14 @@ async def _propose_once_mantle(messages: list[dict], spec: ProviderSpec) -> Prop
     if response.status_code == 429 or response.status_code >= 500:
         raise ProviderTransientError(f"Bedrock returned HTTP {response.status_code}. Retrying…")
     if response.status_code >= 400:
-        raise ProviderError(f"Bedrock returned HTTP {response.status_code}. Check server configuration or quota.")
+        # A rejection that survives the JSON-mode drop is policy-side, not
+        # payload-side; name the things an administrator can actually check.
+        raise ProviderError(
+            f"Bedrock returned HTTP {response.status_code}. The Mantle gateway rejected this "
+            "request even without JSON mode — check that the model id is served in "
+            f"{spec.region or 'the configured region'}, that the IAM role/user is allowed for "
+            "bedrock-mantle (or a valid BEDROCK_API_KEY), and account quota."
+        )
     try:
         payload = response.json()
         choice = payload["choices"][0]
@@ -962,7 +980,10 @@ async def _propose_once_converse(messages: list[dict], spec: ProviderSpec) -> Pr
         if code in {"ThrottlingException", "ServiceQuotaExceededException",
                     "InternalServerException", "ServiceUnavailableException"}:
             raise ProviderTransientError(f"Bedrock is rate-limited or unavailable ({code}). Retrying…") from None
-        raise ProviderError(f"Bedrock denied the request ({code or 'error'}). Check region, model access and quota.") from None
+        hint = "" if "not allowed" not in str(exc).lower() else (
+            " Models the native Converse runtime does not serve (e.g. Moonshot/Kimi) must run"
+            " through the Mantle gateway — verify BEDROCK_MODEL_ID and region.")
+        raise ProviderError(f"Bedrock denied the request ({code or 'error'}). Check region, model access and quota.{hint}") from None
     except BotoCoreError:
         raise ProviderTransientError("Bedrock transport error. Retrying…") from None
     if not content.strip():
@@ -1038,13 +1059,19 @@ def _scrubbed_project_json(project) -> str:
 
 
 def _base_messages(request: AgentRequest) -> list[dict]:
+    request_text = "CURRENT PROJECT:\n" + _scrubbed_project_json(request.project) \
+        + "\nREQUEST:\n" + scrub_secrets(request.prompt)
+    # JEV-reviewed project memory (forge bridge). Fail-open by construction: the
+    # attribute is empty unless a forge turn actually returned a block this run.
+    if request._forge_context:
+        request_text += ("\n\n" + request._forge_context
+                         + "\nApply these constraints to the circuit design and firmware; do not contradict an active rule.")
     return [
         {"role": "system", "content": system_prompt()
          + "\n" + describe_tools()
          + "\nResponse schema: " + json.dumps(Proposal.model_json_schema())},
         *[{"role": m.role, "content": scrub_secrets(m.content)} for m in request.messages],
-        {"role": "user", "content": "CURRENT PROJECT:\n" + _scrubbed_project_json(request.project)
-         + "\nREQUEST:\n" + scrub_secrets(request.prompt)},
+        {"role": "user", "content": request_text},
     ]
 
 
@@ -1061,6 +1088,26 @@ async def run_agent(request: AgentRequest):
         # First event carries run_id explicitly so the browser knows where to
         # POST mid-run notes. Subsequent events inherit run_id from event().
         yield {"type": "run_started", "run_id": rid}
+        # Forge project memory (opt-in, direct connection, fail-open). Any
+        # forge problem degrades to "no memory this run" — never to a failure.
+        try:
+            from app.agent import forge as forge_bridge
+            if forge_bridge.is_enabled():
+                yield {"type": "stage", "run_id": rid, "stage": "planning",
+                       "message": "Checking project memory (forge · JEV)"}
+                # A slow forge must never eat the run's global 240 s budget:
+                # bound the turn and degrade to "no memory", not to a timeout.
+                turn = await asyncio.wait_for(
+                    forge_bridge.run_turn(request.prompt, request.forge_session or "default"),
+                    timeout=min(150.0, settings.FORGE_TURN_TIMEOUT_S + 20.0),
+                )
+                request._forge_context = turn.get("context", "")
+                yield {"type": "forge", "run_id": rid,
+                       "status": "ok" if turn.get("ok") else "unavailable",
+                       "summary": turn.get("summary") or {},
+                       "message": str(turn.get("error", ""))[:300]}
+        except Exception:
+            request._forge_context = ""
         async for event in _run(request, rid, started, record, feedback_q):
             yield event
     except (asyncio.CancelledError, GeneratorExit):

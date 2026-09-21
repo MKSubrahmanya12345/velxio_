@@ -86,6 +86,39 @@ class FeedbackBody(BaseModel):
     note: str = Field(min_length=1, max_length=1000)
 
 
+@router.get("/forge")
+async def forge_status():
+    """Forge memory state (toggle, liveness, provider labels — no secrets)."""
+    from app.agent import forge as forge_bridge
+    return await forge_bridge.status()
+
+
+class ForgeToggleBody(BaseModel):
+    enabled: bool
+
+
+@router.post("/forge/toggle", dependencies=[Depends(authorize)])
+async def forge_toggle(body: ForgeToggleBody):
+    """Persist the runtime toggle (wins over the FORGE_ENABLED env default).
+
+    Enabling also verifies the direct connection — when forge is not up and
+    autostart is on, the bridge spawns `node --watch` on forge/server, so new
+    forge code is live for the agent without touching velxio.
+    """
+    from app.agent import forge as forge_bridge
+    await forge_bridge.set_enabled(body.enabled)
+    if body.enabled:
+        await forge_bridge.ensure_live()  # verify/start the direct connection now
+    return await forge_bridge.status()
+
+
+@router.get("/forge/memory", dependencies=[Depends(authorize)])
+async def forge_memory(session: str = "default"):
+    """Current notes + recent JEV checks for one browser workspace session."""
+    from app.agent import forge as forge_bridge
+    return await forge_bridge.memory_snapshot(session[:80])
+
+
 @router.post("/runs/{run_id}/feedback", dependencies=[Depends(authorize)])
 async def feedback(run_id: str, body: FeedbackBody):
     """Inject a mid-run user note. The running loop folds it into the next turn.

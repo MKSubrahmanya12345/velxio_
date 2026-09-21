@@ -36,7 +36,17 @@ export function createBedrockPlanner(cfg) {
     });
 
     const res = await fetch(url, { method: 'POST', headers, body });
-    if (!res.ok) throw new Error(`Bedrock converse ${res.status}: ${await res.text()}`);
+    if (!res.ok) {
+      const text = await res.text();
+      // Native Converse answers 400 "Operation not allowed" for models it does
+      // not serve (Moonshot/Kimi ids exist only on the Mantle gateway, which
+      // Forge deliberately does not speak). Name the fix, not just the body.
+      if (res.status === 400 && (/not allowed/i.test(text) || /kimi|moonshot/i.test(modelId))) {
+        throw new Error(`Bedrock Converse does not serve "${modelId}" in ${b.region} (HTTP 400: ${text.slice(0, 160)}). ` +
+          'Kimi/Moonshot models are Mantle-gateway-only and unsupported here — set BEDROCK_MODEL to a Converse-served id (anthropic.claude-*, amazon.nova-*).');
+      }
+      throw new Error(`Bedrock converse ${res.status}: ${text}`);
+    }
     const data = await res.json();
     return parsePlanText(String(data?.output?.message?.content?.[0]?.text ?? ''));
   };
