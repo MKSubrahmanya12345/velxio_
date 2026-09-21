@@ -286,6 +286,18 @@ limited to 12,000 characters, proposals to 8 per turn, and draft output to 24,00
 characters. The most recent 120 events are retained. At the 500-note boundary new
 turns are stopped rather than silently evicting rules; archival is future work.
 
+## Velxio agent integration (direct connection)
+
+`backend/app/agent/forge.py` embeds this memory loop into the Velxio circuit
+agent as an opt-in layer: each agent prompt runs one guarded Forge turn (via
+this server's HTTP API — nothing is copied), and only JEV-accepted,
+user-quoted notes reach the agent's prompt as binding project memory. The
+agent panel's settings toggle flips `POST /api/agent/forge/toggle` at runtime;
+`FORGE_AUTOSTART` (default) spawns this server as `node --watch`, so any change
+to the forge codebase is live for the agent on the next turn. Everything
+fails open: forge down ⇒ the agent runs without memory. See
+[docs/agent-workspace.md](../docs/agent-workspace.md).
+
 ## Existing structured-build workflow
 
 The earlier phase/step/BOM/human-task pipeline remains in `pipeline.js` and under

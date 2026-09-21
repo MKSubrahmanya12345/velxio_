@@ -298,6 +298,53 @@ async def test_mantle_drops_json_mode_when_the_gateway_rejects_it(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_mantle_drops_json_mode_on_operation_not_allowed(monkeypatch):
+    """The other gateway phrasing of the same rejection: a bare 400
+    'Operation not allowed' that never names response_format. The keyword
+    match used to miss it, so EVERY Mantle call paid the 400 again — the exact
+    'Bedrock error: 400 Operation not allowed' users hit on these deployments.
+    """
+    rejected = _FakeResponse({"error": {"message": "Operation not allowed"}}, status_code=400,
+                             text='{"error":{"message":"Operation not allowed"}}')
+    sent: list[dict] = []
+    _install_fake_client(monkeypatch, [rejected, _completion('{"summary":"ok","plan":[]}')], sent)
+    monkeypatch.setattr(service, "_mantle_headers", lambda *a: {"Authorization": "Bearer t"})
+    monkeypatch.setattr(service, "_MANTLE_JSON_MODE", True)
+    proposal = await service._propose_once_mantle([{"role": "user", "content": "hi"}], KIMI)
+    assert proposal.summary == "ok"
+    assert len(sent) == 2
+    assert json.loads(sent[0]["content"])["response_format"] == {"type": "json_object"}
+    assert "response_format" not in json.loads(sent[1]["content"])
+    assert service._MANTLE_JSON_MODE is False
+
+
+@pytest.mark.asyncio
+async def test_mantle_persistent_400_names_the_checks(monkeypatch):
+    """After the JSON-mode drop still fails, the error says what to check —
+    without echoing the provider body."""
+    body = _FakeResponse({}, status_code=400, text='{"message":"Operation not allowed"}')
+    sent: list[dict] = []
+    _install_fake_client(monkeypatch, [body, body], sent)
+    monkeypatch.setattr(service, "_mantle_headers", lambda *a: {"Authorization": "Bearer t"})
+    monkeypatch.setattr(service, "_MANTLE_JSON_MODE", True)
+    with pytest.raises(service.ProviderError) as exc:
+        await service._propose_once_mantle([{"role": "user", "content": "hi"}], KIMI)
+    message = str(exc.value)
+    assert "bedrock-mantle" in message and "eu-north-1" in message
+    assert "Operation not allowed" not in message  # the body is never echoed
+
+
+def test_kimi_variants_route_to_mantle_not_converse():
+    """Converse answers 400 'Operation not allowed' for Moonshot ids; every
+    kimi/moonshot spelling must pick the Mantle path, not just one literal."""
+    assert service._is_mantle_model("moonshotai.kimi-k2.5")
+    assert service._is_mantle_model("  MOONSHOTAI.KIMI-K2.5-TURBO ")
+    assert service._is_mantle_model("kimi-k2.5")
+    assert not service._is_mantle_model("anthropic.claude-sonnet-4")
+    assert not service._is_mantle_model("amazon.nova-pro-v1:0")
+
+
+@pytest.mark.asyncio
 async def test_converse_path_salvages_too(monkeypatch):
     async def fake_converse(*args, **kwargs):
         return UNESCAPED, {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}, "end_turn"

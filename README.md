@@ -58,6 +58,8 @@ programmed Arduino Uno simulation, then make follow-up edits with checkpoints an
 undo. Supports LEDs, resistors, buttons, potentiometers, and buzzers in this first
 release. Model integration is **opt-in** and server-side; see
 [setup, supported scope, and testing instructions](docs/agent-workspace.md).
+An optional [Forge](forge/README.md) memory layer can govern each agent turn with JEV-reviewed
+project rules; toggle it in the agent settings panel (`FORGE_ENABLED` server-side).
 
 ## Try it now
 

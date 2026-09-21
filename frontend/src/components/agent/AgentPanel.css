@@ -898,3 +898,25 @@
     animation: none;
   }
 }
+
+/* Forge project memory (JEV) — settings block + inline note */
+.agent-forge-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  margin: 8px 0 4px;
+  cursor: pointer;
+}
+.agent-forge-toggle input {
+  accent-color: #58a6ff;
+}
+.agent-forge-memory summary {
+  cursor: pointer;
+  font-size: 11px;
+  margin: 6px 0;
+}
+.agent-forge-memory p {
+  margin: 4px 0;
+  font-size: 11px;
+}

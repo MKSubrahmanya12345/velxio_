@@ -198,3 +198,7 @@ frontend/public/firmware/esp32*-drom.bin
 
 # Local Python environments (including agent development/tests)
 .venv/
+
+# Forge bridge runtime state (agent memory toggle, session map, spawned server log)
+backend/data/forge_state.json
+backend/data/forge_server.log
