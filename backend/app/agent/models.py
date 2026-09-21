@@ -131,16 +131,65 @@ class Project(StrictModel):
         pins_by_id = {p.id: p.pins for p in self.components}
         if self.board:
             pins_by_id[self.board.id] = catalog.board_pins()
+        by_id = {p.id: p for p in self.components}
         for wire in self.wires:
             for end in (wire.start, wire.end):
                 known = pins_by_id.get(end.componentId)
-                if known is None or end.pinName not in known:
-                    raise ValueError(f"Invalid endpoint {end.componentId}:{end.pinName}")
+                resolved = None if known is None else catalog.resolve_pin(known, end.pinName)
+                if resolved is None:
+                    # A pin that names nothing is a real error, but the error has
+                    # to carry the pin list (and the variant that would make the
+                    # name legal) or every repair attempt is a guess.
+                    raise ValueError(endpoint_error(end, known, by_id.get(end.componentId)))
+                if resolved != end.pinName:
+                    # Deterministic repair of an obvious misspelling, the same way
+                    # the JSON coercers repair a shape slip: the model meant the
+                    # pin that exists, and the canvas only has that spelling.
+                    end.pinName = resolved
             if wire.start == wire.end:
                 raise ValueError("A wire must connect two different pins")
         if sum(len(f.content) for f in self.files) > 80000:
             raise ValueError("Project source too large")
         return self
+
+
+def endpoint_error(end: "Endpoint", known: list[str] | None, part: "Part | None") -> str:
+    """Why an endpoint was rejected, with the pins the model should have used."""
+    if known is None:
+        return (f"Invalid endpoint {end.componentId}:{end.pinName} — no component or board with "
+                f"id {end.componentId!r} in this project. Use an existing id, or upsert that "
+                "component in the same patch.")
+    label = f"{part.spec.name} ({part.metadataId})" if part is not None else "the board"
+    message = (f"Invalid endpoint {end.componentId}:{end.pinName} — {label} has pins: "
+               + ", ".join(str(pin) for pin in known) + ".")
+    if part is not None:
+        # A pin that exists only in a property variant (DIG1 needs digits>1, the
+        # I2C lcd's SDA needs pins="i2c") is a one-line fix, not a guessing game.
+        variants = [variant for variant in part.spec.pin_variants
+                    if catalog.resolve_pin(variant.get("pins") or (), end.pinName)]
+        if variants:
+            settings = " or ".join(
+                "{" + ", ".join(f"{key}={value}" for key, value in variant["when"].items()) + "}"
+                for variant in variants[:2])
+            message += (f" {end.pinName} only exists with properties {settings} — this instance "
+                        f"has {part.properties or 'no properties'}.")
+    return message
+
+
+def describe_error(exc: BaseException, limit: int = 8) -> str:
+    """One actionable line per failure, instead of pydantic's input dump.
+
+    `str(ValidationError)` embeds the offending input — for a rejected patch
+    that is the whole project, firmware included — so the line that matters
+    ("it has pins 1, 2") is buried and the repair prompt has nothing to act on.
+    """
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return str(exc)
+    lines = [f"- {'.'.join(str(part) for part in item.get('loc') or ()) or 'patch'}: "
+             f"{str(item.get('msg') or 'invalid').replace('Value error, ', '')}"
+             for item in errors()[:limit]]
+    return "\n".join(lines) or str(exc)
 
 
 class Patch(StrictModel):

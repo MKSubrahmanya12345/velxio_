@@ -16,13 +16,13 @@ from app.agent import catalog
 from app.agent.analysis import analyse
 from app.agent.models import (
     BOARD_CAPABILITIES,
-    PINS,
     Board,
     Connection,
     Endpoint,
     Part,
     Project,
     Source,
+    describe_error,
     validate_electrical,
     validate_includes,
 )
@@ -131,9 +131,10 @@ def to_agent_project(circuit: dict[str, Any], files: list[dict[str, str]] | None
     try:
         project = Project(board=Board(id=board), components=parts, wires=wires, files=sources)
     except ValidationError as exc:
-        hard_errors.append(
-            f"Invalid circuit (unknown pin name or endpoint?): {exc}".replace("\n", " ")
-            + " Valid pin names: " + ", ".join(PINS.get("arduino-uno", [])))
+        # describe_error keeps the actionable line ("r1 has pins: 1, 2"); a raw
+        # ValidationError repr embeds the whole circuit and buries it.
+        hard_errors.append(f"Invalid circuit: {describe_error(exc)}"
+                           + " Board pin names: " + ", ".join(catalog.board_pins()))
         return None, notes, hard_errors
     return project, notes, hard_errors
 
@@ -169,5 +170,5 @@ def validate_circuit(circuit: dict[str, Any], files: list[dict[str, str]] | None
             errors.append(f"includes: {exc}")
 
     return {"valid": not errors, "errors": errors, "warnings": warnings, "notes": notes,
-            "pins": PINS.get("arduino-uno", []),
+            "pins": catalog.board_pins(),
             "capabilities": BOARD_CAPABILITIES.get("arduino-uno", {})}
