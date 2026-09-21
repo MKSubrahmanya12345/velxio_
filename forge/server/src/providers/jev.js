@@ -22,6 +22,7 @@ function typesafeJev(cfg) {
     };
     const res = await fetch(`${cfg.jev.baseUrl}/v1/systemone`, {
       method: 'POST',
+      signal: AbortSignal.timeout(60000),
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${cfg.jev.apiKey}`,

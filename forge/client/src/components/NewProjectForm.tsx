@@ -22,12 +22,14 @@ export function NewProjectForm({ onCreated }: { onCreated: (p: Project) => void 
     setBusy(true);
     setError('');
     try {
-      const r = await api.create(goal.trim(), {
+      const r = await api.createProject(goal.trim(), {
         skill,
         time,
         budget_usd: budget ? Number(budget) : null,
       });
-      onCreated(r.project);
+      const c = r.conversation;
+      if (!c.projectState) throw new Error(r.response.content || 'No build plan was created. Try clarifying your goal.');
+      onCreated({ id: c.id, createdAt: c.createdAt, updatedAt: c.updatedAt, state: c.projectState });
     } catch (err) {
       setError(String((err as Error).message));
     } finally {

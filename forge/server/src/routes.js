@@ -1,11 +1,43 @@
+import { runMemoryTurn } from './memory/turn.js';
 // Forge — REST API (chat-first + legacy compatibility)
 
 import { Router } from 'express';
-import { synthesizeChatProject, handleChatMessage, synthesizeProject, handleMessage } from './pipeline.js';
-import { makeConversation, makeProject, nowIso, log } from './schema.js';
+import { synthesizeChatProject, handleChatMessage } from './pipeline.js';
+import { makeConversation, nowIso, log } from './schema.js';
 
 export function createRouter(deps) {
   const r = Router();
+  const busy = new Set();
+  const withLock = async (id, work) => {
+    if (busy.has(id)) throw Object.assign(new Error('A turn is already running for this project. Wait for it to finish.'), { status: 409 });
+    busy.add(id);
+    try { return await work(); } finally { busy.delete(id); }
+  };
+  const validateMessage = value => {
+    if (typeof value !== 'string' || !value.trim() || value.length > 12000) throw Object.assign(new Error('Message must contain 1–12,000 characters.'), { status: 400 });
+    return value.trim();
+  };
+  // The ordinary JSON API remains available. The UI opts into streamed progress;
+  // no draft prose is sent before JEV review and the final result is persisted first.
+  const respondToTurn = async (req, res, conv, message, create = false) => {
+    const streamed = (req.get('accept') || '').includes('application/x-ndjson');
+    if (streamed) {
+      res.status(create ? 201 : 200).set({ 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
+      res.flushHeaders();
+    }
+    const write = payload => { if (!res.destroyed) res.write(JSON.stringify(payload) + '\n'); };
+    try {
+      const result = await runMemoryTurn(deps, conv, message, event => { if (streamed) write({ type: 'progress', event }); });
+      if (create) await deps.store.createConversation(result.conversation);
+      else await deps.store.saveConversation(result.conversation);
+      if (streamed) { write({ type: 'result', result }); res.end(); }
+      else res.status(create ? 201 : 200).json(result);
+    } catch (error) {
+      if (!streamed) throw error;
+      write({ type: 'error', error: error.message || 'Turn failed. No changes were saved.' });
+      res.end();
+    }
+  };
 
   r.get('/api/health', (req, res) => {
     res.json({
@@ -17,7 +49,7 @@ export function createRouter(deps) {
         planner: deps.cfg.planner.provider,
         store: deps.cfg.db.kind,
       },
-      mode: 'chat-first, human as tool',
+      mode: 'memory-first, JEV-governed generation',
     });
   });
 
@@ -31,14 +63,12 @@ export function createRouter(deps) {
 
   r.post('/api/chat', async (req, res, next) => {
     try {
-      const goal = String(req.body?.goal || req.body?.message || '').trim();
-      if (!goal) return res.status(400).json({ error: 'goal or message is required — e.g. "I wanna build an MP3 player"' });
-
+      const goal = validateMessage(req.body?.goal || req.body?.message);
       const conv = makeConversation({ title: goal.slice(0, 60) });
-      // If goal looks like build request, directly synthesize
-      const { conversation, response, decisions } = await synthesizeChatProject(deps, conv, goal, req.body?.constraints || {});
-      await deps.store.createConversation(conversation);
-      res.status(201).json({ conversation, response, decisions });
+      const extra = req.body?.constraints;
+      if (extra !== undefined && (!extra || typeof extra !== 'object' || Array.isArray(extra))) return res.status(400).json({ error: 'constraints must be an object' });
+      const message = extra && Object.keys(extra).length ? validateMessage(`${goal}\nAdditional user-supplied constraints: ${JSON.stringify(extra)}`) : goal;
+      await respondToTurn(req, res, conv, message, true);
     } catch (e) { next(e); }
   });
 
@@ -58,23 +88,26 @@ export function createRouter(deps) {
 
   r.delete('/api/chat/:id', async (req, res, next) => {
     try {
-      if (deps.store.removeConversation) await deps.store.removeConversation(req.params.id);
-      else await deps.store.remove(req.params.id);
-      res.json({ ok: true });
+      await withLock(req.params.id, async () => {
+        if (deps.store.removeConversation) await deps.store.removeConversation(req.params.id);
+        else await deps.store.remove(req.params.id);
+        res.json({ ok: true });
+      });
     } catch (e) { next(e); }
   });
 
   r.post('/api/chat/:id/messages', async (req, res, next) => {
     try {
-      let conv = deps.store.getConversation ? await deps.store.getConversation(req.params.id) : null;
-      if (!conv) {
-        const proj = await deps.store.get(req.params.id);
-        if (!proj) return res.status(404).json({ error: 'conversation not found' });
-        conv = makeConversation({ id: proj.id, createdAt: proj.createdAt, updatedAt: proj.updatedAt, title: proj.state.goal, projectState: proj.state, messages: [] });
-      }
-      const { conversation, response, decisions } = await handleChatMessage(deps, conv, req.body || {});
-      await deps.store.saveConversation(conversation);
-      res.json({ conversation, response, decisions });
+      const message = validateMessage(req.body?.text);
+      await withLock(req.params.id, async () => {
+        let conv = deps.store.getConversation ? await deps.store.getConversation(req.params.id) : null;
+        if (!conv) {
+          const proj = await deps.store.get(req.params.id);
+          if (!proj) return res.status(404).json({ error: 'conversation not found' });
+          conv = makeConversation({ id: proj.id, createdAt: proj.createdAt, updatedAt: proj.updatedAt, title: proj.state.goal, projectState: proj.state, messages: [] });
+        }
+        await respondToTurn(req, res, conv, message);
+      });
     } catch (e) { next(e); }
   });
 
@@ -112,48 +145,56 @@ export function createRouter(deps) {
 
   r.delete('/api/projects/:id', async (req, res, next) => {
     try {
-      if (deps.store.removeConversation) await deps.store.removeConversation(req.params.id);
-      await deps.store.remove(req.params.id);
-      res.json({ ok: true });
+      await withLock(req.params.id, async () => {
+        if (deps.store.removeConversation) await deps.store.removeConversation(req.params.id);
+        await deps.store.remove(req.params.id);
+        res.json({ ok: true });
+      });
     } catch (e) { next(e); }
   });
 
   r.post('/api/projects/:id/messages', async (req, res, next) => {
     try {
-      let conv = deps.store.getConversation ? await deps.store.getConversation(req.params.id) : null;
-      if (!conv) {
-        const proj = await deps.store.get(req.params.id);
-        if (!proj) return res.status(404).json({ error: 'project not found' });
-        conv = makeConversation({ id: proj.id, createdAt: proj.createdAt, updatedAt: proj.updatedAt, title: proj.state.goal, projectState: proj.state, messages: [] });
-      }
-      const { conversation, response, decisions } = await handleChatMessage(deps, conv, req.body || {});
-      await deps.store.saveConversation(conversation);
-      const project = { id: conversation.id, createdAt: conversation.createdAt, updatedAt: conversation.updatedAt, state: conversation.projectState };
-      res.json({ project, response: { text: response.content, suggestions: [] }, decisions, conversation });
+      await withLock(req.params.id, async () => {
+        let conv = deps.store.getConversation ? await deps.store.getConversation(req.params.id) : null;
+        if (!conv) {
+          const proj = await deps.store.get(req.params.id);
+          if (!proj) return res.status(404).json({ error: 'project not found' });
+          conv = makeConversation({ id: proj.id, createdAt: proj.createdAt, updatedAt: proj.updatedAt, title: proj.state.goal, projectState: proj.state, messages: [] });
+        }
+        const { conversation, response, decisions } = conv.memory?.revision
+          ? await runMemoryTurn(deps, conv, validateMessage(req.body?.text))
+          : await handleChatMessage(deps, conv, req.body || {});
+        await deps.store.saveConversation(conversation);
+        const project = { id: conversation.id, createdAt: conversation.createdAt, updatedAt: conversation.updatedAt, state: conversation.projectState };
+        res.json({ project, response: { text: response.content, suggestions: [] }, decisions, conversation });
+      });
     } catch (e) { next(e); }
   });
 
   r.post('/api/projects/:id/inventory', async (req, res, next) => {
     try {
-      let conv = deps.store.getConversation ? await deps.store.getConversation(req.params.id) : null;
-      if (!conv) {
-        const project = await deps.store.get(req.params.id);
-        if (!project) return res.status(404).json({ error: 'project not found' });
-        conv = makeConversation({ id: project.id, createdAt: project.createdAt, updatedAt: project.updatedAt, title: project.state.goal, projectState: project.state, messages: [] });
-      }
-      const items = Array.isArray(req.body?.items) ? req.body.items : [];
-      if (!conv.projectState) return res.status(400).json({ error: 'no project state yet — create a plan first' });
-      for (const it of items) {
-        const name = String(it?.name || '').trim();
-        if (!name) continue;
-        conv.projectState.inventory.push({ id: crypto.randomUUID(), name, note: it.note ? String(it.note) : undefined });
-      }
-      if (items.length) {
-        log(conv.projectState, 'system', `Inventory updated: ${items.map((i) => i.name).filter(Boolean).join(', ')}.`);
-        conv.updatedAt = nowIso();
-      }
-      await deps.store.saveConversation(conv);
-      res.json({ id: conv.id, createdAt: conv.createdAt, updatedAt: conv.updatedAt, state: conv.projectState, conversation: conv });
+      await withLock(req.params.id, async () => {
+        let conv = deps.store.getConversation ? await deps.store.getConversation(req.params.id) : null;
+        if (!conv) {
+          const project = await deps.store.get(req.params.id);
+          if (!project) return res.status(404).json({ error: 'project not found' });
+          conv = makeConversation({ id: project.id, createdAt: project.createdAt, updatedAt: project.updatedAt, title: project.state.goal, projectState: project.state, messages: [] });
+        }
+        const items = Array.isArray(req.body?.items) ? req.body.items : [];
+        if (!conv.projectState) return res.status(400).json({ error: 'no project state yet — create a plan first' });
+        for (const it of items) {
+          const name = String(it?.name || '').trim();
+          if (!name) continue;
+          conv.projectState.inventory.push({ id: crypto.randomUUID(), name, note: it.note ? String(it.note) : undefined });
+        }
+        if (items.length) {
+          log(conv.projectState, 'system', `Inventory updated: ${items.map((i) => i.name).filter(Boolean).join(', ')}.`);
+          conv.updatedAt = nowIso();
+        }
+        await deps.store.saveConversation(conv);
+        res.json({ id: conv.id, createdAt: conv.createdAt, updatedAt: conv.updatedAt, state: conv.projectState, conversation: conv });
+      });
     } catch (e) { next(e); }
   });
 

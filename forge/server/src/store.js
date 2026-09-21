@@ -3,7 +3,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { normalizeProject, normalizeConversation, makeConversation } from './schema.js';
+import { normalizeProject, normalizeConversation } from './schema.js';
 
 export async function createStore(cfg) {
   const store = cfg.db.kind === 'mongo' ? new MongoStore(cfg.db.mongoUri) : new FileStore(cfg.db.dataFile);
@@ -18,6 +18,7 @@ export class FileStore {
     this.data = {}; // conversations
     this.projects = {}; // legacy
     this.listOrder = [];
+    this.writeQueue = Promise.resolve();
   }
 
   async init() {
@@ -47,105 +48,101 @@ export class FileStore {
         .filter(Boolean);
       // Deduplicate, conversations first
       this.listOrder = [...new Set(this.listOrder)];
-    } catch {
-      // first run
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error; // Never reset unreadable/corrupt project memory.
     }
   }
 
-  async _persist() {
-    const dir = path.dirname(this.file);
-    await fs.promises.mkdir(dir, { recursive: true });
-    const tmp = this.file + '.tmp';
-    await fs.promises.writeFile(tmp, JSON.stringify({ conversations: this.data, projects: this.projects, listOrder: this.listOrder }, null, 2));
-    await fs.promises.rename(tmp, this.file);
+  async _commit(update) {
+    // One file transaction at a time. Publish the new in-memory state only after
+    // its atomic rename succeeds, so a failed save cannot leak uncommitted rules.
+    const write = this.writeQueue.catch(() => {}).then(async () => {
+      const next = { data: { ...this.data }, projects: { ...this.projects }, listOrder: [...this.listOrder] };
+      const result = update(next);
+      await fs.promises.mkdir(path.dirname(this.file), { recursive: true });
+      const tmp = this.file + '.tmp';
+      await fs.promises.writeFile(tmp, JSON.stringify({ conversations: next.data, projects: next.projects, listOrder: next.listOrder }, null, 2));
+      await fs.promises.rename(tmp, this.file);
+      Object.assign(this, next);
+      return result;
+    });
+    this.writeQueue = write;
+    return write;
   }
 
-  // ── Conversation API ────────────────────────────────────────────────────
   async createConversation(conv) {
-    const normalized = normalizeConversation(conv);
-    if (!normalized) throw new Error('invalid conversation');
-    this.data[normalized.id] = normalized;
-    this.listOrder = [normalized.id, ...this.listOrder.filter((id) => id !== normalized.id)];
-    await this._persist();
-    return normalized;
+    return this.saveConversation(conv);
   }
 
   async getConversation(id) {
-    return this.data[id] || null;
+    return this.data[id] ? normalizeConversation(JSON.parse(JSON.stringify(this.data[id]))) : null;
   }
 
   async saveConversation(conv) {
-    const normalized = normalizeConversation(conv, conv?.id);
+    const normalized = normalizeConversation(JSON.parse(JSON.stringify(conv)), conv?.id);
     if (!normalized) throw new Error('invalid conversation');
-    this.data[normalized.id] = normalized;
-    if (!this.listOrder.includes(normalized.id)) this.listOrder.unshift(normalized.id);
-    await this._persist();
-    return normalized;
+    return this._commit(next => {
+      next.data[normalized.id] = normalized;
+      next.listOrder = [normalized.id, ...next.listOrder.filter(id => id !== normalized.id)];
+      return normalized;
+    });
   }
 
   async listConversations() {
-    return this.listOrder.map((id) => this.data[id]).filter(Boolean);
+    return Promise.all(this.listOrder.filter(id => this.data[id]).map(id => this.getConversation(id)));
   }
 
   async removeConversation(id) {
-    delete this.data[id];
-    this.listOrder = this.listOrder.filter((x) => x !== id);
-    await this._persist();
+    return this.remove(id);
   }
 
-  // ── Legacy Project API (for /api/projects) ──────────────────────────────
+  // Legacy Project API: preserve conversation memory when updating a plan.
   async create(project) {
     const normalized = normalizeProject(project);
     if (!normalized) throw new Error('invalid project');
-    this.projects[normalized.id] = normalized;
-    // Also mirror as conversation
-    const conv = normalizeConversation(normalized);
-    if (conv) {
-      this.data[conv.id] = conv;
-      this.listOrder = [conv.id, ...this.listOrder.filter((id) => id !== conv.id)];
-    }
-    await this._persist();
-    return normalized;
+    return this._commit(next => {
+      next.projects[normalized.id] = normalized;
+      const conv = normalizeConversation(normalized);
+      if (conv) next.data[conv.id] = conv;
+      next.listOrder = [normalized.id, ...next.listOrder.filter(id => id !== normalized.id)];
+      return normalized;
+    });
   }
 
   async get(id) {
-    if (this.data[id]) return { id: this.data[id].id, createdAt: this.data[id].createdAt, updatedAt: this.data[id].updatedAt, state: this.data[id].projectState };
-    return this.projects[id] || null;
+    const conv = await this.getConversation(id);
+    if (conv) return { id: conv.id, createdAt: conv.createdAt, updatedAt: conv.updatedAt, state: conv.projectState };
+    return this.projects[id] ? JSON.parse(JSON.stringify(this.projects[id])) : null;
   }
 
   async save(project) {
     const normalized = normalizeProject(project, project?.id);
     if (!normalized) throw new Error('invalid project');
-    this.projects[normalized.id] = normalized;
-    const conv = this.data[normalized.id];
-    if (conv) {
-      conv.projectState = normalized.state;
-      conv.updatedAt = normalized.updatedAt;
-      this.data[normalized.id] = conv;
-    }
-    if (!this.listOrder.includes(normalized.id)) this.listOrder.unshift(normalized.id);
-    await this._persist();
-    return normalized;
+    return this._commit(next => {
+      next.projects[normalized.id] = normalized;
+      const conv = next.data[normalized.id];
+      if (conv) next.data[normalized.id] = normalizeConversation({ ...conv, projectState: normalized.state, updatedAt: normalized.updatedAt });
+      if (!next.listOrder.includes(normalized.id)) next.listOrder.unshift(normalized.id);
+      return normalized;
+    });
   }
 
   async list() {
-    // Return conversations as projects for backward compat if needed, but prefer conversations
-    const convs = this.listOrder.map((id) => this.data[id]).filter(Boolean);
-    if (convs.length) {
-      return convs.map((c) => ({ id: c.id, createdAt: c.createdAt, updatedAt: c.updatedAt, state: c.projectState || { goal: c.title, phases: [], bom: [], acceptance: [], status: 'active', current: {}, inventory: [], log: [], skill: {}, safetyAcks: {}, counters: c.counters, confidence: {}, proposal: null } }));
-    }
-    return this.listOrder.map((id) => this.projects[id]).filter(Boolean);
+    const convs = await this.listConversations();
+    if (convs.length) return convs.map(c => ({ id: c.id, createdAt: c.createdAt, updatedAt: c.updatedAt, state: c.projectState || { goal: c.title, phases: [], bom: [], acceptance: [], status: 'active', current: {}, inventory: [], log: [], skill: {}, safetyAcks: {}, counters: c.counters, confidence: {}, proposal: null } }));
+    return this.listOrder.map(id => this.projects[id]).filter(Boolean);
   }
 
   async remove(id) {
-    delete this.data[id];
-    delete this.projects[id];
-    this.listOrder = this.listOrder.filter((x) => x !== id);
-    await this._persist();
+    return this._commit(next => {
+      delete next.data[id];
+      delete next.projects[id];
+      next.listOrder = next.listOrder.filter(x => x !== id);
+    });
   }
 
-  // Unified aliases
   async listProjects() { return this.list(); }
+
 }
 
  // ── Mongo store ─────────────────────────────────────────────────────────────

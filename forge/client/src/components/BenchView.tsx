@@ -27,9 +27,10 @@ export function BenchView({
     setBusy(true);
     try {
       const r = await api.message(project.id, { text, chip });
-      setLastResponse(r.response);
+      setLastResponse({ text: r.response.content, suggestions: [] });
       setLastDecisions(r.decisions);
-      onProject(r.project);
+      const c = r.conversation;
+      if (c.projectState) onProject({ id: c.id, createdAt: c.createdAt, updatedAt: c.updatedAt, state: c.projectState });
     } catch (e) {
       setLastResponse({ text: `Request failed: ${String((e as Error).message)}`, suggestions: [] });
     } finally {
