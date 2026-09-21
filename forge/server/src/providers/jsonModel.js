@@ -48,6 +48,12 @@ export function createJsonModel(cfg, { registry, emit, operation = 'generate', f
     if (!res.ok) {
       let detail = '';
       try { detail = ` — ${(await res.text()).slice(0, 500)}`; } catch { /* body already consumed or unreadable */ }
+      // Same wall as the bedrock planner: Converse answers 400 "Operation not
+      // allowed" for Mantle-only ids (kimi/moonshot) — say so instead of
+      // leaving the raw body as the whole diagnosis.
+      if (cfg.planner.provider === 'bedrock' && res.status === 400 && /not allowed/i.test(detail)) {
+        throw new Error(`Bedrock Converse does not serve "${cfg.bedrock?.model || cfg.planner.model}" in ${cfg.bedrock?.region || 'the configured region'} (HTTP 400). Kimi/Moonshot models are Mantle-gateway-only and unsupported by Forge — pick a Converse-served id (anthropic.claude-*, amazon.nova-*). No project changes were saved.`);
+      }
       throw new Error(`Generation provider returned HTTP ${res.status}${detail}. No project changes were saved.`);
     }
     const data = await res.json();

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Bot,
+  Brain,
   Check,
   ChevronRight,
   Circle,
@@ -26,7 +27,7 @@ import { useProjectStore } from '../../store/useProjectStore';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
 import { CATALOG_SIZE, PLACEABLE_SIZE } from '../../agent/catalog';
 import { useAgentJournal, type Revision } from '../../agent/journal';
-import { runAgent, sendFeedback as sendFeedbackApi } from '../../agent/runner';
+import { forgeSession, runAgent, sendFeedback as sendFeedbackApi } from '../../agent/runner';
 import {
   assertFresh,
   captureWorkspace,
@@ -57,6 +58,34 @@ async function fetchAgentStatus(signal?: AbortSignal): Promise<Status> {
   if (!response.ok)
     throw new Error('Agent backend is unavailable. Start the API server and retry.');
   return response.json();
+}
+
+/** Mirror of GET /agent/forge (public; contains no credentials). */
+interface ForgeStatus {
+  enabled: boolean;
+  live: boolean;
+  autostart: boolean;
+  forge_present: boolean;
+  base_url: string;
+  providers: { jev?: string; planner?: string };
+  sessions: number;
+}
+interface ForgeMemory {
+  enabled: boolean;
+  conversation_id: string | null;
+  notes: { kind: string; status: string; domain?: string; text: string; reason?: string }[];
+  checks?: { stage: string; status: string; label: string }[];
+  error?: string;
+  message?: string;
+}
+async function fetchForgeStatus(signal?: AbortSignal): Promise<ForgeStatus | null> {
+  try {
+    const response = await fetch(`${getApiBase()}/agent/forge`, { signal });
+    if (!response.ok) return null; // endpoint absent (older backend) → no forge UI
+    return (await response.json()) as ForgeStatus;
+  } catch {
+    return null; // fail-open in the UI too
+  }
 }
 
 interface RunRecord {
@@ -127,6 +156,13 @@ export function AgentPanel() {
   // run also accepts mid-run notes and retries.
   const [lastUserPrompt, setLastUserPrompt] = useState('');
   const [lastRunFailed, setLastRunFailed] = useState(false);
+  // Forge project memory (JEV-governed). Purely additive: every path below
+  // degrades to "no forge" when the backend, the toggle or the forge service
+  // is unavailable, exactly like the server-side fail-open contract.
+  const [forge, setForge] = useState<ForgeStatus | null>(null);
+  const [forgeBusy, setForgeBusy] = useState(false);
+  const [forgeNote, setForgeNote] = useState('');
+  const [forgeMemory, setForgeMemory] = useState<ForgeMemory | null>(null);
   const controller = useRef<AbortController | null>(null);
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -159,6 +195,46 @@ export function AgentPanel() {
       /* The records endpoint shares the workspace token; skip if unavailable. */
     }
   }
+  async function checkForge() {
+    setForge(await fetchForgeStatus());
+  }
+  /** Flip the server-side toggle. The bridge persists it and, on enable,
+   * verifies the direct connection to forge (autostarting `node --watch`). */
+  async function toggleForgeMemory(enabled: boolean) {
+    setForgeBusy(true);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(`${getApiBase()}/agent/forge/toggle`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ enabled }),
+      });
+      if (response.ok) setForge((await response.json()) as ForgeStatus);
+      else setForge((await fetchForgeStatus()) ?? forge);
+    } catch {
+      /* toggle is best-effort; the next status poll shows the truth */
+    } finally {
+      setForgeBusy(false);
+    }
+  }
+  async function showForgeMemory() {
+    try {
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(
+        `${getApiBase()}/agent/forge/memory?session=${encodeURIComponent(forgeSession())}`,
+        { headers },
+      );
+      if (response.ok) setForgeMemory((await response.json()) as ForgeMemory);
+      else setForgeMemory({ enabled: false, conversation_id: null, notes: [], message: 'Requires the workspace token.' });
+    } catch {
+      setForgeMemory({ enabled: false, conversation_id: null, notes: [], message: 'Could not reach forge memory.' });
+    }
+  }
+  useEffect(() => {
+    void checkForge();
+  }, []);
   useEffect(() => {
     const abort = new AbortController();
     fetchAgentStatus(abort.signal)
@@ -237,6 +313,17 @@ export function AgentPanel() {
                 + `${event.calls.some((c) => !c.ok) ? ' (some tools failed)' : ''}`,
             );
           if (event.type === 'plan') setPlan(event.plan);
+          if (event.type === 'forge') {
+            const summary = event.summary ?? {};
+            setForgeNote(
+              event.status === 'ok'
+                ? `forge memory · ${Number(summary.active_notes ?? 0)} active note(s) · ${
+                    summary.withheld ? 'draft held by JEV check' : 'JEV-checked'
+                  }`
+                : `forge memory unavailable: ${event.message || 'service offline'} — the agent continues without it`,
+            );
+            void checkForge();
+          }
           if (event.type === 'diagnostic') setDiagnostics((v) => [...v, event.message]);
           if (event.type === 'compile' && !event.success && event.stderr)
             setDiagnostics((v) => [...v, event.stderr]);
@@ -437,6 +524,63 @@ export function AgentPanel() {
               ))}
             </ul>
           )}
+          <div className="agent-section-title">
+            <Brain size={14} /> FORGE · PROJECT MEMORY (JEV)
+          </div>
+          <p className="agent-muted">
+            Opt-in governed memory: the same LLM proposes project notes, JEV (TypeSafe System One)
+            reviews grounding, conflicts and rule changes, and the accepted memory guides every
+            agent run. Forge is a direct connection to the live <code>forge/</code> service — new
+            forge code applies without touching the agent.
+          </p>
+          <label className="agent-forge-toggle">
+            <input
+              type="checkbox"
+              checked={!!forge?.enabled}
+              disabled={forgeBusy || forge === null}
+              onChange={(e) => void toggleForgeMemory(e.target.checked)}
+            />
+            <span>Use forge project memory in agent runs</span>
+          </label>
+          {forge && (
+            <p className="agent-muted">
+              <Circle
+                size={9}
+                style={{ color: forge.live ? '#3fb950' : forge.enabled ? '#d29922' : '#8b949e' }}
+              />{' '}
+              {forge.live
+                ? `connected to ${forge.base_url} · JEV: ${forge.providers.jev ?? 'unknown'} · model: ${forge.providers.planner ?? 'unknown'}`
+                : forge.enabled
+                  ? forge.forge_present
+                    ? `not reachable yet — starting/watching forge/server (node --watch). JEV needs TYPESAFE_API_KEY in forge/server/.env`
+                    : 'forge service is not present at this path — memory turns fail open (agent runs normally)'
+                  : 'disabled — agent runs without project memory'}
+            </p>
+          )}
+          {forge?.enabled && (
+            <button className="agent-secondary" onClick={() => void showForgeMemory()}>
+              {forgeMemory?.notes?.length
+                ? `Refresh memory (${forgeMemory.notes.length} note${forgeMemory.notes.length === 1 ? '' : 's'})`
+                : 'Show active project memory'}
+            </button>
+          )}
+          {forgeMemory && (
+            <details open className="agent-forge-memory">
+              <summary>Project memory {forgeMemory.conversation_id ? `· ${forgeMemory.conversation_id}` : ''}</summary>
+              {forgeMemory.message && <p className="agent-muted">{forgeMemory.message}</p>}
+              {forgeMemory.error && <p className="agent-muted">{forgeMemory.error}</p>}
+              {forgeMemory.notes.map((n, i) => (
+                <p key={i} className="agent-muted">
+                  [{n.status === 'active' ? n.kind : `${n.kind}?`}] {n.text}
+                </p>
+              ))}
+              {(forgeMemory.checks ?? []).slice(-3).map((c, i) => (
+                <p key={`c${i}`} className="agent-muted">
+                  JEV · {c.stage}: {c.label}
+                </p>
+              ))}
+            </details>
+          )}
           <button className="agent-secondary" onClick={() => void checkStatus()}>
             Check connection
           </button>
@@ -447,7 +591,8 @@ export function AgentPanel() {
               AGENT_API_KEY=your-groq-api-key{'\n'}AGENT_MODEL=openai/gpt-oss-120b{'\n'}
               AGENT_GEMINI_API_KEY=your-google-ai-studio-key{'\n'}AGENT_GEMINI_MODEL=gemini-2.5-flash{'\n'}
               BEDROCK_MODEL_ID=moonshotai.kimi-k2.5{'\n'}AWS_REGION=eu-north-1{'\n'}BEDROCK_API_KEY=your-mantle-key{'\n'}
-              AGENT_ACCESS_TOKEN=your-private-token
+              AGENT_ACCESS_TOKEN=your-private-token{'\n'}
+              FORGE_ENABLED=true{'\n'}FORGE_BASE_URL=http://127.0.0.1:4321{'\n'}FORGE_AUTOSTART=true
             </pre>
             <p>
               Set these in backend/.env and restart the API. OpenCode (the
@@ -576,6 +721,11 @@ export function AgentPanel() {
                   Your workspace stays editable. Conflicting changes won’t be overwritten.
                 </small>
               </div>
+            )}
+            {!busy && forgeNote && (
+              <p className="agent-muted" role="status">
+                <Brain size={12} /> {forgeNote}
+              </p>
             )}
             {diagnostics.length > 0 && (
               <details className="agent-diagnostics" open={busy}>

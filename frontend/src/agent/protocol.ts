@@ -162,6 +162,18 @@ export const eventSchema = z.discriminatedUnion('type', [
     expectations: expectationsSchema.nullable().optional(),
     ...runId,
   }),
+  // Forge project memory (JEV-governed). Informational only: the run continues
+  // with or without it, so unknown/absent fields must never break the stream.
+  z.object({
+    type: z.literal('forge'),
+    status: z.enum(['ok', 'unavailable']),
+    summary: z
+      .record(z.union([z.string(), z.number(), z.boolean(), z.null()]))
+      .optional()
+      .nullable(),
+    message: z.string().optional(),
+    ...runId,
+  }),
 ]);
 export type AgentEvent = z.infer<typeof eventSchema>;
 

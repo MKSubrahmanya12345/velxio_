@@ -27,6 +27,22 @@ interface ActiveRun {
 }
 let _active: ActiveRun | null = null;
 
+/** Stable id for this browser workspace's forge memory session. The backend
+ * maps it to one Forge conversation, so notes persist across runs and reloads
+ * while different projects/examples stay separate. */
+export function forgeSession(): string {
+  try {
+    let value = localStorage.getItem('velxio.forge.session');
+    if (!value || !/^[a-zA-Z0-9_-]{1,80}$/.test(value)) {
+      value = 'ws-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      localStorage.setItem('velxio.forge.session', value);
+    }
+    return value;
+  } catch {
+    return 'ws-default'; // private mode: one shared session is the safe fallback
+  }
+}
+
 /** Send a mid-run clarification. Silently no-ops if no run is active or if the
  * run has already finished (the server returns 404). */
 export async function sendFeedback(note: string): Promise<boolean> {
@@ -89,6 +105,7 @@ async function requestRun(
       prompt,
       project,
       provider: options.provider,
+      forge_session: forgeSession(),
       messages: messages
         .slice(-12)
         .map((m) => ({ role: m.role, content: m.content.slice(0, 6000) })),

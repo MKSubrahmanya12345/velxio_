@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     AGENT_PROVIDER_RETRIES: int = 2
     # Live Arduino library search from the agent's search_libraries tool.
     AGENT_ALLOW_LIBRARY_SEARCH: bool = False
+    # Forge project memory (JEV-governed) for the agent — a direct connection to
+    # the standalone <repo>/forge service over its own HTTP API. Fail-open: when
+    # forge is unreachable the agent simply runs without memory context. Nothing
+    # is copied from forge, so forge changes take effect live; FORGE_AUTOSTART
+    # spawns `node --watch` on forge/server so its own code edits hot-reload too.
+    # The browser toggle (agent settings) overrides FORGE_ENABLED at runtime.
+    FORGE_ENABLED: bool = True
+    FORGE_BASE_URL: str = "http://127.0.0.1:4321"
+    FORGE_AUTOSTART: bool = True
+    FORGE_SPAWN_WAIT_S: float = 8.0
+    FORGE_TURN_TIMEOUT_S: float = 130.0
 
     # CORS — used by main.py to whitelist the SPA origin during local dev
     # and to build redirect URLs from auth routes in the overlay.
