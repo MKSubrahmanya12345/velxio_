@@ -1,13 +1,19 @@
 import { runMemoryTurn } from './memory/turn.js';
 import { listProviders } from './providers/registry.js';
+import { resolveProviderId } from './providers/catalog.js';
 // Forge — REST API (chat-first + legacy compatibility)
 
 import { Router } from 'express';
 import { synthesizeChatProject, handleChatMessage } from './pipeline.js';
 import { makeConversation, nowIso, log } from './schema.js';
+import { createProviderRouter } from './providerRoutes.js';
 
 export function createRouter(deps) {
   const r = Router();
+  // Provider/key management for the Providers page (see providerRoutes.js).
+  // Mounted only when a registry exists, so hand-built dependency sets
+  // (tests, scripts) keep working without one.
+  if (deps.registry) r.use(createProviderRouter(deps));
   const busy = new Set();
   const withLock = async (id, work) => {
     if (busy.has(id)) throw Object.assign(new Error('A turn is already running for this project. Wait for it to finish.'), { status: 409 });
@@ -18,12 +24,22 @@ export function createRouter(deps) {
     if (typeof value !== 'string' || !value.trim() || value.length > 12000) throw Object.assign(new Error('Message must contain 1–12,000 characters.'), { status: 400 });
     return value.trim();
   };
+  // `provider` is optional. It names either a stored key id or a provider id and
+  // only decides where the failover loop STARTS — every other key stays behind
+  // it as a fallback, so a per-request choice can never disable switching.
   const validateProvider = value => {
     if (!value) return undefined;
     if (typeof value !== 'string' || !value.trim()) throw Object.assign(new Error('provider must be a non-empty string'), { status: 400 });
     const provider = value.trim();
-    if (!listProviders(deps.cfg).some(p => p.id === provider)) {
-      throw Object.assign(new Error(`Generation provider '${provider}' is not configured. Available: ${listProviders(deps.cfg).map(p => p.id).join(', ') || 'none'}.`), { status: 400 });
+    const keys = deps.registry?.entries?.() || [];
+    const known = [
+      ...keys.filter(k => k.enabled).flatMap(k => [k.id, k.provider]),
+      ...listProviders(deps.cfg).map(p => p.id),
+    ];
+    const wanted = resolveProviderId(provider);
+    const ok = known.includes(provider) || (wanted ? known.some(id => resolveProviderId(id) === wanted) : false);
+    if (!ok) {
+      throw Object.assign(new Error(`Generation provider '${provider}' is not configured. Available: ${[...new Set(known)].join(', ') || 'none'}.`), { status: 400 });
     }
     return provider;
   };
@@ -51,23 +67,26 @@ export function createRouter(deps) {
   };
 
   r.get('/api/health', (req, res) => {
+    const registry = deps.registry;
+    const active = registry?.get(registry.activeId) || null;
     res.json({
       ok: true,
       service: 'forge-server',
       time: new Date().toISOString(),
       providers: {
-        jev: deps.cfg.jev.provider,
-        planner: deps.cfg.planner.provider,
+        // What is really configured: 'unconfigured' is reported as such rather
+        // than as a provider name, so a badge can never imply a live model.
+        jev: deps.cfg.jev.provider || 'unconfigured',
+        planner: active ? active.provider : deps.cfg.planner.provider || 'unconfigured',
         store: deps.cfg.db.kind,
       },
+      activeProvider: active
+        ? { id: active.id, provider: active.provider, note: active.note, model: active.model, origin: active.origin }
+        : null,
+      failover: registry
+        ? { ...registry.failover, keys: registry.candidates().length, configured: registry.candidates().length > 0 }
+        : null,
       mode: 'memory-first, JEV-governed generation',
-    });
-  });
-
-  r.get('/api/providers', (req, res) => {
-    res.json({
-      default: deps.cfg.planner.provider,
-      providers: listProviders(deps.cfg),
     });
   });
 

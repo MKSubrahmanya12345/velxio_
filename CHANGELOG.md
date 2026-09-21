@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Forge **Providers** page (`forge/client/src/components/ProvidersView.tsx`): add API keys for
+  Gemini, OpenRouter, AWS Bedrock, Ollama, OpenCode Zen, Groq and any OpenAI-compatible endpoint,
+  each with a model, base URL and a free-text note. Keys are entered and shown in plain text
+  (never masked); any one key can be selected, tested, disabled or deleted. Keys are stored in
+  `forge/server/data/providers.json` (`PROVIDERS_FILE`), and existing `.env` credentials appear as
+  read-only entries that stay in the loop
+- Forge **automatic provider switching**: every generation call walks the selected key, that
+  provider's other keys, then every other provider/key, switching on any error (HTTP status,
+  timeout, unreachable host, malformed answer) and looping 10 rounds before it stops and reports
+  every attempt (`FAILOVER_ENABLED`, `FAILOVER_MAX_ROUNDS`, `FAILOVER_RETRY_REJECTED`). Switches
+  are visible as key stats, a loop-order preview, an attempt log and `provider` events in the turn
+  trace. A request may also name a key or provider (`provider` in the chat body) to choose where
+  the loop starts — it never disables switching
 - Browser flashing seam (`lib/proWebFlash.ts`): the board context menu's
   "Flash to real board" and the FlashModal can now be backed by a Web Serial
   flasher installed at runtime (used by velxio.dev for ESP32-family boards);

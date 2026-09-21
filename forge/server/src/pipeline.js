@@ -14,6 +14,7 @@ import {
   nowIso, makeMessage, makeHumanToolCall, flatSteps, completeHumanToolCall
 } from './schema.js';
 import { runDecision } from './decisions/catalog.js';
+import { createPlanner } from './providers/planner.js';
 import { markStepComplete, advanceStep, skillOutcome, needsAck } from './stateMachine.js';
 
 const INTENT_THRESHOLD = 0.55;
@@ -61,6 +62,15 @@ async function ensureSafetyGate(deps, state, stepRef, decisions) {
   return { stepId: stepRef.step.id, flags: j6.detail.flags, ackRequired: j6.detail.ackRequired };
 }
 
+// Resolve the planner for one request: the named provider leads the loop when
+// one is asked for, otherwise the registry's own order decides.
+function plannerForRequest(deps, provider) {
+  if (!provider) return deps.planner;
+  if (deps.plannerFor) return deps.plannerFor(provider) || deps.planner;
+  if (deps.registry) return createPlanner(deps.cfg, { registry: deps.registry, prefer: provider });
+  return deps.planner;
+}
+
 // ── Chat synthesis: goal -> feasibility -> plan ───────────────────────────────
 
 export async function synthesizeChatProject(deps, conversation, goalText, constraints = {}, provider) {
@@ -95,9 +105,11 @@ export async function synthesizeChatProject(deps, conversation, goalText, constr
     return { conversation, response: msg, decisions, projectState: null };
   }
 
-  // Planner
-  const planner = (provider && deps.plannerFor ? deps.plannerFor(provider) : null) || deps.planner;
-  if (!planner) throw Object.assign(new Error('No generation provider is configured for planning. Set at least one provider key (e.g. OPENCODE_API_KEY, GEMINI_API_KEY, GROQ_API_KEY) in forge/server/.env.'), { status: 400 });
+  // Planner. A requested provider decides where the failover loop starts; every
+  // other registered key stays behind it, so a per-request choice can never
+  // disable switching.
+  const planner = plannerForRequest(deps, provider);
+  if (!planner) throw Object.assign(new Error('No generation provider is configured for planning. Add a key on the Providers page, or set one provider key (GEMINI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY, OPENCODE_API_KEY, OLLAMA_MODEL, LLM_API_KEY, or AWS credentials) in forge/server/.env.'), { status: 400 });
   const rawPlan = await planner(goal, normConstraints, feasibility);
   const plan = sanitizePlan(rawPlan, goal);
 

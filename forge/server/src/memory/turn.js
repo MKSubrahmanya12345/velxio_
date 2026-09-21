@@ -3,7 +3,7 @@ import { createReasoner } from './reasoner.js';
 import { normalizeMemory, normalizeProposals, activeNotes, id, COMMIT_KINDS } from './model.js';
 import { memoryQuestions, outputQuestions, applyReview, evaluateOutput } from './decisions.js';
 import { handleChatMessage } from '../pipeline.js';
-import { unresolvedError } from '../providers/registry.js';
+import { listProviders, unresolvedError } from '../providers/registry.js';
 
 // All work happens on a clone. The route persists only after the guarded turn
 // completes; extraction/generation/provider failures cannot mutate stored state.
@@ -20,14 +20,44 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}, reque
   const userMessage = makeMessage('user', message);
   const events = [];
   const decisions = [];
-  const generator = (provider && deps.reasonerFor ? deps.reasonerFor(provider) : null) || deps.reasoner || createReasoner(deps.cfg);
-  const providers = { generator: provider || deps.cfg.planner.provider, jev: deps.cfg.jev.provider };
+  const registry = deps.registry;
+  // A per-request choice selects the key the loop starts from; without one the
+  // key selected on the Providers page leads.
+  const selected = (provider && registry?.entries?.().find(k => k.id === provider || k.provider === provider))
+    || registry?.get?.(registry.activeId) || null;
+  // What is actually configured, never an assumed provider name.
+  const providers = {
+    generator: selected ? selected.provider : deps.cfg.planner.provider || 'unconfigured',
+    jev: deps.cfg.jev.provider || 'unconfigured',
+  };
   const event = (stage, status, label, extra = {}) => {
-    const item = { id: id('event'), turnId, stage, status, label, at: nowIso(), providers, ...extra };
+    // Snapshot the provider labels: failover updates `providers` mid-turn and an
+    // earlier event must keep naming the provider that produced it.
+    const item = { id: id('event'), turnId, stage, status, label, at: nowIso(), providers: { ...providers }, ...extra };
     events.push(item);
     emit(item);
     return item;
   };
+  // Provider failover is part of the visible trace. The happy path stays quiet:
+  // only switches, failures, and round restarts are reported.
+  const onProvider = info => {
+    if (info.type === 'attempt') {
+      if (info.attempt > 1) event('provider', 'running', `Switched to ${info.label} — attempt ${info.attempt}, round ${info.round}/${info.maxRounds}`, { provider: info });
+      return;
+    }
+    if (info.type === 'error') {
+      event('provider', 'blocked', `${info.label} failed${info.status ? ` (HTTP ${info.status})` : ''} — switching provider/key (round ${info.round}/${info.maxRounds})`, { provider: info });
+      return;
+    }
+    if (info.type === 'round') { event('provider', 'running', info.message, { provider: info }); return; }
+    if (info.type === 'success') {
+      providers.generator = info.provider;
+      if (info.switched) event('provider', 'complete', `Generator answered via ${info.label} after ${info.attempt - 1} failed attempt${info.attempt === 2 ? '' : 's'}`, { provider: info });
+    }
+  };
+  const generator = (provider && deps.reasonerFor ? deps.reasonerFor(provider) : null)
+    || deps.reasoner
+    || createReasoner(deps.cfg, { registry, emit: onProvider, prefer: provider });
   // The raw JEV response is kept: exact failing values beat inferred ones.
   const ask = async (state, questions) => {
     const response = await deps.jev({ state, questions });
@@ -105,12 +135,19 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}, reque
   return { conversation, response, decisions };
 }
 
-// A requested provider must be in the ready set; otherwise the turn is a
-// clear 400 (never a fallback). With no request, the default provider wins.
+// A requested provider must be a stored key or a ready .env provider; otherwise
+// the turn is a clear 400 (never a fallback). With no request, the key selected
+// on the Providers page wins — `runMemoryTurn` then falls back to `cfg.planner`.
 function resolveProvider(deps, requested) {
-  const ready = (deps.cfg?.providers || []).filter((p) => p.ready).map((p) => p.id);
-  if (requested && !ready.includes(requested)) throw Object.assign(new Error(unresolvedError(requested, deps.cfg)), { status: 400 });
-  return requested || deps.cfg?.planner?.provider || '';
+  const want = String(requested || '').trim();
+  if (!want) return '';
+  const keys = deps.registry?.entries?.() || [];
+  const known = [
+    ...keys.filter(k => k.enabled).flatMap(k => [k.id, k.provider]),
+    ...listProviders(deps.cfg).map(p => p.id),
+  ];
+  if (!known.includes(want)) throw Object.assign(new Error(unresolvedError(want, deps.cfg, keys)), { status: 400 });
+  return want;
 }
 
 // A held draft always states the actual blocking reason. Evaluation gaps are

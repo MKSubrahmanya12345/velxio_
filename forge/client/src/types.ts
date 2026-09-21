@@ -154,6 +154,116 @@ export interface Health {
   time: string;
   providers: { jev: string; planner: string; store: string };
   mode?: string;
+  activeProvider?: { id: string; provider: string; note: string; model: string; origin: string } | null;
+  failover?: { enabled: boolean; maxRounds: number; retryRejected: boolean; keys: number; configured: boolean } | null;
+}
+
+// ── Providers page ──────────────────────────────────────────────────────────
+export type ProviderId = 'gemini' | 'openrouter' | 'bedrock' | 'ollama' | 'openai';
+
+export interface ProviderCatalogEntry {
+  id: ProviderId;
+  label: string;
+  short: string;
+  credentialLabel: string;
+  credentialPlaceholder: string;
+  requiresKey: boolean;
+  extraCredentials: { field: string; label: string; required: boolean; placeholder: string }[];
+  defaultModel: string;
+  modelPlaceholder: string;
+  defaultBase: string;
+  baseLabel: string;
+  docs: string;
+}
+
+export interface ProviderKeyStats {
+  calls: number;
+  ok: number;
+  failures: number;
+  consecutiveFailures: number;
+  lastStatus: number | null;
+  lastError: string;
+  lastErrorAt: string | null;
+  lastUsedAt: string | null;
+  lastLatencyMs: number | null;
+}
+
+// Keys are stored and served exactly as typed: `apiKey` is plain text and the
+// UI renders it plainly (never masked) next to its note.
+export interface ProviderKey {
+  id: string;
+  provider: ProviderId;
+  providerLabel: string;
+  note: string;
+  apiKey: string;
+  secret: string;
+  sessionToken: string;
+  region: string;
+  baseUrl: string;
+  model: string;
+  enabled: boolean;
+  origin: 'user' | 'env';
+  createdAt: string;
+  updatedAt: string;
+  stats: ProviderKeyStats;
+}
+
+export interface FailoverSettings {
+  enabled: boolean;
+  maxRounds: number;
+  retryRejected: boolean;
+}
+
+export interface ProviderAttempt {
+  at: string;
+  keyId: string;
+  provider: ProviderId | '';
+  note: string;
+  outcome: 'ok' | 'error';
+  status?: number | null;
+  message?: string;
+  permanent?: boolean;
+  round?: number;
+  attempt?: number;
+  operation?: string;
+  latencyMs?: number | null;
+}
+
+export interface ProvidersState {
+  catalog: ProviderCatalogEntry[];
+  keys: ProviderKey[];
+  activeId: string;
+  active: { id: string; provider: ProviderId; label: string; model: string; note: string } | null;
+  failover: FailoverSettings;
+  order: { id: string; provider: ProviderId; note: string; model: string }[];
+  log: ProviderAttempt[];
+  storage: { file: string };
+  configured: boolean;
+  env: { llm: boolean; bedrock: boolean };
+}
+
+export interface ProviderKeyInput {
+  provider: ProviderId;
+  apiKey?: string;
+  secret?: string;
+  sessionToken?: string;
+  region?: string;
+  baseUrl?: string;
+  model?: string;
+  note?: string;
+  enabled?: boolean;
+}
+
+export interface ProviderTestResult {
+  ok: boolean;
+  keyId: string;
+  provider: ProviderId;
+  model: string;
+  latencyMs: number;
+  reply?: string;
+  status?: number | null;
+  error?: string;
+  state: ProvidersState;
 }
 
 export interface GeneratorInfo {
@@ -163,10 +273,6 @@ export interface GeneratorInfo {
   type: string;
 }
 
-export interface ProvidersInfo {
-  default: string;
-  providers: GeneratorInfo[];
-}
 
 export type NoteKind = 'goal' | 'rule' | 'fact' | 'preference' | 'assumption' | 'suggestion' | 'question';
 export type NoteDomain = 'production' | 'fiction' | 'creative' | 'meta' | 'unknown';
@@ -206,7 +312,7 @@ export interface RuleCheck {
 export interface MemoryEvent {
   id: string;
   turnId: string;
-  stage: 'extract' | 'review' | 'context' | 'generate' | 'check' | 'repair' | 'ready';
+  stage: 'extract' | 'review' | 'context' | 'generate' | 'check' | 'repair' | 'ready' | 'provider';
   status: 'running' | 'complete' | 'blocked';
   label: string;
   at: string;
@@ -220,6 +326,22 @@ export interface MemoryEvent {
   attempt?: number;
   answers?: Record<string, unknown>;
   raw?: unknown;
+  provider?: {
+    type?: string;
+    round?: number;
+    attempt?: number;
+    maxRounds?: number;
+    keyId?: string;
+    provider?: string;
+    label?: string;
+    note?: string;
+    model?: string;
+    status?: number | null;
+    message?: string;
+    permanent?: boolean;
+    latencyMs?: number;
+    switched?: boolean;
+  };
   blocking?: { type: string; noteId?: string; text?: string; value?: number | null; detail?: string }[];
   soft?: RuleCheck[];
 }

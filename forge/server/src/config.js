@@ -62,10 +62,13 @@ export function loadConfig(env = process.env) {
   };
   const bedrockReady = Boolean(bedrock.region && bedrock.accessKeyId && bedrock.secretAccessKey);
 
-  // Named OpenAI-compatible generation providers. `ready` is exactly "has the
-  // credentials/Ollama model needed to make a real request" — never mocked.
+  // Every generation provider Forge can start from, read from the environment.
+  // `ready` is exactly "has the credentials/Ollama model needed to make a real
+  // request" — never mocked. Ready entries are seeded into the key registry as
+  // read-only `.env` keys, so an existing setup works without touching the UI.
+  // Order is the failover preference when no key is selected.
   const strip = (v) => (v || '').replace(/\/$/, '');
-  const providers = [
+  const generators = [
     { id: 'opencode', name: 'OpenCode Zen', type: 'llm', ready: Boolean(env.OPENCODE_API_KEY), apiKey: env.OPENCODE_API_KEY || '', model: env.OPENCODE_MODEL || 'servo', apiBase: strip(env.OPENCODE_BASE || 'https://opencode.ai/zen/v1') },
     { id: 'gemini', name: 'Google Gemini', type: 'llm', ready: Boolean(env.GEMINI_API_KEY), apiKey: env.GEMINI_API_KEY || '', model: env.GEMINI_MODEL || 'gemini-2.0-flash', apiBase: strip(env.GEMINI_BASE || 'https://generativelanguage.googleapis.com/v1beta/openai') },
     { id: 'openrouter', name: 'OpenRouter', type: 'llm', ready: Boolean(env.OPENROUTER_API_KEY), apiKey: env.OPENROUTER_API_KEY || '', model: env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct', apiBase: strip(env.OPENROUTER_BASE || 'https://openrouter.ai/api/v1') },
@@ -80,8 +83,8 @@ export function loadConfig(env = process.env) {
   // ready provider becomes the default.
   const requestedPlanner = (env.PLANNER_PROVIDER || '').toLowerCase();
   const defaultProvider = requestedPlanner
-    ? providers.find((p) => p.id === requestedPlanner && p.ready)
-    : providers.find((p) => p.ready);
+    ? generators.find((p) => p.id === requestedPlanner && p.ready)
+    : generators.find((p) => p.ready);
 
   const planner = {
     provider: defaultProvider ? defaultProvider.id : '',
@@ -90,5 +93,18 @@ export function loadConfig(env = process.env) {
     apiBase: defaultProvider ? defaultProvider.apiBase : strip(env.LLM_API_BASE || 'https://api.openai.com/v1'),
   };
 
-  return { port, db, jev, planner, bedrock, providers, corsOrigin: env.CORS_ORIGIN || '' };
+  // Provider registry (keys added on the Providers page) + failover defaults.
+  // `envDefaults` seeds the registry with the .env credentials above so an
+  // existing setup keeps working and stays visible/editable in the UI.
+  const providers = {
+    dataFile: env.PROVIDERS_FILE || './data/providers.json',
+    failover: {
+      enabled: !['false', '0', 'off'].includes(String(env.FAILOVER_ENABLED || '').toLowerCase()),
+      maxRounds: Math.min(25, Math.max(1, Number(env.FAILOVER_MAX_ROUNDS) || 10)),
+      retryRejected: ['true', '1', 'on'].includes(String(env.FAILOVER_RETRY_REJECTED || '').toLowerCase()),
+    },
+    envDefaults: { planner, bedrock },
+  };
+
+  return { port, db, jev, planner, bedrock, generators, providers, corsOrigin: env.CORS_ORIGIN || '' };
 }

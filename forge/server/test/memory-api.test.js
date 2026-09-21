@@ -10,12 +10,14 @@ import { createJevMock } from './fixtures/jevMock.js';
 import { createPlannerMock } from './fixtures/plannerMock.js';
 import { createDemoReasoner } from './fixtures/demo.js';
 import { FileStore } from '../src/store.js';
+import { createProviderRegistry } from '../src/providers/registry.js';
 
 async function setup(t) {
   const dir = await mkdtemp(join(tmpdir(), 'forge-api-'));
   const cfg = loadConfig({});
   const store = new FileStore(join(dir, 'projects.json')); await store.init();
-  const deps = { cfg, store, jev: createJevMock(), planner: createPlannerMock(), reasoner: createDemoReasoner() };
+  const registry = await createProviderRegistry({ ...cfg, providers: { ...cfg.providers, dataFile: join(dir, 'providers.json') } });
+  const deps = { cfg, store, registry, jev: createJevMock(), planner: createPlannerMock(), reasoner: createDemoReasoner() };
   const app = express(); app.use(express.json()); app.use(createRouter(deps));
   app.use((err, req, res, next) => res.status(err.status || 500).json({ error: err.message }));
   const server = app.listen(0, '127.0.0.1');

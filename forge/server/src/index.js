@@ -1,5 +1,11 @@
 // Forge — server entry. Express app + provider wiring + optional static
 // serving of the built client (production mode: `client/dist`).
+//
+// Providers are resolved lazily. The server boots even when nothing is
+// configured yet — that is the state a fresh install is in, and the Providers
+// page is how credentials get added. An unconfigured provider reports the exact
+// reason on the first call instead of a silent mock; /api/health says what is
+// actually configured.
 
 import express from 'express';
 import cors from 'cors';
@@ -10,30 +16,36 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { createStore } from './store.js';
 import { createJevProvider } from './providers/jev.js';
-import { listProviders, reasonerFor as buildReasoner, plannerFor as buildPlanner } from './providers/registry.js';
+import { createPlanner } from './providers/planner.js';
+import { createReasoner } from './memory/reasoner.js';
+import { createProviderRegistry } from './providers/registry.js';
 import { createRouter } from './routes.js';
 
 const cfg = loadConfig();
 const store = await createStore(cfg);
+const registry = await createProviderRegistry(cfg);
 const counters = { jevCalls: 0, escalations: 0 };
-// Per-provider resolution is lazy; boot never throws for a missing provider,
-// and a turn asking for one is rejected with a clear 400 (no mock fallback).
-const providerCache = new Map();
-const madeBy = (kind) => (provider) => {
-  if (!provider) return null;
-  const key = `${kind}:${provider}`;
-  if (!providerCache.has(key)) {
-    const fn = kind === 'reasoner' ? buildReasoner(cfg, provider) : buildPlanner(cfg, provider);
-    if (fn) providerCache.set(key, fn);
-  }
-  return providerCache.get(key) || null;
-};
+
+// JEV stays a live-only provider. Without credentials the factory throws; keep
+// that exact message for the first call so the UI can show why a turn failed.
+let jev;
+try {
+  jev = createJevProvider(cfg);
+} catch (error) {
+  jev = () => { throw error; };
+  console.warn(`[forge] JEV unavailable at boot: ${error.message}`);
+}
+
 const deps = {
   cfg,
   store,
-  jev: createJevProvider(cfg),
-  reasonerFor: madeBy('reasoner'),
-  plannerFor: madeBy('planner'),
+  registry,
+  jev,
+  planner: createPlanner(cfg, { registry }),
+  // Per-request provider overrides (`provider` in the chat body). They choose
+  // where the failover loop starts; the rest of the keys stay as fallbacks.
+  reasonerFor: provider => createReasoner(cfg, { registry, prefer: provider }),
+  plannerFor: provider => createPlanner(cfg, { registry, prefer: provider }),
   counters,
 };
 
@@ -53,15 +65,16 @@ if (fs.existsSync(distDir)) {
 app.use((err, req, res, next) => {
   console.error('[forge] error:', err.message);
   if (res.headersSent) return next(err);
-  res.status(err.status || 500).json({ error: err.message });
+  res.status(err.status || 500).json({ error: err.message, ...(err.attempts ? { attempts: err.attempts, rounds: err.rounds, maxRounds: err.maxRounds } : {}) });
 });
 
-app.listen(cfg.port, () => {
-  const ready = listProviders(cfg);
+app.listen(cfg.port, '0.0.0.0', () => {
+  const keys = registry.entries();
+  const active = registry.get(registry.activeId);
   console.log(`Velxio Forge server → http://localhost:${cfg.port}`);
-  console.log(`  JEV:        ${cfg.jev.provider} (${cfg.jev.model} @ ${cfg.jev.baseUrl})`);
-  const providers = ready.length ? ready.map((p) => `${p.id} (${p.model})`).join(' · ') : 'none configured';
-  console.log(`  GENERATORS: ${providers}`);
-  console.log(`  DEFAULT:    ${cfg.planner.provider || 'none — pick one in the UI or set a provider key in forge/server/.env'}`);
-  console.log(`  STORE:      ${cfg.db.kind}${cfg.db.kind === 'mongo' ? ' (mongodb)' : ` (${cfg.db.dataFile})`}`);
+  console.log(`  JEV:     ${cfg.jev.provider || 'unconfigured (set TYPESAFE_API_KEY)'}${cfg.jev.provider ? ` (${cfg.jev.model} @ ${cfg.jev.baseUrl})` : ''}`);
+  console.log(`  PROVIDERS: ${keys.length} key${keys.length === 1 ? '' : 's'} registered · active: ${active ? `${active.provider}${active.note ? ` “${active.note}”` : ''}` : 'none'}`);
+  console.log(`  FAILOVER: ${registry.failover.enabled ? `on — loops every provider/key, max ${registry.failover.maxRounds} rounds` : 'off — selected key only'}`);
+  console.log(`  STORE:   ${cfg.db.kind}${cfg.db.kind === 'mongo' ? ' (mongodb)' : ` (${cfg.db.dataFile})`}`);
+  console.log(`  KEYS:    ${registry.file}`);
 });

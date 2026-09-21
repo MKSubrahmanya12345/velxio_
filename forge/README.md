@@ -118,10 +118,13 @@ from **Project memory** on smaller screens.
 ## Try the solo-film example
 
 The Forge server runs **live AI providers only** — there are no mocks in the
-app. JEV must point at TypeSafe and the planner at a real generation model; the
-server refuses to boot without them (see [Real providers](#real-providers)).
-Provider selection is credential-driven: a provider that is not fully configured
-throws instead of silently switching to a fake one.
+app. JEV must point at TypeSafe and generation at a real model; the server boots
+even when neither is configured yet (that is how the
+[Providers page](#providers-page-keys-notes-and-automatic-switching) gets used),
+and a turn then fails with the exact missing credential.
+Provider selection is credential-driven: a provider that is not configured throws
+instead of silently switching to a fake one — while a provider that *is*
+configured and then errors switches to the next key/provider automatically.
 
 1. Start: `I want to make a horror film. Only me, no other actors or crew.`
 2. Inspect the binding solo-production rule and the separate AI suggestion.
@@ -149,15 +152,64 @@ npm install
 npm run dev                 # UI :5174; same-origin /api proxy
 ```
 
-`server/.env` (copy from `server/.env.example`) supplies the credentials;
-`config.js` loads it automatically on import. Vite binds to `0.0.0.0` and accepts
-preview hosts. `VITE_API_PROXY` changes its server-side API target; browser
+`server/.env` (copy from `server/.env.example`) supplies the credentials, or add
+them on the **Providers** page instead; `config.js` loads `.env` automatically on
+import. Vite binds to `0.0.0.0` and accepts preview hosts. `VITE_API_PROXY` changes its server-side API target; browser
 requests stay relative.
+
+### Providers page: keys, notes, and automatic switching
+
+**Providers** in the header opens the key management page.
+
+- Add a key for **Gemini**, **OpenRouter**, **AWS Bedrock**, **Ollama**,
+  **OpenCode Zen**, **Groq**, or any OpenAI-compatible endpoint. Each key carries
+  a model, an optional base URL / region, and a **note** so you can tell two keys
+  for the same provider apart.
+- The key field is a plain text input and saved keys are displayed in plain text
+  with their note — nothing is dotted out or masked. Copy is one click.
+- **Select** any one key: it runs first. The rest stay in the loop as fallbacks.
+- **Test** probes a single credential live (no failover) and reports the reply or
+  the exact HTTP status. **Disable** takes a key out of the loop without deleting
+  it; **Delete** removes it (`.env` entries can be restored).
+- Credentials from `server/.env` appear as read-only `.env` entries — one per
+  ready provider (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`,
+  `OPENCODE_API_KEY`, `OLLAMA_MODEL`, `LLM_API_KEY`, AWS credentials). Their
+  note, model, base URL, and enabled state can be changed in the UI; the secret
+  material stays in `.env`. Bases are normalized to each provider's native API,
+  and `.env` keys take part in the same failover loop as UI-added keys.
+- **Per-chat provider**: the header `MODEL` dropdown picks which key a chat
+  *starts* from (`provider` in the request body). It is a starting point, not a
+  pin — every other key stays behind it, so switching still works. An unknown
+  provider is a 400 that lists what is configured.
+
+**Automatic switching.** Every generation call (memory proposal, response,
+repair, and the legacy planner) walks the loop order: selected key → that
+provider's other keys → every other enabled provider/key. Any error — HTTP
+status, timeout, unreachable host, or a malformed/non-JSON answer — switches to
+the next credential and retries the same prompt. One **round** is a full pass
+over all of them; the runner loops **10 rounds by default** and then stops,
+reporting every attempt with its status and reason. Nothing is saved from a
+failed turn. The round budget, the on/off switch, and whether credentials
+rejected with 401/403/404 are retried in later rounds are all on the page
+(`FAILOVER_MAX_ROUNDS`, `FAILOVER_ENABLED`, `FAILOVER_RETRY_REJECTED`).
+
+Each switch is recorded: per-key ok/failure counters and last error on the key
+card, a **loop order** preview, a **recent attempts** log, and `provider` events
+in the turn trace (visible in the decision trail of a streamed turn).
+
+Keys are stored in plain text in `server/data/providers.json` (`PROVIDERS_FILE`)
+and served to the client as entered. **Forge has no authentication**, so anyone
+who can reach the API can read these keys — keep the server on localhost or a
+trusted network, and never commit that file (`data/` is git-ignored).
 
 ### Real providers
 
-Configure the server environment using `server/.env.example`:
+Keys added on the Providers page are the primary configuration. Alternatively
+configure the server environment using `server/.env.example`:
 
+- `GEMINI_API_KEY` / `GEMINI_MODEL`, `OPENROUTER_API_KEY` / `OPENROUTER_MODEL`,
+  `GROQ_API_KEY` / `GROQ_MODEL`, `OPENCODE_API_KEY` / `OPENCODE_MODEL`, or
+  `OLLAMA_MODEL` — each optional, each seeded into the registry when set;
 - `PLANNER_PROVIDER=llm`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_API_BASE` for an
   OpenAI-compatible chat-completions model; or
 - `PLANNER_PROVIDER=bedrock` plus the documented AWS environment credentials,
@@ -165,10 +217,15 @@ Configure the server environment using `server/.env.example`:
 - `JEV_PROVIDER=typesafe`, `TYPESAFE_API_KEY`, `TYPESAFE_MODEL`, and optionally
   `TYPESAFE_BASE_URL` for TypeSafe's `/v1/systemone` API.
 
-Despite its legacy name, `PLANNER_PROVIDER` selects the same generation model for
-memory proposal, response generation, and repair. JEV remains a separate decision
-model. Each provider can be configured independently. The provider badges always
-show the real configured provider — the app never silently runs on a mock.
+`.env` credentials are merged into the registry, so both sources take part in the
+same failover loop, and any one of them can be pinned as the default with
+`PLANNER_PROVIDER=groq|gemini|openrouter|opencode|ollama|llm|bedrock`. Despite
+its legacy name, `PLANNER_PROVIDER` selects the same
+generation model for memory proposal, response generation, and repair. JEV
+remains a separate decision model (TypeSafe only — it does not fail over). Each
+provider can be configured independently. The provider badges always show the
+real configured provider, or `unconfigured` — the app never silently runs on a
+mock.
 
 `.env` is loaded by `config.js` on import (real environment variables win). On
 Node 22+, you can alternatively use `node --env-file=.env --watch src/index.js`
@@ -178,6 +235,8 @@ from `forge/server`. Do not commit credentials.
 
 - Default file: `forge/server/data/projects.json` when run from the server directory.
   Override with `DATA_FILE`.
+- Provider keys: `forge/server/data/providers.json`, override with `PROVIDERS_FILE`.
+  Written atomically like the project store, plain text, git-ignored.
 - Set `MONGODB_URI` for MongoDB, collection `forge_conversations` (legacy: `forge`).
 - Memory and events survive conversation normalization and storage reloads.
 - File writes are serialized and atomically renamed; memory is published only after
@@ -194,7 +253,16 @@ from `forge/server`. Do not commit credentials.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health` | Actual configured providers |
+| `GET /api/health` | Actual configured providers, active key, failover policy |
+| `POST /api/chat`, `POST /api/chat/:id/messages` | Optional `provider` field: key id or provider id the loop starts from |
+| `GET /api/providers` | Catalog, every stored key (plain text), selection, loop order, attempt log |
+| `POST /api/providers/keys` | Add a key `{ provider, apiKey, note, model, baseUrl, secret?, region? }` |
+| `PATCH /api/providers/keys/:id` | Update note / model / base / enabled / credentials |
+| `DELETE /api/providers/keys/:id` | Remove a key (`.env` entries are restorable) |
+| `POST /api/providers/keys/:id/test` | Live probe of one credential, no failover |
+| `POST /api/providers/active` | Select the key that runs first |
+| `PATCH /api/providers/failover` | `{ enabled, maxRounds, retryRejected }` |
+| `POST /api/providers/restore-env` | Restore removed `.env` entries |
 | `GET /api/chat` | Saved conversations |
 | `POST /api/chat` | Start a memory-first project with `{ goal }` or `{ message }` |
 | `GET /api/chat/:id` | Conversation, memory, and recorded events |
@@ -240,6 +308,10 @@ integration, accounts, or guaranteed factual/physical verification.
 
 - `server/src/memory/reasoner.js`: domain-independent proposal/response prompts.
 - `server/src/providers/jsonModel.js`: shared configured LLM/Bedrock generator.
+- `server/src/providers/catalog.js`: Gemini/OpenRouter/Bedrock/Ollama request shapes.
+- `server/src/providers/registry.js`: stored keys, notes, selection, stats, attempt log.
+- `server/src/providers/failover.js`: switch-and-loop runner (10 rounds, then stop).
+- `client/src/components/ProvidersView.tsx`: the Providers management page.
 - `server/src/memory/decisions.js`: typed JEV questions and conservative application.
 - `server/src/memory/turn.js`: propose → review → contextualize → draft → check/repair.
 - `server/src/schema.js`, `store.js`: persistence and backward compatibility.

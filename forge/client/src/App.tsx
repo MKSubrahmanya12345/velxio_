@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { MemoryPanel } from './components/MemoryPanel';
-import type { MemoryEvent, Conversation, Health, GeneratorInfo } from './types';
+import type { MemoryEvent, Conversation, Health, GeneratorInfo, ProvidersState } from './types';
 import { ProviderStrip } from './components/ProviderStrip';
+import { ProvidersView } from './components/ProvidersView';
 import { ChatView } from './components/ChatView';
 import { ConversationList } from './components/ConversationList';
 
@@ -25,6 +26,8 @@ export default function App() {
   const [creating, setCreating] = useState(false);
   const [creationEvents, setCreationEvents] = useState<MemoryEvent[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // 'chat' is the workspace; 'providers' is the key/failover management page.
+  const [view, setView] = useState<'chat' | 'providers'>('chat');
   const activeId = useRef<string | null>(null);
   const navigation = useRef(0);
   const refreshVersion = useRef(0);
@@ -36,12 +39,24 @@ export default function App() {
     const version = ++refreshVersion.current;
     setLoading(true);
     try {
-      const [list, status, info] = await Promise.all([api.list(), api.health(), api.providers().catch(() => null)]);
+      // The key list is best-effort: without it the header simply offers the
+      // registry's own selection instead of a per-chat preference.
+      const info = await api.providers?.get?.().catch(() => null) ?? null;
+      const [list, status] = await Promise.all([api.list(), api.health()]);
       if (version !== refreshVersion.current) return;
       setConversations(list);
       setHealth(status);
-      setProviders(info?.providers || []);
-      setSelectedProvider(cur => cur || info?.default || '');
+      const state = (info as ProvidersState | null) || null;
+      const options = (state?.keys || []).map(k => ({
+        id: k.id,
+        name: `${k.providerLabel}${k.note ? ` · ${k.note}` : ''}`,
+        model: k.model,
+        type: k.provider,
+      }));
+      setProviders(options);
+      // Drop a remembered choice that no longer exists (key deleted, server
+      // reset) instead of sending a provider the server would reject.
+      setSelectedProvider(cur => (cur && options.some(o => o.id === cur) ? cur : ''));
       setOffline(false);
     } catch {
       if (version === refreshVersion.current) setOffline(true);
@@ -160,11 +175,30 @@ export default function App() {
           </button>
           <div className="fg-header-actions">
             <button className="fg-btn fg-btn-secondary fg-history-toggle" aria-expanded={sidebarOpen} aria-controls="build-history" onClick={() => setSidebarOpen(v => !v)}>Build history</button>
-            <ProviderStrip health={health} offline={offline} providers={providers} selected={selectedProvider} onChange={handleProviderChange} />
+            <button
+              className={`fg-btn ${view === 'providers' ? 'fg-btn-primary' : 'fg-btn-secondary'}`}
+              aria-current={view === 'providers' ? 'page' : undefined}
+              onClick={() => setView(v => (v === 'providers' ? 'chat' : 'providers'))}
+            >
+              Providers
+            </button>
+            <ProviderStrip
+              health={health}
+              offline={offline}
+              providers={providers}
+              selected={selectedProvider}
+              onChange={handleProviderChange}
+              onOpenProviders={() => setView('providers')}
+            />
           </div>
         </div>
       </header>
 
+      {view === 'providers' ? (
+        <main className="fg-main-chat">
+          <ProvidersView onBack={() => setView('chat')} onChanged={() => void refresh()} />
+        </main>
+      ) : (
       <main className="fg-main-chat">
         {offline && (
           <div className="fg-banner fg-banner-warn" style={{ margin: 16 }}>
@@ -264,6 +298,7 @@ export default function App() {
           </section>
         </div>
       </main>
+      )}
     </div>
   );
 }
