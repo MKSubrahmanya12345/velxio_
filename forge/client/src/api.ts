@@ -1,6 +1,9 @@
 // Forge — API layer (chat-first)
 
-import type { Conversation, Health, MessageResult, CreateResult, Project, ProjectState, MemoryEvent } from './types';
+import type {
+  Conversation, Health, MessageResult, CreateResult, Project, ProjectState, MemoryEvent,
+  ProvidersState, ProviderKey, ProviderKeyInput, ProviderTestResult, FailoverSettings,
+} from './types';
 
 const BASE = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL ?? '/api';
 
@@ -113,4 +116,24 @@ export const api = {
 
   // legacy aliases
   listProjects: async () => (await http<unknown[]>('/projects')).map(normalizeConversation),
+
+  // ── Providers page ────────────────────────────────────────────────────────
+  // Keys are sent and returned as plain text: the UI shows what is stored.
+  providers: {
+    get: () => http<ProvidersState>('/providers'),
+    addKey: (input: ProviderKeyInput) =>
+      http<{ ok: boolean; key: ProviderKey; state: ProvidersState }>('/providers/keys', { method: 'POST', body: JSON.stringify(input) }),
+    updateKey: (id: string, patch: Partial<ProviderKeyInput>) =>
+      http<{ ok: boolean; key: ProviderKey; state: ProvidersState }>(`/providers/keys/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    removeKey: (id: string) =>
+      http<{ ok: boolean; activeId: string; state: ProvidersState }>(`/providers/keys/${id}`, { method: 'DELETE' }),
+    setActive: (id: string) =>
+      http<{ ok: boolean; activeId: string; key: ProviderKey; state: ProvidersState }>('/providers/active', { method: 'POST', body: JSON.stringify({ id }) }),
+    testKey: (id: string) =>
+      http<ProviderTestResult>(`/providers/keys/${id}/test`, { method: 'POST', body: JSON.stringify({}) }),
+    setFailover: (patch: Partial<FailoverSettings>) =>
+      http<{ ok: boolean; failover: FailoverSettings; state: ProvidersState }>('/providers/failover', { method: 'PATCH', body: JSON.stringify(patch) }),
+    restoreEnv: () => http<{ ok: boolean; state: ProvidersState }>('/providers/restore-env', { method: 'POST', body: JSON.stringify({}) }),
+    log: () => http<{ log: ProvidersState['log']; failover: FailoverSettings; order: string[] }>('/providers/log'),
+  },
 };

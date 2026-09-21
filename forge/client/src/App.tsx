@@ -3,6 +3,7 @@ import { api } from './api';
 import { MemoryPanel } from './components/MemoryPanel';
 import type { MemoryEvent, Conversation, Health } from './types';
 import { ProviderStrip } from './components/ProviderStrip';
+import { ProvidersView } from './components/ProvidersView';
 import { ChatView } from './components/ChatView';
 import { ConversationList } from './components/ConversationList';
 
@@ -19,6 +20,8 @@ export default function App() {
   const [creating, setCreating] = useState(false);
   const [creationEvents, setCreationEvents] = useState<MemoryEvent[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // 'chat' is the workspace; 'providers' is the key/failover management page.
+  const [view, setView] = useState<'chat' | 'providers'>('chat');
   const activeId = useRef<string | null>(null);
   const navigation = useRef(0);
   const refreshVersion = useRef(0);
@@ -147,11 +150,23 @@ export default function App() {
           </button>
           <div className="fg-header-actions">
             <button className="fg-btn fg-btn-secondary fg-history-toggle" aria-expanded={sidebarOpen} aria-controls="build-history" onClick={() => setSidebarOpen(v => !v)}>Build history</button>
-            <ProviderStrip health={health} offline={offline} />
+            <button
+              className={`fg-btn ${view === 'providers' ? 'fg-btn-primary' : 'fg-btn-secondary'}`}
+              aria-current={view === 'providers' ? 'page' : undefined}
+              onClick={() => setView(v => (v === 'providers' ? 'chat' : 'providers'))}
+            >
+              Providers
+            </button>
+            <ProviderStrip health={health} offline={offline} onOpenProviders={() => setView('providers')} />
           </div>
         </div>
       </header>
 
+      {view === 'providers' ? (
+        <main className="fg-main-chat">
+          <ProvidersView onBack={() => setView('chat')} onChanged={() => void refresh()} />
+        </main>
+      ) : (
       <main className="fg-main-chat">
         {offline && (
           <div className="fg-banner fg-banner-warn" style={{ margin: 16 }}>
@@ -251,6 +266,7 @@ export default function App() {
           </section>
         </div>
       </main>
+      )}
     </div>
   );
 }

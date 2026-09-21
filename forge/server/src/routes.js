@@ -4,9 +4,14 @@ import { runMemoryTurn } from './memory/turn.js';
 import { Router } from 'express';
 import { synthesizeChatProject, handleChatMessage } from './pipeline.js';
 import { makeConversation, nowIso, log } from './schema.js';
+import { createProviderRouter } from './providerRoutes.js';
 
 export function createRouter(deps) {
   const r = Router();
+  // Provider/key management for the Providers page (see providerRoutes.js).
+  // Mounted only when a registry exists, so hand-built dependency sets
+  // (tests, scripts) keep working without one.
+  if (deps.registry) r.use(createProviderRouter(deps));
   const busy = new Set();
   const withLock = async (id, work) => {
     if (busy.has(id)) throw Object.assign(new Error('A turn is already running for this project. Wait for it to finish.'), { status: 409 });
@@ -40,15 +45,25 @@ export function createRouter(deps) {
   };
 
   r.get('/api/health', (req, res) => {
+    const registry = deps.registry;
+    const active = registry?.get(registry.activeId) || null;
     res.json({
       ok: true,
       service: 'forge-server',
       time: new Date().toISOString(),
       providers: {
-        jev: deps.cfg.jev.provider,
-        planner: deps.cfg.planner.provider,
+        // What is really configured: 'unconfigured' is reported as such rather
+        // than as a provider name, so a badge can never imply a live model.
+        jev: deps.cfg.jev.provider || 'unconfigured',
+        planner: active ? active.provider : deps.cfg.planner.provider || 'unconfigured',
         store: deps.cfg.db.kind,
       },
+      activeProvider: active
+        ? { id: active.id, provider: active.provider, note: active.note, model: active.model, origin: active.origin }
+        : null,
+      failover: registry
+        ? { ...registry.failover, keys: registry.candidates().length, configured: registry.candidates().length > 0 }
+        : null,
       mode: 'memory-first, JEV-governed generation',
     });
   });

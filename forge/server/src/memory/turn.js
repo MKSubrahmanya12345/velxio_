@@ -16,14 +16,39 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}) {
   const userMessage = makeMessage('user', message);
   const events = [];
   const decisions = [];
-  const generator = deps.reasoner || createReasoner(deps.cfg);
-  const providers = { generator: deps.cfg.planner.provider, jev: deps.cfg.jev.provider };
+  const registry = deps.registry;
+  const selected = registry?.get?.(registry.activeId) || null;
+  // What is actually configured, never an assumed provider name.
+  const providers = {
+    generator: selected ? selected.provider : deps.cfg.planner.provider || 'unconfigured',
+    jev: deps.cfg.jev.provider || 'unconfigured',
+  };
   const event = (stage, status, label, extra = {}) => {
-    const item = { id: id('event'), turnId, stage, status, label, at: nowIso(), providers, ...extra };
+    // Snapshot the provider labels: failover updates `providers` mid-turn and an
+    // earlier event must keep naming the provider that produced it.
+    const item = { id: id('event'), turnId, stage, status, label, at: nowIso(), providers: { ...providers }, ...extra };
     events.push(item);
     emit(item);
     return item;
   };
+  // Provider failover is part of the visible trace. The happy path stays quiet:
+  // only switches, failures, and round restarts are reported.
+  const onProvider = info => {
+    if (info.type === 'attempt') {
+      if (info.attempt > 1) event('provider', 'running', `Switched to ${info.label} — attempt ${info.attempt}, round ${info.round}/${info.maxRounds}`, { provider: info });
+      return;
+    }
+    if (info.type === 'error') {
+      event('provider', 'blocked', `${info.label} failed${info.status ? ` (HTTP ${info.status})` : ''} — switching provider/key (round ${info.round}/${info.maxRounds})`, { provider: info });
+      return;
+    }
+    if (info.type === 'round') { event('provider', 'running', info.message, { provider: info }); return; }
+    if (info.type === 'success') {
+      providers.generator = info.provider;
+      if (info.switched) event('provider', 'complete', `Generator answered via ${info.label} after ${info.attempt - 1} failed attempt${info.attempt === 2 ? '' : 's'}`, { provider: info });
+    }
+  };
+  const generator = deps.reasoner || createReasoner(deps.cfg, { registry, emit: onProvider });
   // The raw JEV response is kept: exact failing values beat inferred ones.
   const ask = async (state, questions) => {
     const response = await deps.jev({ state, questions });

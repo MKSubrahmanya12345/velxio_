@@ -77,5 +77,18 @@ export function loadConfig(env = process.env) {
     apiBase: (env.LLM_API_BASE || 'https://api.openai.com/v1').replace(/\/$/, ''),
   };
 
-  return { port, db, jev, planner, bedrock, corsOrigin: env.CORS_ORIGIN || '' };
+  // Provider registry (keys added on the Providers page) + failover defaults.
+  // `envDefaults` seeds the registry with the .env credentials above so an
+  // existing setup keeps working and stays visible/editable in the UI.
+  const providers = {
+    dataFile: env.PROVIDERS_FILE || './data/providers.json',
+    failover: {
+      enabled: !['false', '0', 'off'].includes(String(env.FAILOVER_ENABLED || '').toLowerCase()),
+      maxRounds: Math.min(25, Math.max(1, Number(env.FAILOVER_MAX_ROUNDS) || 10)),
+      retryRejected: ['true', '1', 'on'].includes(String(env.FAILOVER_RETRY_REJECTED || '').toLowerCase()),
+    },
+    envDefaults: { planner, bedrock },
+  };
+
+  return { port, db, jev, planner, bedrock, providers, corsOrigin: env.CORS_ORIGIN || '' };
 }

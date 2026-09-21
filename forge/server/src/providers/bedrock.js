@@ -6,6 +6,7 @@
 
 import { signV4 } from './sigv4.js';
 import { PLANNER_SYSTEM_PROMPT, plannerUserPrompt } from './plannerPrompt.js';
+import { parsePlanText } from './failover.js';
 
 export function createBedrockPlanner(cfg) {
   const b = cfg.bedrock;
@@ -37,8 +38,6 @@ export function createBedrockPlanner(cfg) {
     const res = await fetch(url, { method: 'POST', headers, body });
     if (!res.ok) throw new Error(`Bedrock converse ${res.status}: ${await res.text()}`);
     const data = await res.json();
-    let text = String(data?.output?.message?.content?.[0]?.text ?? '');
-    text = text.replace(/^```(json)?/i, '').replace(/```$/, '').trim();
-    return JSON.parse(text);
+    return parsePlanText(String(data?.output?.message?.content?.[0]?.text ?? ''));
   };
 }
