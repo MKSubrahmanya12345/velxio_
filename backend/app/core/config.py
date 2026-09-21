@@ -11,7 +11,8 @@ class ProviderSpec:
                    OpenAI-compatible layer). Uses base_url/model/api_key.
     kind "bedrock": Amazon Bedrock. Native Converse via boto3, except
                    moonshotai.kimi-k2.5 which must use the Bedrock Mantle Chat
-                   Completions endpoint (BEDROCK_API_KEY). Uses model/region.
+                   Completions endpoint — signed with SigV4 (AWS creds) or, as a
+                   fallback, BEDROCK_API_KEY. Uses model/region.
     """
 
     id: str
@@ -29,11 +30,13 @@ class ProviderSpec:
             # opencode, not here. Ready whenever a base URL is wired up.
             return bool(self.base_url and self.model)
         if self.kind == "bedrock":
-            if not self.model:
-                return False
-            if self.model.strip().lower() == "moonshotai.kimi-k2.5":
-                return bool(self.api_key)
-            return bool(self.region)
+            # Converse needs a region; Mantle needs a region to build its
+            # endpoint URL and then signs with SigV4 (AWS_ACCESS_KEY_ID /
+            # AWS_SECRET_ACCESS_KEY), falling back to BEDROCK_API_KEY. Which
+            # credential exists is checked where the call is made, so the error
+            # names the missing variable instead of the provider silently
+            # disappearing from the list for a SigV4-only deployment.
+            return bool(self.model and (self.region or self.api_key))
         return bool(self.base_url and self.model and self.api_key)
 
 

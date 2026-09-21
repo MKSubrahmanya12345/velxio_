@@ -15,6 +15,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   intercept a board's serial input while attached
 
 ### Fixed
+- Agent responses are now parsed identically on every provider. The Bedrock adapters
+  (native Converse and the Kimi K2.5 Mantle gateway) called `Proposal.model_validate_json()`
+  directly, skipping the JSON salvage, shape coercion and model-side repair the
+  OpenAI-compatible path already had — so one unescaped quote in embedded firmware
+  (`Serial.println("reading")`) ended a run with `Invalid JSON: expected ',' or '}' at
+  line 1 column 7270` on Bedrock while the same response was silently repaired on Groq.
+  Stray quotes, raw newlines, dropped commas and trailing commas are repaired locally
+  (`app/agent/jsonrepair.py`), the repair call goes back to the provider that failed
+  instead of the default endpoint (it was pinned to `AGENT_BASE_URL`/`AGENT_API_KEY`, so
+  on a Bedrock deployment it never ran), truncation is reported as truncation with the
+  place it stopped, and the repair prompt quotes the region around the failure rather
+  than the first 2 KB of a much longer response
+- Amazon Bedrock lists as configured for SigV4-only deployments: the Kimi K2.5 Mantle
+  route demanded `BEDROCK_API_KEY` even though it signs with
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, hiding a provider the adapter documents
+  as the preferred setup
+- Agent requests to the Mantle gateway ask for `response_format: json_object` (dropped
+  automatically, once, if a gateway rejects the parameter), and Bedrock proposals emit
+  the same `propose … ok http=… tokens=…` trace line as the other providers
 - Agent patches survive an obvious pin-name misspelling (`pin1` → `1`, `D13` → `13`):
   wire endpoints are resolved against the part's real pins before validation, and a
   pin that still names nothing is reported with the part's pin list instead of dumping
