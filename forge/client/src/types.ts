@@ -266,6 +266,14 @@ export interface ProviderTestResult {
   state: ProvidersState;
 }
 
+export interface GeneratorInfo {
+  id: string;
+  name: string;
+  model: string;
+  type: string;
+}
+
+
 export type NoteKind = 'goal' | 'rule' | 'fact' | 'preference' | 'assumption' | 'suggestion' | 'question';
 export type NoteDomain = 'production' | 'fiction' | 'creative' | 'meta' | 'unknown';
 export interface MemoryNote {

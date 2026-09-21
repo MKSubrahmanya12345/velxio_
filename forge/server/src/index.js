@@ -17,6 +17,7 @@ import { loadConfig } from './config.js';
 import { createStore } from './store.js';
 import { createJevProvider } from './providers/jev.js';
 import { createPlanner } from './providers/planner.js';
+import { createReasoner } from './memory/reasoner.js';
 import { createProviderRegistry } from './providers/registry.js';
 import { createRouter } from './routes.js';
 
@@ -41,6 +42,10 @@ const deps = {
   registry,
   jev,
   planner: createPlanner(cfg, { registry }),
+  // Per-request provider overrides (`provider` in the chat body). They choose
+  // where the failover loop starts; the rest of the keys stay as fallbacks.
+  reasonerFor: provider => createReasoner(cfg, { registry, prefer: provider }),
+  plannerFor: provider => createPlanner(cfg, { registry, prefer: provider }),
   counters,
 };
 

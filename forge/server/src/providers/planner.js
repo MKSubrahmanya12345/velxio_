@@ -17,7 +17,7 @@ import { createBedrockPlanner } from './bedrock.js';
 import { PLANNER_SYSTEM_PROMPT, plannerUserPrompt } from './plannerPrompt.js';
 import { callProviderEntry, parsePlanText, runWithFailover } from './failover.js';
 
-export function createPlanner(cfg, { registry, emit, fetchImpl } = {}) {
+export function createPlanner(cfg, { registry, emit, fetchImpl, prefer } = {}) {
   return async function plan(goal, constraints, feasibility) {
     if (registry?.candidates?.().length) {
       const user = plannerUserPrompt(goal, constraints, feasibility);
@@ -26,6 +26,7 @@ export function createPlanner(cfg, { registry, emit, fetchImpl } = {}) {
         emit,
         operation: 'plan',
         fetchImpl,
+        prefer,
         work: async entry => parsePlanText(await callProviderEntry(entry, { system: PLANNER_SYSTEM_PROMPT, user, temperature: 0.3, fetchImpl })),
       });
       return result;

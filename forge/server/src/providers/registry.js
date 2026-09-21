@@ -14,6 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { describeCatalog, envEntries, providerDefinition, validateCredentials } from './catalog.js';
+import { createPlanner } from './planner.js';
+import { createReasoner } from '../memory/reasoner.js';
 
 export const DEFAULT_FAILOVER = { enabled: true, maxRounds: 10, retryRejected: false };
 const LOG_LIMIT = 40;
@@ -147,7 +149,7 @@ export class ProviderRegistry {
 
   // Everything the UI shows: user keys first, then live .env entries.
   entries() {
-    const env = providersFromEnv(this.cfg.providers?.envDefaults ?? {})
+    const env = providersFromEnv(this.cfg)
       .filter(entry => !this.removedEnv.includes(entry.id))
       .map(entry => {
         const overlay = this.overlays[entry.id] || {};
@@ -346,13 +348,55 @@ export class ProviderRegistry {
 }
 
 // `.env` credentials → registry entries (read-only credential material).
-function providersFromEnv(envDefaults = {}) {
-  return envEntries({ planner: envDefaults.planner || {}, bedrock: envDefaults.bedrock || {} })
-    .map(raw => normalizeKey({ ...raw, enabled: true }, raw.id));
+// Every ready env provider is seeded, so an existing .env setup keeps working
+// and takes part in the same failover loop as keys added in the UI.
+function providersFromEnv(cfg = {}) {
+  return envEntries(cfg).map(raw => normalizeKey({ ...raw, enabled: true }, raw.id));
 }
 
 export async function createProviderRegistry(cfg = {}) {
   const registry = new ProviderRegistry(cfg);
   await registry.init();
   return registry;
+}
+
+
+// ── Config-level helpers ─────────────────────────────────────────────────────
+// The generation providers that are ready straight from the environment. These
+// mirror the registry's `.env` entries for callers that only have a config
+// object (tests, scripts, and per-request provider overrides).
+
+export function listProviders(cfg) {
+  return (cfg?.generators || []).filter(g => g.ready).map(({ id, name, model, type }) => ({ id, name, model, type }));
+}
+
+// A sub-config that points the shared LLM/Bedrock request path at one provider.
+// Returns null for a provider that is not ready — never a fallback.
+export function providerConfig(cfg, provider) {
+  const g = (cfg?.generators || []).find(p => p.id === provider);
+  if (!g || !g.ready) return null;
+  return {
+    ...cfg,
+    planner: { provider: g.id, apiKey: g.apiKey, model: g.model, apiBase: g.apiBase },
+  };
+}
+
+export function plannerFor(cfg, provider) {
+  const sub = providerConfig(cfg, provider);
+  return sub ? createPlanner(sub) : null;
+}
+
+export function reasonerFor(cfg, provider) {
+  const sub = providerConfig(cfg, provider);
+  return sub ? createReasoner(sub) : null;
+}
+
+export function unresolvedError(provider, cfg, keys = []) {
+  const ids = keys.filter(k => k.enabled).map(k => k.id);
+  const available = [...listProviders(cfg).map(p => p.id), ...ids];
+  const avail = available.length ? [...new Set(available)].join(', ') : 'none';
+  return (
+    `Generation provider '${provider}' is not configured. Configured providers: ${avail}. ` +
+    'Add its key on the Providers page, or set its API key (or OLLAMA_MODEL) in forge/server/.env.'
+  );
 }

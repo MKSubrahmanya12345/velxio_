@@ -12,7 +12,11 @@ import { signV4 } from './sigv4.js';
 
 // `openai` is the .env-era OpenAI-compatible provider (LLM_API_KEY / LLM_API_BASE).
 // It stays in the catalog so existing .env setups keep working as registry entries.
-export const PROVIDER_IDS = ['gemini', 'openrouter', 'bedrock', 'ollama', 'openai'];
+export const PROVIDER_IDS = ['gemini', 'openrouter', 'bedrock', 'ollama', 'openai', 'opencode', 'groq'];
+
+// Legacy/config ids that mean a catalog provider. `llm` is the historical
+// PLANNER_PROVIDER value for "any OpenAI-compatible endpoint".
+const ALIASES = { llm: 'openai' };
 
 export const CATALOG = {
   gemini: {
@@ -95,10 +99,40 @@ export const CATALOG = {
     timeoutMs: 90000,
     docs: 'https://platform.openai.com/docs/api-reference/chat',
   },
+  opencode: {
+    id: 'opencode',
+    label: 'OpenCode Zen',
+    short: 'OpenCode Zen',
+    kind: 'openai',
+    credentialLabel: 'OpenCode API key',
+    credentialPlaceholder: 'zen_…',
+    requiresKey: true,
+    defaultModel: 'servo',
+    modelPlaceholder: 'servo · any model your plan serves',
+    defaultBase: 'https://opencode.ai/zen/v1',
+    baseLabel: 'API base',
+    timeoutMs: 90000,
+    docs: 'https://opencode.ai/docs/zen',
+  },
+  groq: {
+    id: 'groq',
+    label: 'Groq',
+    short: 'Groq',
+    kind: 'openai',
+    credentialLabel: 'Groq API key',
+    credentialPlaceholder: 'gsk_…',
+    requiresKey: true,
+    defaultModel: 'llama-3.3-70b-versatile',
+    modelPlaceholder: 'llama-3.3-70b-versatile · openai/gpt-oss-120b',
+    defaultBase: 'https://api.groq.com/openai/v1',
+    baseLabel: 'API base',
+    timeoutMs: 90000,
+    docs: 'https://console.groq.com/keys',
+  },
 };
 
 export function providerDefinition(id) {
-  const def = CATALOG[id];
+  const def = CATALOG[ALIASES[String(id || '').toLowerCase()] || id];
   if (!def) throw Object.assign(new Error(`Unknown provider "${id}". Supported: ${PROVIDER_IDS.join(', ')}.`), { status: 400 });
   return def;
 }
@@ -126,6 +160,13 @@ export function describeCatalog() {
 }
 
 const trim = value => String(value ?? '').trim();
+
+// Bedrock model ids contain ':' (and '/' for inference profiles/ARNs). Percent
+// encoding the colon breaks some gateways, leaving it raw breaks others — encode
+// the unsafe characters and keep both separators readable.
+export function bedrockModelPath(model) {
+  return String(model || '').split('/').map(part => encodeURIComponent(part).replace(/%3A/gi, ':')).join('/');
+}
 
 // Validate + normalize one credential set. Every failure is a 400 that names the
 // exact missing field, so the UI can point at it instead of guessing.
@@ -205,7 +246,7 @@ export function buildRequest(entry, { system, user, temperature = 0.2, maxTokens
   }
 
   if (def.kind === 'bedrock') {
-    const url = `${base || `https://bedrock-runtime.${entry.region}.amazonaws.com`}/model/${encodeURIComponent(model)}/converse`;
+    const url = `${base || `https://bedrock-runtime.${entry.region}.amazonaws.com`}/model/${bedrockModelPath(model)}/converse`;
     const body = JSON.stringify({
       system: [{ text: system }],
       messages: [{ role: 'user', content: [{ text: user }] }],
@@ -289,36 +330,73 @@ export function isPermanentStatus(status) {
 // upgrade keeps working and the UI can show what came from the environment.
 export function envEntries(cfg) {
   const entries = [];
-  if (cfg?.planner?.apiKey) {
-    const base = trim(cfg.planner.apiBase);
-    const provider = /openrouter\.ai/i.test(base) ? 'openrouter' : 'openai';
+  const generators = Array.isArray(cfg?.generators) ? cfg.generators : [];
+
+  // One entry per ready .env provider. Any credential already in the
+  // environment takes part in the same failover loop as UI-added keys.
+  for (const g of generators) {
+    if (!g?.ready) continue;
+    const provider = resolveProviderId(g.id);
+    if (!provider) continue;
+    const def = CATALOG[provider];
     entries.push({
-      id: 'env:llm',
+      id: `env:${g.id}`,
       provider,
-      note: 'From .env (LLM_API_KEY)',
-      apiKey: cfg.planner.apiKey,
+      note: `From .env (${envVarFor(g.id)})`,
+      apiKey: g.apiKey || '',
       secret: '',
       sessionToken: '',
-      region: '',
-      baseUrl: base || CATALOG[provider].defaultBase,
-      model: cfg.planner.model || CATALOG[provider].defaultModel,
+      region: provider === 'bedrock' ? String(cfg?.bedrock?.region || '') : '',
+      baseUrl: nativeBase(provider, trim(g.apiBase) || def.defaultBase),
+      model: trim(g.model) || def.defaultModel,
       origin: 'env',
     });
   }
+
+  // AWS credentials need the secret material, which only cfg.bedrock carries.
   const b = cfg?.bedrock;
   if (b?.region && b?.accessKeyId && b?.secretAccessKey) {
-    entries.push({
-      id: 'env:bedrock',
-      provider: 'bedrock',
-      note: 'From .env (AWS credentials)',
+    const entry = entries.find(e => e.id === 'env:bedrock');
+    const credentials = {
       apiKey: b.accessKeyId,
       secret: b.secretAccessKey,
       sessionToken: b.sessionToken || '',
       region: b.region,
       baseUrl: trim(b.endpoint),
       model: b.model || CATALOG.bedrock.defaultModel,
-      origin: 'env',
-    });
+    };
+    if (entry) Object.assign(entry, credentials);
+    else entries.push({ id: 'env:bedrock', provider: 'bedrock', note: 'From .env (AWS credentials)', origin: 'env', ...credentials });
   }
   return entries;
+}
+
+// `.env` bases are written for the OpenAI-compatible path (…/v1, …/v1beta/openai).
+// Registry entries speak each provider's native API, so strip the compatibility
+// prefix for the two providers that have their own request shape.
+function nativeBase(provider, base) {
+  const def = CATALOG[provider];
+  if (!def) return base;
+  if (def.kind === 'ollama') return base.replace(/\/v1\/?$/, '') || def.defaultBase;
+  if (def.kind === 'gemini') return base.replace(/\/openai\/?$/, '') || def.defaultBase;
+  return base;
+}
+
+// Canonical catalog id for a provider name, or null when unknown. `llm` (the
+// historical PLANNER_PROVIDER value) resolves to the OpenAI-compatible entry.
+export function resolveProviderId(id) {
+  const resolved = ALIASES[String(id || '').toLowerCase()] || id;
+  return CATALOG[resolved] ? resolved : null;
+}
+
+function envVarFor(id) {
+  return ({
+    opencode: 'OPENCODE_API_KEY',
+    gemini: 'GEMINI_API_KEY',
+    openrouter: 'OPENROUTER_API_KEY',
+    ollama: 'OLLAMA_MODEL',
+    groq: 'GROQ_API_KEY',
+    llm: 'LLM_API_KEY',
+    bedrock: 'AWS credentials',
+  })[id] || `${String(id).toUpperCase()}_API_KEY`;
 }

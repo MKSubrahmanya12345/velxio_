@@ -14,7 +14,7 @@
 // later rounds; that is off-by-default behaviour controlled from the UI, and the
 // loop itself still runs to its budget for everything else.
 
-import { buildRequest, extractText, isPermanentStatus, providerDefinition } from './catalog.js';
+import { buildRequest, extractText, isPermanentStatus, providerDefinition, resolveProviderId } from './catalog.js';
 
 export const DEFAULT_MAX_ROUNDS = 10;
 
@@ -125,16 +125,19 @@ export async function testProviderEntry(entry, { timeoutMs = 20000, fetchImpl } 
  * @param {Function} opts.work       async (entry, info) => result
  * @param {string}  [opts.operation] label used in logs/events
  * @param {Function}[opts.emit]      progress callback for streamed turns/UI
+ * @param {string}  [opts.prefer]    start the loop at this key id or provider id
  * @returns {Promise<{result:*, used:object, entry:object, attempts:Array, rounds:number, switched:boolean}>}
  */
-export async function runWithFailover({ registry, work, operation = 'generate', emit = () => {}, fetchImpl } = {}) {
+export async function runWithFailover({ registry, work, operation = 'generate', emit = () => {}, fetchImpl, prefer } = {}) {
   if (typeof work !== 'function') throw new Error('runWithFailover needs a work function.');
   const settings = registry?.failover || { enabled: true, maxRounds: DEFAULT_MAX_ROUNDS, retryRejected: false };
   const enabled = registry?.candidates?.() || [];
   if (!enabled.length) throw noProvidersError(registry);
 
   // With auto-switch off only the selected credential is used — one attempt.
-  const order = settings.enabled === false ? enabled.slice(0, 1) : enabled;
+  // A requested provider/key is a starting point, never a pin: the rest of the
+  // loop stays behind it, so the same failure handling applies to every entry.
+  const order = preferredOrder(settings.enabled === false ? enabled.slice(0, 1) : enabled, prefer);
   const maxRounds = settings.enabled === false ? 1 : Math.max(1, Number(settings.maxRounds) || DEFAULT_MAX_ROUNDS);
   const skipped = new Set();
   const attempts = [];
@@ -193,6 +196,21 @@ export async function runWithFailover({ registry, work, operation = 'generate', 
   }
 
   throw exhaustedError({ attempts, rounds, maxRounds, skipped, order, operation });
+}
+
+// Put the requested key (or every key of the requested provider) first, then
+// keep the ordinary order: selected key → same provider → the rest.
+export function preferredOrder(entries, prefer) {
+  const want = String(prefer || '').trim();
+  if (!want) return entries;
+  const wanted = resolveProviderId(want);
+  const matches = entry =>
+    entry.id === want ||
+    String(entry.provider).toLowerCase() === want.toLowerCase() ||
+    (wanted ? resolveProviderId(entry.provider) === wanted : false);
+  const head = entries.filter(matches);
+  if (!head.length) return entries;
+  return [...head, ...entries.filter(entry => !matches(entry))];
 }
 
 // The final failure names every credential tried and why it failed: "the model

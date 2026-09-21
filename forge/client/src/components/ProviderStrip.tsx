@@ -1,9 +1,23 @@
-import type { Health } from '../types';
+import type { Health, GeneratorInfo } from '../types';
 
 // Live provider badges: which JEV / generation model / store are active, plus
 // the failover policy. Names always come from what is really configured —
 // 'unconfigured' is rendered as a warning, never as a provider name.
-export function ProviderStrip({ health, offline, onOpenProviders }: { health: Health | null; offline: boolean; onOpenProviders?: () => void }) {
+export function ProviderStrip({
+  health,
+  offline,
+  onOpenProviders,
+  providers = [],
+  selected = '',
+  onChange,
+}: {
+  health: Health | null;
+  offline: boolean;
+  onOpenProviders?: () => void;
+  providers?: GeneratorInfo[];
+  selected?: string;
+  onChange?: (id: string) => void;
+}) {
   if (offline) return <span className="fg-prov fg-prov-off">offline</span>;
   if (!health) return null;
 
@@ -25,6 +39,20 @@ export function ProviderStrip({ health, offline, onOpenProviders }: { health: He
           {k} · {v}
         </span>
       ))}
+      {providers.length > 0 && onChange && (
+        <label className="fg-prov fg-prov-live fg-prov-select" title="Which key this chat starts from. Every other key stays in the loop as a fallback.">
+          <select
+            value={selected}
+            onChange={e => onChange(e.target.value)}
+            aria-label="Start this chat with this key"
+          >
+            <option value="">MODEL · registry order</option>
+            {providers.map(p => (
+              <option key={p.id} value={p.id}>{p.name}{p.model ? ` · ${p.model}` : ''}</option>
+            ))}
+          </select>
+        </label>
+      )}
       {failover && (
         <span
           className={`fg-prov ${failover.enabled && failover.configured ? 'fg-prov-failover' : 'fg-prov-warn'}`}

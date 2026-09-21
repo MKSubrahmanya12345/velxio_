@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { MemoryPanel } from './components/MemoryPanel';
-import type { MemoryEvent, Conversation, Health } from './types';
+import type { MemoryEvent, Conversation, Health, GeneratorInfo, ProvidersState } from './types';
 import { ProviderStrip } from './components/ProviderStrip';
 import { ProvidersView } from './components/ProvidersView';
 import { ChatView } from './components/ChatView';
 import { ConversationList } from './components/ConversationList';
 
+const PROVIDER_KEY = 'forge.generator';
+
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
+  const [providers, setProviders] = useState<GeneratorInfo[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<string>(() => {
+    try { return localStorage.getItem(PROVIDER_KEY) || ''; } catch { return ''; }
+  });
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [current, setCurrent] = useState<Conversation | null>(null);
   const [offline, setOffline] = useState(false);
@@ -33,10 +39,24 @@ export default function App() {
     const version = ++refreshVersion.current;
     setLoading(true);
     try {
+      // The key list is best-effort: without it the header simply offers the
+      // registry's own selection instead of a per-chat preference.
+      const info = await api.providers?.get?.().catch(() => null) ?? null;
       const [list, status] = await Promise.all([api.list(), api.health()]);
       if (version !== refreshVersion.current) return;
       setConversations(list);
       setHealth(status);
+      const state = (info as ProvidersState | null) || null;
+      const options = (state?.keys || []).map(k => ({
+        id: k.id,
+        name: `${k.providerLabel}${k.note ? ` · ${k.note}` : ''}`,
+        model: k.model,
+        type: k.provider,
+      }));
+      setProviders(options);
+      // Drop a remembered choice that no longer exists (key deleted, server
+      // reset) instead of sending a provider the server would reject.
+      setSelectedProvider(cur => (cur && options.some(o => o.id === cur) ? cur : ''));
       setOffline(false);
     } catch {
       if (version === refreshVersion.current) setOffline(true);
@@ -80,6 +100,11 @@ export default function App() {
     setSidebarOpen(false);
   };
 
+  const handleProviderChange = (id: string) => {
+    setSelectedProvider(id);
+    try { localStorage.setItem(PROVIDER_KEY, id); } catch { /* private mode */ }
+  };
+
   const handleNewChat = async (goal: string) => {
     if (!goal.trim() || createInFlight.current) return;
     createInFlight.current = true;
@@ -90,7 +115,7 @@ export default function App() {
     try {
       const r = await api.create(goal.trim(), undefined, event => {
         if (version === navigation.current) setCreationEvents(list => [...list, event]);
-      });
+      }, selectedProvider || undefined);
       if (version === navigation.current) {
         activeId.current = r.conversation.id;
         setCurrent(r.conversation);
@@ -157,7 +182,14 @@ export default function App() {
             >
               Providers
             </button>
-            <ProviderStrip health={health} offline={offline} onOpenProviders={() => setView('providers')} />
+            <ProviderStrip
+              health={health}
+              offline={offline}
+              providers={providers}
+              selected={selectedProvider}
+              onChange={handleProviderChange}
+              onOpenProviders={() => setView('providers')}
+            />
           </div>
         </div>
       </header>
@@ -199,7 +231,7 @@ export default function App() {
             {loadingId ? (
               <div className="fg-empty" role="status">Opening your build…</div>
             ) : current ? (
-              <ChatView key={current.id} conversation={current} onUpdate={updateConversation} onBack={newChat} />
+              <ChatView key={current.id} conversation={current} onUpdate={updateConversation} onBack={newChat} provider={selectedProvider} />
             ) : (
               <div className="fg-empty">
                 <div className="fg-hero-chat">

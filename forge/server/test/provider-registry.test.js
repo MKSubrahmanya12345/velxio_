@@ -49,13 +49,17 @@ function stubFetch(t, handler) {
   return stub.calls;
 }
 
+// Captured before any test mocks fetch: API calls made by the tests themselves
+// have to reach the local server even while provider calls are stubbed.
+const realFetch = globalThis.fetch;
+
 const openAiReply = text => new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), { status: 200 });
 const geminiReply = text => new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }), { status: 200 });
 
 // ── Catalog request shapes ───────────────────────────────────────────────────
 test('each supported provider gets its own native request shape', () => {
   const catalog = describeCatalog().map(c => c.id);
-  assert.deepEqual(catalog, ['gemini', 'openrouter', 'bedrock', 'ollama', 'openai']);
+  assert.deepEqual(catalog, ['gemini', 'openrouter', 'bedrock', 'ollama', 'openai', 'opencode', 'groq']);
 
   const g = buildRequest({ provider: 'gemini', apiKey: 'AIza-x', model: 'gemini-2.5-flash', baseUrl: 'https://generativelanguage.googleapis.com/v1beta' }, { system: 'S', user: 'U' });
   assert.match(g.url, /\/models\/gemini-2\.5-flash:generateContent$/);
@@ -373,7 +377,7 @@ test('the Providers API adds, lists, selects, tests, updates, and deletes keys',
 
   const empty = await (await send('GET', '/api/providers')).json();
   assert.deepEqual(empty.keys, []);
-  assert.deepEqual(empty.catalog.map(c => c.id), ['gemini', 'openrouter', 'bedrock', 'ollama', 'openai']);
+  assert.deepEqual(empty.catalog.map(c => c.id), ['gemini', 'openrouter', 'bedrock', 'ollama', 'openai', 'opencode', 'groq']);
 
   const added = await send('POST', '/api/providers/keys', { provider: 'gemini', apiKey: 'AIza-plain', note: 'main key', model: 'gemini-2.5-flash' });
   assert.equal(added.status, 200);
@@ -436,4 +440,75 @@ test('.env keys are served through the API, protected, and restorable', async t 
   await send('DELETE', '/api/providers/keys/env:llm');
   const restored = await (await send('POST', '/api/providers/restore-env', {})).json();
   assert.ok(restored.state.keys.some(k => k.id === 'env:llm'));
+});
+
+test('every ready .env provider is seeded as its own key and loops with the rest', async t => {
+  const { registry } = await makeRegistry(t, { env: {
+    GEMINI_API_KEY: 'AIza-env', GEMINI_MODEL: 'gemini-2.5-flash',
+    OLLAMA_MODEL: 'llama3.2', OLLAMA_BASE: 'http://localhost:11434/v1',
+    LLM_API_KEY: 'sk-env',
+  } });
+  const ids = registry.entries().map(k => k.id).sort();
+  assert.deepEqual(ids, ['env:gemini', 'env:llm', 'env:ollama']);
+
+  const added = await registry.add(openrouter('ui key'));
+  const calls = stubFetch(t, url => url.includes('openrouter') ? openAiReply('{"content":"ui wins"}') : new Response('nope', { status: 500 }));
+  const { used } = await runWithFailover({
+    registry,
+    work: async entry => JSON.parse(await callProviderEntry(entry, { system: 'S', user: 'U' })),
+  });
+  assert.equal(used.keyId, added.id, 'the loop reaches the key added in the UI');
+  assert.equal(calls.length, 2, '.env key first, then the UI key — both are live calls');
+
+  // .env entries keep their secret material in the environment: an overlay can
+  // change the note/model, never the credential.
+  await registry.update('env:gemini', { note: 'shared team key' });
+  assert.equal(registry.get('env:gemini').note, 'shared team key');
+  assert.equal(registry.get('env:gemini').apiKey, 'AIza-env');
+});
+
+test('a per-request provider choice starts the loop — it never pins it', async t => {
+  const { registry } = await makeRegistry(t);
+  const first = await registry.add(gemini('selected'));
+  const second = await registry.add(openrouter('second'));
+  await registry.setActive(first.id);
+
+  // Preferred provider leads, even though another key is selected.
+  let calls = stubFetch(t, url => url.includes('openrouter') ? openAiReply('{"content":"preferred"}') : new Response('down', { status: 500 }));
+  let run = await runWithFailover({
+    registry,
+    prefer: 'openrouter',
+    work: async entry => JSON.parse(await callProviderEntry(entry, { system: 'S', user: 'U' })),
+  });
+  assert.equal(run.used.keyId, second.id);
+  assert.equal(calls.length, 1);
+
+  // A preferred provider that fails still falls through to the others.
+  const before = calls.length;
+  stubFetch(t, url => url.includes('generativelanguage') ? geminiReply('{"ok":true}') : new Response('down', { status: 500 }));
+  run = await runWithFailover({
+    registry,
+    prefer: second.id, // preferring one key by id works the same way
+    work: async entry => JSON.parse(await callProviderEntry(entry, { system: 'S', user: 'U' })),
+  });
+  assert.equal(run.used.keyId, first.id);
+  assert.equal(run.switched, true);
+  assert.equal(calls.length - before, 2, 'preferred key first, then the rest of the loop');
+});
+
+test('the chat API accepts a per-request provider and rejects an unknown one', async t => {
+  const { send } = await apiServer(t, { PLANNER_PROVIDER: 'llm', LLM_API_KEY: 'env-key', GEMINI_API_KEY: 'AIza-env', OLLAMA_MODEL: 'llama3.2' });
+
+  const calls = stubFetch(t, (url, options) => (url.includes('/api/') ? realFetch(url, options) : new Response('nope', { status: 500 })));
+  const started = await send('POST', '/api/chat', { goal: 'build a bookshelf', provider: 'gemini' });
+  assert.ok(started.status >= 400, 'every provider is failing here, so nothing is saved');
+  const providerCalls = calls.filter(c => !c.url.includes('/api/'));
+  assert.ok(providerCalls.length > 0);
+  assert.match(providerCalls[0].url, /generativelanguage/, 'the requested provider starts the turn');
+  assert.match(providerCalls[0].url, /\/v1beta\/models\//, 'the .env base is normalized to the native Gemini API');
+
+  const rejectedRes = await send('POST', '/api/chat', { goal: 'build a bookshelf', provider: 'not-a-provider' });
+  assert.equal(rejectedRes.status, 400);
+  const rejected = await rejectedRes.json();
+  assert.match(rejected.error, /not configured/);
 });

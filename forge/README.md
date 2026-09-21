@@ -161,18 +161,26 @@ requests stay relative.
 
 **Providers** in the header opens the key management page.
 
-- Add a key for **Gemini**, **OpenRouter**, **AWS Bedrock**, **Ollama**, or any
-  OpenAI-compatible endpoint. Each key carries a model, an optional base URL /
-  region, and a **note** so you can tell two keys for the same provider apart.
+- Add a key for **Gemini**, **OpenRouter**, **AWS Bedrock**, **Ollama**,
+  **OpenCode Zen**, **Groq**, or any OpenAI-compatible endpoint. Each key carries
+  a model, an optional base URL / region, and a **note** so you can tell two keys
+  for the same provider apart.
 - The key field is a plain text input and saved keys are displayed in plain text
   with their note — nothing is dotted out or masked. Copy is one click.
 - **Select** any one key: it runs first. The rest stay in the loop as fallbacks.
 - **Test** probes a single credential live (no failover) and reports the reply or
   the exact HTTP status. **Disable** takes a key out of the loop without deleting
   it; **Delete** removes it (`.env` entries can be restored).
-- Credentials from `server/.env` appear as read-only `.env` entries. Their note,
-  model, base URL, and enabled state can be changed in the UI; the secret
-  material stays in `.env`.
+- Credentials from `server/.env` appear as read-only `.env` entries — one per
+  ready provider (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`,
+  `OPENCODE_API_KEY`, `OLLAMA_MODEL`, `LLM_API_KEY`, AWS credentials). Their
+  note, model, base URL, and enabled state can be changed in the UI; the secret
+  material stays in `.env`. Bases are normalized to each provider's native API,
+  and `.env` keys take part in the same failover loop as UI-added keys.
+- **Per-chat provider**: the header `MODEL` dropdown picks which key a chat
+  *starts* from (`provider` in the request body). It is a starting point, not a
+  pin — every other key stays behind it, so switching still works. An unknown
+  provider is a 400 that lists what is configured.
 
 **Automatic switching.** Every generation call (memory proposal, response,
 repair, and the legacy planner) walks the loop order: selected key → that
@@ -199,6 +207,9 @@ trusted network, and never commit that file (`data/` is git-ignored).
 Keys added on the Providers page are the primary configuration. Alternatively
 configure the server environment using `server/.env.example`:
 
+- `GEMINI_API_KEY` / `GEMINI_MODEL`, `OPENROUTER_API_KEY` / `OPENROUTER_MODEL`,
+  `GROQ_API_KEY` / `GROQ_MODEL`, `OPENCODE_API_KEY` / `OPENCODE_MODEL`, or
+  `OLLAMA_MODEL` — each optional, each seeded into the registry when set;
 - `PLANNER_PROVIDER=llm`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_API_BASE` for an
   OpenAI-compatible chat-completions model; or
 - `PLANNER_PROVIDER=bedrock` plus the documented AWS environment credentials,
@@ -207,7 +218,9 @@ configure the server environment using `server/.env.example`:
   `TYPESAFE_BASE_URL` for TypeSafe's `/v1/systemone` API.
 
 `.env` credentials are merged into the registry, so both sources take part in the
-same failover loop. Despite its legacy name, `PLANNER_PROVIDER` selects the same
+same failover loop, and any one of them can be pinned as the default with
+`PLANNER_PROVIDER=groq|gemini|openrouter|opencode|ollama|llm|bedrock`. Despite
+its legacy name, `PLANNER_PROVIDER` selects the same
 generation model for memory proposal, response generation, and repair. JEV
 remains a separate decision model (TypeSafe only — it does not fail over). Each
 provider can be configured independently. The provider badges always show the
@@ -241,6 +254,7 @@ from `forge/server`. Do not commit credentials.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health` | Actual configured providers, active key, failover policy |
+| `POST /api/chat`, `POST /api/chat/:id/messages` | Optional `provider` field: key id or provider id the loop starts from |
 | `GET /api/providers` | Catalog, every stored key (plain text), selection, loop order, attempt log |
 | `POST /api/providers/keys` | Add a key `{ provider, apiKey, note, model, baseUrl, secret?, region? }` |
 | `PATCH /api/providers/keys/:id` | Update note / model / base / enabled / credentials |

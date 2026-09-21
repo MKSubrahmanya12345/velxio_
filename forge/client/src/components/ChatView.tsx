@@ -100,10 +100,12 @@ export function ChatView({
   conversation,
   onUpdate,
   onBack,
+  provider,
 }: {
   conversation: Conversation;
   onUpdate: (c: Conversation) => void;
   onBack: () => void;
+  provider?: string;
 }) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -128,7 +130,7 @@ export function ChatView({
     setError('');
     setEvents([]);
     try {
-      const r = await api.message(conversation.id, { text: text.trim() }, event => setEvents(list => [...list, event]));
+      const r = await api.message(conversation.id, { text: text.trim(), provider: provider || undefined }, event => setEvents(list => [...list, event]));
       setInput('');
       onUpdate(r.conversation);
       setEvents([]);

@@ -1,4 +1,6 @@
 import { runMemoryTurn } from './memory/turn.js';
+import { listProviders } from './providers/registry.js';
+import { resolveProviderId } from './providers/catalog.js';
 // Forge — REST API (chat-first + legacy compatibility)
 
 import { Router } from 'express';
@@ -22,9 +24,29 @@ export function createRouter(deps) {
     if (typeof value !== 'string' || !value.trim() || value.length > 12000) throw Object.assign(new Error('Message must contain 1–12,000 characters.'), { status: 400 });
     return value.trim();
   };
+  // `provider` is optional. It names either a stored key id or a provider id and
+  // only decides where the failover loop STARTS — every other key stays behind
+  // it as a fallback, so a per-request choice can never disable switching.
+  const validateProvider = value => {
+    if (!value) return undefined;
+    if (typeof value !== 'string' || !value.trim()) throw Object.assign(new Error('provider must be a non-empty string'), { status: 400 });
+    const provider = value.trim();
+    const keys = deps.registry?.entries?.() || [];
+    const known = [
+      ...keys.filter(k => k.enabled).flatMap(k => [k.id, k.provider]),
+      ...listProviders(deps.cfg).map(p => p.id),
+    ];
+    const wanted = resolveProviderId(provider);
+    const ok = known.includes(provider) || (wanted ? known.some(id => resolveProviderId(id) === wanted) : false);
+    if (!ok) {
+      throw Object.assign(new Error(`Generation provider '${provider}' is not configured. Available: ${[...new Set(known)].join(', ') || 'none'}.`), { status: 400 });
+    }
+    return provider;
+  };
   // The ordinary JSON API remains available. The UI opts into streamed progress;
   // no draft prose is sent before JEV review and the final result is persisted first.
   const respondToTurn = async (req, res, conv, message, create = false) => {
+    const provider = validateProvider(req.body?.provider);
     const streamed = (req.get('accept') || '').includes('application/x-ndjson');
     if (streamed) {
       res.status(create ? 201 : 200).set({ 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
@@ -32,7 +54,7 @@ export function createRouter(deps) {
     }
     const write = payload => { if (!res.destroyed) res.write(JSON.stringify(payload) + '\n'); };
     try {
-      const result = await runMemoryTurn(deps, conv, message, event => { if (streamed) write({ type: 'progress', event }); });
+      const result = await runMemoryTurn(deps, conv, message, event => { if (streamed) write({ type: 'progress', event }); }, provider);
       if (create) await deps.store.createConversation(result.conversation);
       else await deps.store.saveConversation(result.conversation);
       if (streamed) { write({ type: 'result', result }); res.end(); }
@@ -138,7 +160,7 @@ export function createRouter(deps) {
       const goal = String(req.body?.goal || '').trim();
       if (!goal) return res.status(400).json({ error: 'goal is required' });
       const conv = makeConversation({ title: goal.slice(0, 60) });
-      const { conversation, response, decisions } = await synthesizeChatProject(deps, conv, goal, req.body?.constraints || {});
+      const { conversation, response, decisions } = await synthesizeChatProject(deps, conv, goal, req.body?.constraints || {}, validateProvider(req.body?.provider));
       await deps.store.createConversation(conversation);
       // Return legacy shape as well
       const project = { id: conversation.id, createdAt: conversation.createdAt, updatedAt: conversation.updatedAt, state: conversation.projectState };
@@ -178,8 +200,8 @@ export function createRouter(deps) {
           conv = makeConversation({ id: proj.id, createdAt: proj.createdAt, updatedAt: proj.updatedAt, title: proj.state.goal, projectState: proj.state, messages: [] });
         }
         const { conversation, response, decisions } = conv.memory?.revision
-          ? await runMemoryTurn(deps, conv, validateMessage(req.body?.text))
-          : await handleChatMessage(deps, conv, req.body || {});
+          ? await runMemoryTurn(deps, conv, validateMessage(req.body?.text), undefined, validateProvider(req.body?.provider))
+          : await handleChatMessage(deps, conv, { ...(req.body || {}), provider: validateProvider(req.body?.provider) });
         await deps.store.saveConversation(conversation);
         const project = { id: conversation.id, createdAt: conversation.createdAt, updatedAt: conversation.updatedAt, state: conversation.projectState };
         res.json({ project, response: { text: response.content, suggestions: [] }, decisions, conversation });
