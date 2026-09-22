@@ -26,19 +26,55 @@ interface ActiveRun {
 }
 let _active: ActiveRun | null = null;
 
+function _genSessionId(): string {
+  return 'ws-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+}
+
+function _sessionStorageKey(): string {
+  try {
+    const sk = scopeKey();
+    // scopeKey may contain path chars; keep key readable but unique
+    return `velxio.forge.session.${sk}`;
+  } catch {
+    return 'velxio.forge.session';
+  }
+}
+
 /** Stable id for this browser workspace's forge memory session. The backend
  * maps it to one Forge conversation, so notes persist across runs and reloads
- * while different projects/examples stay separate. */
+ * while different projects/examples stay separate.
+ * Now per-scope (project/example/path) and regeneratable per new chat. */
 export function forgeSession(): string {
   try {
-    let value = localStorage.getItem('velxio.forge.session');
+    const key = _sessionStorageKey();
+    let value = localStorage.getItem(key);
     if (!value || !/^[a-zA-Z0-9_-]{1,80}$/.test(value)) {
-      value = 'ws-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-      localStorage.setItem('velxio.forge.session', value);
+      // Migrate old global session if present, otherwise fresh
+      const legacy = localStorage.getItem('velxio.forge.session');
+      if (legacy && /^[a-zA-Z0-9_-]{1,80}$/.test(legacy)) {
+        value = legacy;
+      } else {
+        value = _genSessionId();
+      }
+      localStorage.setItem(key, value);
     }
     return value;
   } catch {
     return 'ws-default'; // private mode: one shared session is the safe fallback
+  }
+}
+
+/** Force a brand new forge session for the current scope — called on New Chat. */
+export function newForgeSession(): string {
+  try {
+    const key = _sessionStorageKey();
+    const value = _genSessionId();
+    localStorage.setItem(key, value);
+    // also update legacy key so old code that still reads it gets the new one
+    localStorage.setItem('velxio.forge.session', value);
+    return value;
+  } catch {
+    return 'ws-default';
   }
 }
 
