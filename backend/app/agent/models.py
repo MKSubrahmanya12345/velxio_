@@ -17,7 +17,7 @@ Coordinate = Annotated[float, Field(ge=-5000, le=5000, allow_inf_nan=False)]
 # code and tests read them by name.
 PINS: dict[str, list[str]] = catalog.PINS
 PROPERTIES: dict[str, set[str]] = catalog.PROPERTIES
-BOARD_CAPABILITIES: dict[str, dict] = {catalog.DEFAULT_BOARD: catalog.board_capabilities()}
+BOARD_CAPABILITIES: dict[str, dict] = {bid: catalog.board_capabilities(bid) for bid in catalog.BOARDS.keys()}
 
 # Largest designs the agent will build: enough for a class project, small enough
 # that the live simulation stays interactive in a browser tab.
@@ -32,8 +32,27 @@ class StrictModel(BaseModel):
 
 class Board(StrictModel):
     id: Id
+    boardKind: str = Field(default="arduino-uno", min_length=1, max_length=64)
     x: Coordinate = 100
     y: Coordinate = 120
+
+    @model_validator(mode="after")
+    def valid_board_kind(self):
+        # Allow any board from catalog + legacy aliases
+        if self.boardKind not in catalog.BOARDS:
+            # Try to resolve common aliases
+            aliases = {
+                "uno": "arduino-uno",
+                "nano": "arduino-nano",
+                "mega": "arduino-mega",
+                "esp32": "esp32",
+                "pico": "raspberry-pi-pico",
+                "rp2040": "raspberry-pi-pico",
+            }
+            if self.boardKind.lower() in aliases:
+                self.boardKind = aliases[self.boardKind.lower()]
+            # Still allow unknown for forward compat, just don't validate pins strictly
+        return self
 
 
 class Part(StrictModel):
@@ -130,21 +149,19 @@ class Project(StrictModel):
                 raise ValueError(f"Duplicate {key}")
         pins_by_id = {p.id: p.pins for p in self.components}
         if self.board:
-            pins_by_id[self.board.id] = catalog.board_pins()
+            # Cursor-like: support all 30 boards
+            bkind = getattr(self.board, 'boardKind', catalog.DEFAULT_BOARD) or catalog.DEFAULT_BOARD
+            if bkind not in catalog.BOARDS:
+                bkind = catalog.DEFAULT_BOARD
+            pins_by_id[self.board.id] = catalog.board_pins(bkind)
         by_id = {p.id: p for p in self.components}
         for wire in self.wires:
             for end in (wire.start, wire.end):
                 known = pins_by_id.get(end.componentId)
                 resolved = None if known is None else catalog.resolve_pin(known, end.pinName)
                 if resolved is None:
-                    # A pin that names nothing is a real error, but the error has
-                    # to carry the pin list (and the variant that would make the
-                    # name legal) or every repair attempt is a guess.
                     raise ValueError(endpoint_error(end, known, by_id.get(end.componentId)))
                 if resolved != end.pinName:
-                    # Deterministic repair of an obvious misspelling, the same way
-                    # the JSON coercers repair a shape slip: the model meant the
-                    # pin that exists, and the canvas only has that spelling.
                     end.pinName = resolved
             if wire.start == wire.end:
                 raise ValueError("A wire must connect two different pins")
@@ -409,15 +426,22 @@ def merge_items(old, new, removed, key):
 
 def apply_patch(project: Project, patch: Patch, expectations=None) -> Project:
     if patch.board and project.board and patch.board.id != project.board.id:
-        raise ValueError("Existing board ID must be preserved")
+        # Allow board kind change but preserve ID for continuity (Cursor-like)
+        patch.board.id = project.board.id
     candidate = Project(
         board=patch.board or project.board,
         components=merge_items(project.components, patch.upsert_components, patch.remove_components, "id"),
         wires=merge_items(project.wires, patch.upsert_wires, patch.remove_wires, "id"),
         files=merge_items(project.files, patch.upsert_files, patch.remove_files, "name"),
     )
-    if not candidate.board or sum(f.name.endswith(".ino") for f in candidate.files) != 1:
-        raise ValueError("A build needs one Arduino Uno and exactly one .ino file")
+    # Velxio = Cursor: support any board, any file type
+    has_code = any(f.name.endswith((".ino", ".py", ".cpp", ".c", ".h")) for f in candidate.files)
+    if not candidate.board or not has_code:
+        # Allow empty initially but require board + code for validation
+        if not candidate.board:
+            raise ValueError("A build needs at least one board (any of 30 supported)")
+        if not has_code:
+            raise ValueError("A build needs at least one source file (.ino, .py, .cpp)")
     # Restrict user includes to the core and explicit workspace headers. This
     # is a capability check, NOT a substitute for an OS compiler sandbox.
     filenames = {f.name for f in candidate.files}

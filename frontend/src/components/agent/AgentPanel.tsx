@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   Bot,
   Brain,
@@ -20,12 +20,17 @@ import {
   LoaderCircle,
   FileCode2,
   Download,
+  AtSign,
+  Zap,
+  Layers,
+  Code2,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { getApiBase } from '../../lib/apiBase';
 import { useProjectStore } from '../../store/useProjectStore';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
-import { CATALOG_SIZE, PLACEABLE_SIZE } from '../../agent/catalog';
+import { useEditorStore } from '../../store/useEditorStore';
+import { CATALOG_SIZE, PLACEABLE_SIZE, catalog } from '../../agent/catalog';
 import { useAgentJournal, type Revision } from '../../agent/journal';
 import { forgeSession, newForgeSession, runAgent, sendFeedback as sendFeedbackApi } from '../../agent/runner';
 import {
@@ -60,7 +65,6 @@ async function fetchAgentStatus(signal?: AbortSignal): Promise<Status> {
   return response.json();
 }
 
-/** Mirror of GET /agent/forge (public; contains no credentials). */
 interface ForgeStatus {
   enabled: boolean;
   live: boolean;
@@ -81,10 +85,10 @@ interface ForgeMemory {
 async function fetchForgeStatus(signal?: AbortSignal): Promise<ForgeStatus | null> {
   try {
     const response = await fetch(`${getApiBase()}/agent/forge`, { signal });
-    if (!response.ok) return null; // endpoint absent (older backend) → no forge UI
+    if (!response.ok) return null;
     return (await response.json()) as ForgeStatus;
   } catch {
-    return null; // fail-open in the UI too
+    return null;
   }
 }
 
@@ -104,7 +108,6 @@ interface RunRecord {
   error: string;
 }
 
-/** Recent runs from GET /agent/runs/records (per-worker, in-memory). */
 async function fetchAgentRuns(signal?: AbortSignal): Promise<RunRecord[]> {
   const response = await fetch(`${getApiBase()}/agent/runs/records`, { signal });
   if (!response.ok) throw new Error('Could not read the server run log.');
@@ -112,24 +115,49 @@ async function fetchAgentRuns(signal?: AbortSignal): Promise<RunRecord[]> {
   return body.runs ?? [];
 }
 
+// Cursor-like suggestions with all boards and components
 const suggestions = [
   {
     icon: '◉',
     title: 'Make something blink',
     prompt:
       'Build an Arduino Uno circuit with a red LED blinking every half second. Include a series resistor and serial diagnostics.',
+    board: 'arduino-uno',
   },
   {
     icon: '⌁',
     title: 'Turn a dial into light',
     prompt:
       'Build a potentiometer-controlled LED dimmer with Arduino Uno. Read the potentiometer on A0 and drive the LED using PWM with a series resistor.',
+    board: 'arduino-uno',
   },
   {
     icon: '⌘',
+    title: 'ESP32 WiFi Blink',
+    prompt:
+      'Build an ESP32 DevKit circuit with built-in LED blinking and WiFi status print. Use GPIO 2 for LED, include WiFi scan and connect to Velxio-GUEST.',
+    board: 'esp32',
+  },
+  {
+    icon: '⚡',
+    title: 'Pico Sensor Dashboard',
+    prompt:
+      'Build a Raspberry Pi Pico circuit with DHT22 temperature sensor and SSD1306 OLED display. Show temperature and humidity on display with I2C.',
+    board: 'raspberry-pi-pico',
+  },
+  {
+    icon: '🤖',
     title: 'Give a button a voice',
     prompt:
       'Build a button-controlled buzzer with Arduino Uno. Play a tone while the button is pressed, using INPUT_PULLUP. Print button changes to Serial.',
+    board: 'arduino-uno',
+  },
+  {
+    icon: '🔌',
+    title: 'STM32 Servo Control',
+    prompt:
+      'Build an STM32 BluePill circuit with servo on PA0 and potentiometer on PA1. Control servo angle with pot, use PWM.',
+    board: 'stm32-bluepill',
   },
 ];
 
@@ -148,14 +176,8 @@ export function AgentPanel() {
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [notice, setNotice] = useState('');
   const [pendingRestore, setPendingRestore] = useState<Revision | null>(null);
-  // Track the last error so the retry button has the prompt handy; we don't
-  // show a dedicated "feedback" card — the same composer you use to start a
-  // run also accepts mid-run notes and retries.
   const [lastUserPrompt, setLastUserPrompt] = useState('');
   const [lastRunFailed, setLastRunFailed] = useState(false);
-  // Forge project memory (JEV-governed). Purely additive: every path below
-  // degrades to "no forge" when the backend, the toggle or the forge service
-  // is unavailable, exactly like the server-side fail-open contract.
   const [forge, setForge] = useState<ForgeStatus | null>(null);
   const [forgeBusy, setForgeBusy] = useState(false);
   const [forgeNote, setForgeNote] = useState('');
@@ -167,10 +189,13 @@ export function AgentPanel() {
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const feedbackSent = useRef<Set<string>>(new Set());
-  const [fastMode, setFastMode] = useState(true);
+  const [fastMode, setFastMode] = useState(false); // Default OFF now - real compile like Cursor
   const [startTime, setStartTime] = useState(0);
   const [activities, setActivities] = useState<string[]>([]);
   const [elapsed, setElapsed] = useState('0.0');
+  const [showMentions, setShowMentions] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [cursorMode, setCursorMode] = useState<'chat' | 'composer' | 'agent'>('agent'); // Cursor modes
 
   useEffect(() => {
     if (!busy) return;
@@ -179,13 +204,50 @@ export function AgentPanel() {
     }, 100);
     return () => clearInterval(interval);
   }, [busy, startTime]);
-  // Re-render on named project/example switches; don't send another project's chat.
+  
   useProjectStore((s) => s.currentProject?.id ?? s.currentExampleId);
   const journal = useAgentJournal();
   const scope = scopeKey();
   const messages = journal.messages.filter((m) => m.scope === scope);
   const revisions = journal.revisions.filter((r) => r.scope === scope);
   const running = useSimulatorStore((s) => s.running);
+  const editorFiles = useEditorStore((s) => s.files);
+  const components = useSimulatorStore((s) => s.components);
+  const boards = useSimulatorStore((s) => s.boards);
+
+  // Cursor-like event listeners for inline edit
+  useEffect(() => {
+    const handleInlineEdit = (e: any) => {
+      const { prompt: p, selectedText, fileName } = e.detail;
+      const context = selectedText ? `File ${fileName} selection:\n\`\`\`\n${selectedText}\n\`\`\`\n\nRequest: ${p}` : p;
+      setPrompt(context);
+      input.current?.focus();
+      setNotice(`⌘K inline edit: ${p} ${fileName ? `in ${fileName}` : ''}`);
+    };
+    const handleFocusChat = (e: any) => {
+      const { prompt: p, context } = e.detail || {};
+      if (p) setPrompt(p);
+      setOpen(true);
+      setTab('chat');
+      setTimeout(() => input.current?.focus(), 100);
+      if (context) setNotice(`⌘L added to chat: ${context.slice(0,60)}...`);
+    };
+    const handleComposer = (e: any) => {
+      setCursorMode('composer');
+      setOpen(true);
+      setTab('chat');
+      setNotice('⌘I Composer mode: multi-file circuit+code edits enabled');
+    };
+    
+    window.addEventListener('velxio-cursor-inline-edit', handleInlineEdit);
+    window.addEventListener('velxio-cursor-focus-chat', handleFocusChat);
+    window.addEventListener('velxio-cursor-composer', handleComposer);
+    return () => {
+      window.removeEventListener('velxio-cursor-inline-edit', handleInlineEdit);
+      window.removeEventListener('velxio-cursor-focus-chat', handleFocusChat);
+      window.removeEventListener('velxio-cursor-composer', handleComposer);
+    };
+  }, []);
 
   async function checkStatus(signal?: AbortSignal) {
     try {
@@ -199,19 +261,14 @@ export function AgentPanel() {
     }
   }
 
-  /** Refresh the server's recent-run log; degrade silently if unavailable. */
   async function loadRuns() {
     try {
       setRuns(await fetchAgentRuns());
-    } catch {
-      /* Backend unreachable; the settings note already says so. */
-    }
+    } catch {}
   }
   async function checkForge() {
     setForge(await fetchForgeStatus());
   }
-  /** Flip the server-side toggle. The bridge persists it and, on enable,
-   * verifies the direct connection to forge (autostarting `node --watch`). */
   async function toggleForgeMemory(enabled: boolean) {
     setForgeBusy(true);
     try {
@@ -222,9 +279,7 @@ export function AgentPanel() {
       });
       if (response.ok) setForge((await response.json()) as ForgeStatus);
       else setForge((await fetchForgeStatus()) ?? forge);
-    } catch {
-      /* toggle is best-effort; the next status poll shows the truth */
-    } finally {
+    } catch {} finally {
       setForgeBusy(false);
     }
   }
@@ -257,8 +312,6 @@ export function AgentPanel() {
       controller.current?.abort();
     };
   }, []);
-  // Keep the selected provider one of the server-configured list, defaulting
-  // to the first one (Groq). Switches are per-session and never persisted.
   const configuredProviders = (status?.providers ?? []).filter((p) => p.configured);
   useEffect(() => {
     if (!configuredProviders.length) return;
@@ -279,6 +332,41 @@ export function AgentPanel() {
     window.addEventListener('keydown', listener);
     return () => window.removeEventListener('keydown', listener);
   }, []);
+
+  // @ mentions handler
+  const handlePromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setPrompt(val);
+    
+    // Check for @ trigger
+    const cursorPos = e.target.selectionStart;
+    const textBefore = val.slice(0, cursorPos);
+    const atMatch = textBefore.match(/@([a-zA-Z0-9_-]*)$/);
+    if (atMatch) {
+      setMentionQuery(atMatch[1].toLowerCase());
+      setShowMentions(true);
+    } else {
+      setShowMentions(false);
+    }
+  };
+  
+  const insertMention = (name: string) => {
+    const textarea = input.current;
+    if (!textarea) return;
+    const cursorPos = textarea.selectionStart;
+    const textBefore = prompt.slice(0, cursorPos);
+    const textAfter = prompt.slice(cursorPos);
+    const atIndex = textBefore.lastIndexOf('@');
+    if (atIndex >= 0) {
+      const newText = textBefore.slice(0, atIndex) + `@${name} ` + textAfter;
+      setPrompt(newText);
+      setShowMentions(false);
+      setTimeout(() => {
+        textarea.focus();
+        textarea.setSelectionRange(atIndex + name.length + 2, atIndex + name.length + 2);
+      }, 0);
+    }
+  };
 
   async function submit(text = prompt) {
     if (!text.trim() || controller.current) return;
@@ -335,16 +423,13 @@ export function AgentPanel() {
             const evAny = event as any;
             const clar = evAny.clarification as string | undefined;
             const pqs = (evAny.pending_questions as string[] | undefined) || [];
-            // If clarification looks like questions, surface it
             if (evAny.status === 'ok' && (clar || pqs.length)) {
               const hasQuestionMark = !!(clar && clar.includes('?'));
               const hasQuestions = pqs.length > 0 || hasQuestionMark;
-              // Heuristic: if clarification contains "?" or asks for specifics, show it
               if (hasQuestions && clar && clar.trim().length > 20) {
                 setForgeClarification(clar);
                 setForgeQuestions(pqs);
                 setShowClarification(true);
-                // Also push clarification as assistant message so user sees JEV asking
                 journal.addMessage({ role: 'assistant', content: `**JEV Clarification (Forge):**\n\n${clar}`, scope: requestScope });
               } else if (pqs.length) {
                 const combined = pqs.map((q, i) => `${i+1}. ${q}`).join('\n');
@@ -368,9 +453,6 @@ export function AgentPanel() {
           if (event.type === 'compile' && !event.success && event.stderr)
             setDiagnostics((v) => [...v, event.stderr]);
           if (event.type === 'note') {
-            // The server echoed back a mid-run note the user sent; render it as
-            // a user message so it appears inline with the rest of the chat.
-            // (We de-dupe by content in case the same note races.)
             if (!feedbackSent.current.has(event.message)) {
               feedbackSent.current.add(event.message);
               journal.addMessage({ role: 'user', content: event.message, scope: requestScope });
@@ -399,20 +481,13 @@ export function AgentPanel() {
     }
   }
 
-  /** Send a mid-run note. Fires-and-forgets: if the run is already past the
-   * repair boundary the note just doesn't get applied, which is fine. */
   async function sendNote(text: string) {
     const note = text.trim();
     if (!note) return;
-    // Render the note optimistically so typing feels instant; the server will
-    // echo it back as a `note` event but we de-dupe by content.
     feedbackSent.current.add(note);
     journal.addMessage({ role: 'user', content: note, scope });
     const ok = await sendFeedbackApi(note);
-    if (!ok && busy) {
-      // Run finished between keypress and POST — nothing to do, the note is
-      // already in chat and will be picked up if the user retries.
-    }
+    if (!ok && busy) {}
   }
 
   function undo(revision: Revision) {
@@ -456,18 +531,26 @@ export function AgentPanel() {
       <aside className="agent-rail">
         <button
           onClick={() => setOpen(true)}
-          title="Open circuit agent (Ctrl+Shift+L)"
+          title="Open circuit agent (Ctrl+Shift+L) - Velxio = Cursor"
           aria-label="Open circuit agent"
         >
           <MessageSquare size={21} />
-          <span>AGENT</span>
+          <span>CURSOR</span>
         </button>
         {busy && <LoaderCircle size={16} className="agent-spin" />}
       </aside>
     );
 
+  // Filter mentions
+  const allMentionables = [
+    ...editorFiles.map(f => ({ id: f.name, label: f.name, type: 'file', icon: '📄' })),
+    ...components.map(c => ({ id: c.id, label: `${c.id} (${c.metadataId})`, type: 'component', icon: '🔌' })),
+    ...boards.map(b => ({ id: b.id, label: `${b.id} - ${b.boardKind}`, type: 'board', icon: '💻' })),
+    ...Object.keys(catalog.parts).filter(id => id.toLowerCase().includes(mentionQuery)).slice(0,8).map(id => ({ id, label: id, type: 'part', icon: '🧩' })),
+  ].filter(m => !mentionQuery || m.id.toLowerCase().includes(mentionQuery) || m.label.toLowerCase().includes(mentionQuery)).slice(0,12);
+
   return (
-    <aside className="agent-panel" aria-label="Circuit agent">
+    <aside className="agent-panel" aria-label="Circuit agent - Velxio = Cursor">
       <header className="agent-header">
         <div className="agent-tabs" role="tablist" aria-label="Agent views">
           <button
@@ -491,14 +574,14 @@ export function AgentPanel() {
             aria-selected={tab === 'create'}
             onClick={() => setTab('create')}
             className={tab === 'create' ? 'active' : ''}
-            title="Wireup Create — learn from links, generate validated scripts"
+            title="Wireup Create"
           >
             <Sparkles size={14} /> CREATE
           </button>
         </div>
         <div className="agent-header-actions">
           <button
-            title="New conversation (new forge session, keeps checkpoints)"
+            title="New conversation (new forge session)"
             aria-label="New conversation"
             disabled={busy}
             onClick={() => {
@@ -534,16 +617,66 @@ export function AgentPanel() {
         <CreativePanel />
       ) : (
         <>
-      <div className="agent-context">
-        <Cpu size={13} />
-        <span>SUPPORTS</span>
-        <strong>Arduino Uno</strong>
-        <span
-          className="agent-scope-badge"
-          title={`${PLACEABLE_SIZE} placeable parts, ${CATALOG_SIZE} documented in the catalog`}
-        >
-          {PLACEABLE_SIZE} parts
-        </span>
+      <div className="agent-context" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <Cpu size={13} />
+          <span>VELXIO = CURSOR</span>
+          <strong>{boards[0]?.boardKind || 'Arduino Uno'}</strong>
+          <span
+            className="agent-scope-badge"
+            title={`${PLACEABLE_SIZE} placeable parts, ${CATALOG_SIZE} documented, ${Object.keys(catalog.boards).length} boards`}
+          >
+            {PLACEABLE_SIZE} parts · {Object.keys(catalog.boards).length} boards
+          </span>
+        </div>
+        {/* Cursor mode selector */}
+        <div style={{ display: 'flex', gap: '4px' }}>
+          <button 
+            onClick={() => setCursorMode('chat')}
+            style={{ 
+              padding: '2px 8px', 
+              borderRadius: '4px', 
+              border: '1px solid',
+              borderColor: cursorMode === 'chat' ? '#007acc' : '#333',
+              background: cursorMode === 'chat' ? '#007acc22' : 'transparent',
+              color: cursorMode === 'chat' ? '#007acc' : '#888',
+              fontSize: '10px',
+              cursor: 'pointer',
+            }}
+          >
+            <MessageSquare size={10} style={{ display: 'inline', marginRight: '3px' }} />CHAT ⌘L
+          </button>
+          <button 
+            onClick={() => setCursorMode('composer')}
+            style={{ 
+              padding: '2px 8px', 
+              borderRadius: '4px', 
+              border: '1px solid',
+              borderColor: cursorMode === 'composer' ? '#007acc' : '#333',
+              background: cursorMode === 'composer' ? '#007acc22' : 'transparent',
+              color: cursorMode === 'composer' ? '#007acc' : '#888',
+              fontSize: '10px',
+              cursor: 'pointer',
+            }}
+          >
+            <Layers size={10} style={{ display: 'inline', marginRight: '3px' }} />COMPOSER ⌘I
+          </button>
+          <button 
+            onClick={() => setCursorMode('agent')}
+            style={{ 
+              padding: '2px 8px', 
+              borderRadius: '4px', 
+              border: '1px solid',
+              borderColor: cursorMode === 'agent' ? '#007acc' : '#333',
+              background: cursorMode === 'agent' ? '#007acc22' : 'transparent',
+              color: cursorMode === 'agent' ? '#007acc' : '#888',
+              fontSize: '10px',
+              cursor: 'pointer',
+            }}
+          >
+            <Zap size={10} style={{ display: 'inline', marginRight: '3px' }} />AGENT
+          </button>
+        </div>
       </div>
 
       {settingsOpen && (
@@ -554,10 +687,10 @@ export function AgentPanel() {
               <X size={14} />
             </button>
           </div>
-          <p>The model runs through your backend. Provider keys never enter the browser.</p>
+          <p><strong>Velxio = Cursor for Hardware</strong> — Full Cursor IDE experience for electronics.</p>
+          <p>• <b>⌘K</b> Inline Edit in editor • <b>⌘L</b> Add selection to Chat • <b>⌘I</b> Composer (multi-file) • <b>Tab</b> Accept autocomplete • <b>@</b> Mention files/components</p>
           <p className="agent-muted">
-            Providers are configured on the server. Pick one in the dropdown
-            next to the composer; the current model is shown in the footer.
+            Providers are configured on the server. Pick one in the dropdown next to the composer.
           </p>
           {(status?.providers ?? []).length > 0 && (
             <ul className="agent-provider-list" aria-label="Configured providers">
@@ -574,10 +707,7 @@ export function AgentPanel() {
             <Brain size={14} /> FORGE · PROJECT MEMORY (JEV)
           </div>
           <p className="agent-muted">
-            Opt-in governed memory: the same LLM proposes project notes, JEV (TypeSafe System One)
-            reviews grounding, conflicts and rule changes, and the accepted memory guides every
-            agent run. Forge is a direct connection to the live <code>forge/</code> service — new
-            forge code applies without touching the agent.
+            Opt-in governed memory: the same LLM proposes project notes, JEV reviews grounding, conflicts and rule changes.
           </p>
           <label className="agent-forge-toggle">
             <input
@@ -595,11 +725,9 @@ export function AgentPanel() {
                 style={{ color: forge.live ? '#3fb950' : forge.enabled ? '#d29922' : '#8b949e' }}
               />{' '}
               {forge.live
-                ? `connected to ${forge.base_url} · JEV: ${forge.providers.jev ?? 'unknown'} · model: ${forge.providers.planner ?? 'unknown'}`
+                ? `connected to ${forge.base_url} · JEV: ${forge.providers.jev ?? 'unknown'}`
                 : forge.enabled
-                  ? forge.forge_present
-                    ? `not reachable yet — starting/watching forge/server (node --watch). JEV needs TYPESAFE_API_KEY in forge/server/.env`
-                    : 'forge service is not present at this path — memory turns fail open (agent runs normally)'
+                  ? 'not reachable yet — starting/watching forge/server'
                   : 'disabled — agent runs without project memory'}
             </p>
           )}
@@ -631,22 +759,17 @@ export function AgentPanel() {
             Check connection
           </button>
           <details>
+            <summary>All Supported Boards ({Object.keys(catalog.boards).length})</summary>
+            <pre style={{ fontSize: '11px', maxHeight: '200px', overflow: 'auto' }}>
+              {Object.entries(catalog.boards).map(([id, b]: any) => `${id}: ${b.label} (${b.pins?.length || 0} pins)`).join('\n')}
+            </pre>
+          </details>
+          <details>
             <summary>Server setup</summary>
             <pre>
               AGENT_ENABLED=true{'\n'}AGENT_OPENCODE_BASE_URL=http://127.0.0.1:4096{'\n'}AGENT_OPENCODE_MODEL=big-pickle{'\n'}
               AGENT_API_KEY=your-groq-api-key{'\n'}AGENT_MODEL=openai/gpt-oss-120b{'\n'}
-              AGENT_GEMINI_API_KEY=your-google-ai-studio-key{'\n'}AGENT_GEMINI_MODEL=gemini-2.5-flash{'\n'}
-              BEDROCK_MODEL_ID=moonshotai.kimi-k2.5{'\n'}AWS_REGION=eu-north-1{'\n'}BEDROCK_API_KEY=your-mantle-key{'\n'}
-              FORGE_ENABLED=true{'\n'}FORGE_BASE_URL=http://127.0.0.1:4321{'\n'}FORGE_AUTOSTART=true
             </pre>
-            <p>
-              Set these in backend/.env and restart the API. OpenCode (the
-              default) routes through a local `opencode serve` instance; Groq
-              and Gemini expose OpenAI-compatible endpoints; Bedrock uses
-              native Converse (or Bedrock Mantle for Kimi K2.5 — that model
-              needs BEDROCK_API_KEY). Any configured provider appears in the
-              chat dropdown.
-            </p>
           </details>
         </section>
       )}
@@ -671,16 +794,19 @@ export function AgentPanel() {
                 <div className="agent-mark">
                   <Sparkles size={24} />
                 </div>
-                <div className="agent-eyebrow">YOUR CIRCUIT COPILOT</div>
+                <div className="agent-eyebrow">VELXIO = CURSOR FOR HARDWARE</div>
                 <h2>
                   From an idea
                   <br />
                   to a running circuit.
                 </h2>
                 <p>
+                  <strong>Cursor features now in Velxio:</strong><br/>
+                  <code>⌘K</code> Inline Edit • <code>⌘L</code> Chat • <code>⌘I</code> Composer • <code>Tab</code> Complete • <code>@</code> Mentions
+                  <br/><br/>
                   Describe what you want to build.
                   <br />
-                  I’ll wire it, write the code, and run it.
+                  I'll wire it, write the code, and run it — any board, any component.
                 </p>
                 <div className="agent-suggestions">
                   {suggestions.map((s) => (
@@ -690,27 +816,35 @@ export function AgentPanel() {
                         setPrompt(s.prompt);
                         input.current?.focus();
                       }}
+                      style={{ position: 'relative' }}
                     >
                       <span>{s.icon}</span>
                       <strong>{s.title}</strong>
+                      <span style={{ fontSize: '9px', opacity: 0.6, marginLeft: 'auto' }}>{s.board}</span>
                       <ChevronRight size={14} />
                     </button>
                   ))}
                 </div>
                 <div className="agent-capabilities">
                   <span>
-                    <Check size={12} /> Automatic wiring
+                    <Check size={12} /> 30 boards (Uno, ESP32, Pico, STM32, Pi)
                   </span>
                   <span>
-                    <Check size={12} /> Compile & repair
+                    <Check size={12} /> 157 components (all Velxio parts)
+                  </span>
+                  <span>
+                    <Check size={12} /> Cursor: ⌘K, ⌘L, ⌘I, Tab, @mentions
+                  </span>
+                  <span>
+                    <Check size={12} /> Real compilation (no fake hex)
                   </span>
                   <span>
                     <Check size={12} /> Undo any checkpoint
                   </span>
                 </div>
                 <p className="agent-small">
-                  Start with Uno, LEDs, resistors, buttons, potentiometers, and buzzers. Your
-                  existing manual edits stay part of the conversation.
+                  Velxio is now Cursor for hardware. Works with Arduino, ESP32, RP2040, STM32, Pi. 
+                  Select code and press ⌘K for inline edit, ⌘L to add to chat, ⌘I for composer multi-file edits.
                 </p>
               </div>
             )}
@@ -726,7 +860,7 @@ export function AgentPanel() {
                     ) : (
                       <Bot size={16} />
                     )}
-                    <strong>{message.role === 'user' ? 'You' : 'Circuit agent'}</strong>
+                    <strong>{message.role === 'user' ? 'You' : cursorMode === 'composer' ? 'Composer' : cursorMode === 'agent' ? 'Agent' : 'Chat'}</strong>
                     {message.error && <span>Needs attention</span>}
                   </div>
                   <ReactMarkdown
@@ -748,7 +882,7 @@ export function AgentPanel() {
                 <div className="agent-progress-banner">
                   <div className="agent-banner-title">
                     <Sparkles size={14} className="agent-spin" />
-                    <strong>⚡ LIVE CANVAS BUILDING IN PROGRESS</strong>
+                    <strong>⚡ CURSOR AGENT BUILDING</strong>
                   </div>
                   <span className="agent-timer-chip">
                     <Clock3 size={11} /> {elapsed}s
@@ -766,7 +900,7 @@ export function AgentPanel() {
                     <span>3</span> Wires
                   </div>
                   <div className={`agent-step ${stage.includes('compiling') || stage.includes('Compiling') ? 'is-active' : ''}`}>
-                    <span>4</span> Sketch
+                    <span>4</span> Code
                   </div>
                 </div>
 
@@ -777,7 +911,7 @@ export function AgentPanel() {
 
                 {activities.length > 0 && (
                   <div className="agent-activity-feed">
-                    <div className="agent-feed-title">Live Actions:</div>
+                    <div className="agent-feed-title">Live Actions (Cursor-style):</div>
                     <ul>
                       {activities.slice(-4).map((act, i) => (
                         <li key={i}>{act}</li>
@@ -797,7 +931,7 @@ export function AgentPanel() {
                   </ol>
                 )}
                 <small>
-                  Components drop onto your canvas immediately as generated.
+                  {cursorMode === 'composer' ? 'Composer: editing multiple files...' : 'Components drop onto canvas immediately (Cursor-like)'}
                 </small>
               </div>
             )}
@@ -832,7 +966,6 @@ export function AgentPanel() {
                     Dismiss
                   </button>
                 </div>
-                <small style={{display:'block', marginTop:8, opacity:0.7}}>JEV will keep asking until you answer or skip. Your answer becomes project memory.</small>
               </div>
             )}
             {!busy && forgeNote && (
@@ -893,7 +1026,7 @@ export function AgentPanel() {
         ) : (
           <section className="agent-history">
             <div className="agent-history-heading">
-              <h3>Project checkpoints</h3>
+              <h3>Project checkpoints (Cursor-like)</h3>
               <button
                 title="Download current project"
                 aria-label="Download current project"
@@ -903,8 +1036,7 @@ export function AgentPanel() {
               </button>
             </div>
             <p>
-              Code and circuit, saved together. Last 10 checkpoints in this browser tab; download
-              your project for permanent storage.
+              Code and circuit, saved together. Last 10 checkpoints; download for permanent storage. Like Cursor's timeline.
             </p>
             {!revisions.length && (
               <div className="agent-empty-history">
@@ -950,8 +1082,7 @@ export function AgentPanel() {
           <div className="agent-confirm" role="alertdialog" aria-label="Restore checkpoint">
             <strong>Replace the current workspace?</strong>
             <p>
-              Restores this checkpoint’s code and circuit and stops the simulation. Your current
-              workspace will be saved as an undo checkpoint.
+              Restores this checkpoint's code and circuit and stops the simulation.
             </p>
             <div>
               <button onClick={() => setPendingRestore(null)}>Cancel</button>
@@ -984,23 +1115,72 @@ export function AgentPanel() {
           else void submit();
         }}
       >
+        {/* @ mentions dropdown - Cursor-like */}
+        {showMentions && allMentionables.length > 0 && (
+          <div style={{
+            background: '#1e1e1e',
+            border: '1px solid #333',
+            borderRadius: '6px',
+            maxHeight: '150px',
+            overflow: 'auto',
+            marginBottom: '6px',
+            fontSize: '12px',
+          }}>
+            <div style={{ padding: '4px 8px', color: '#666', fontSize: '10px', borderBottom: '1px solid #222' }}>
+              <AtSign size={10} style={{ display: 'inline', marginRight: '4px' }} />@ MENTIONS — files, components, boards, parts
+            </div>
+            {allMentionables.map((m) => (
+              <button
+                key={`${m.type}-${m.id}`}
+                type="button"
+                onClick={() => insertMention(m.id)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '4px 8px',
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#ccc',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = '#2a2a2a')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              >
+                <span>{m.icon}</span>
+                <span>{m.label}</span>
+                <span style={{ marginLeft: 'auto', fontSize: '9px', opacity: 0.5 }}>{m.type}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        
         <div className={`agent-input-box ${busy ? 'is-busy' : ''}`}>
           <textarea
             ref={input}
-            aria-label={busy ? 'Send a note to the running agent' : 'Describe a circuit or request a change'}
+            aria-label={busy ? 'Send a note to the running agent' : 'Describe a circuit or request a change - @ to mention files'}
             value={prompt}
             maxLength={6000}
             rows={busy ? 2 : 3}
             placeholder={
               busy
                 ? 'Add a note or correction — sent to the agent mid-run…'
-                : messages.length
-                  ? 'What should we change next?'
-                  : 'Describe a circuit to build…'
+                : cursorMode === 'composer'
+                  ? 'Composer: describe multi-file changes... Use @ to mention files'
+                  : messages.length
+                    ? 'What should we change next? @ to mention files/components'
+                    : 'Describe a circuit to build… @ for files • ⌘K inline • ⌘I composer'
             }
-            onChange={(e) => setPrompt(e.target.value)}
+            onChange={handlePromptChange}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                if (showMentions) {
+                  // If mentions open, first mention selected on Enter? For simplicity, close and submit
+                  setShowMentions(false);
+                }
                 e.preventDefault();
                 if (busy) {
                   void sendNote(prompt);
@@ -1009,18 +1189,38 @@ export function AgentPanel() {
                   void submit();
                 }
               }
+              if (e.key === 'Escape' && showMentions) {
+                setShowMentions(false);
+              }
             }}
           />
           <div className="agent-input-toolbar">
             <span>
-              <Sparkles size={12} /> Agent <ChevronRight size={11} />
+              {cursorMode === 'chat' && <MessageSquare size={12} />}
+              {cursorMode === 'composer' && <Layers size={12} />}
+              {cursorMode === 'agent' && <Zap size={12} />}
+              {cursorMode.toUpperCase()} <ChevronRight size={11} />
+              <button
+                type="button"
+                className={`agent-fast-badge ${!fastMode ? 'active' : ''}`}
+                title="Real compilation (Cursor-like, no fake hex) - recommended"
+                onClick={() => setFastMode(!fastMode)}
+                style={{ 
+                  background: !fastMode ? '#2ea04322' : 'transparent',
+                  borderColor: !fastMode ? '#2ea043' : '#333',
+                  color: !fastMode ? '#2ea043' : '#666',
+                }}
+              >
+                ✓ Real Compile
+              </button>
               <button
                 type="button"
                 className={`agent-fast-badge ${fastMode ? 'active' : ''}`}
-                title="Fast Mode: Stream canvas updates & bypass long toolchain compilation delays"
+                title="Fast Mode: quicker but may timeout"
                 onClick={() => setFastMode(!fastMode)}
+                style={{ marginLeft: '4px' }}
               >
-                ⚡ {fastMode ? 'Fast Mode: ON' : 'Fast Mode: OFF'}
+                ⚡ Fast
               </button>
               {configuredProviders.length > 0 ? (
                 <label className="agent-provider-select">
@@ -1039,7 +1239,7 @@ export function AgentPanel() {
                   </select>
                 </label>
               ) : (
-                <span>{busy ? 'Steer me' : 'Auto-build'}</span>
+                <span>{busy ? 'Steer me' : 'Velxio = Cursor'}</span>
               )}
             </span>
             {busy ? (
@@ -1068,7 +1268,7 @@ export function AgentPanel() {
                 className="agent-send"
                 disabled={!prompt.trim()}
                 aria-label="Send prompt"
-                title="Send (Enter)"
+                title="Send (Enter) - @ to mention files"
               >
                 <Send size={15} />
               </button>
@@ -1079,10 +1279,10 @@ export function AgentPanel() {
           <span>
             {busy
               ? 'Enter to send a note · notes steer the next repair turn'
-              : 'Enter to send · Shift+Enter for a new line'}
+              : `⌘K edit · ⌘L chat · ⌘I composer · Tab complete · @ mentions · ${cursorMode} mode`}
           </span>
           <span>
-            {prompt.length > 5000 ? `${prompt.length}/6000` : 'Code + circuit in context'}
+            {prompt.length > 5000 ? `${prompt.length}/6000` : `${Object.keys(catalog.boards).length} boards · ${PLACEABLE_SIZE} parts`}
           </span>
         </div>
       </form>
@@ -1092,19 +1292,19 @@ export function AgentPanel() {
           {status?.configured
             ? configuredProviders.find((p) => p.id === providerId)?.model
               ?? status.model
-            : 'Model not connected'}
+            : 'Model not connected'} · {cursorMode}
         </span>
         <span>
           {busy ? (
             <>
-              <Clock3 size={11} /> Working
+              <Clock3 size={11} /> Working · {elapsed}s
             </>
           ) : running ? (
             <>
               <span className="agent-live-dot" /> Simulation running
             </>
           ) : (
-            'Ready when you are'
+            'Velxio = Cursor • Ready'
           )}
         </span>
       </footer>

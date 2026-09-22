@@ -22,7 +22,7 @@ const coord = z.number().finite().min(-5000).max(5000);
 const endpoint = z.object({ componentId: id, pinName: z.string().min(1).max(16) }).strict();
 export const projectSchema = z
   .object({
-    board: z.object({ id, x: coord, y: coord }).strict().nullable(),
+    board: z.object({ id, boardKind: z.string().min(1).max(64).optional(), x: coord, y: coord }).strict().nullable(),
     components: z
       .array(
         z
@@ -58,7 +58,7 @@ export const projectSchema = z
           .object({
             name: z
               .string()
-              .regex(/^[A-Za-z0-9_-]+\.(ino|h|cpp|c)$/)
+              .regex(/^[A-Za-z0-9_-]+\.(ino|h|cpp|c|py)$/)
               .max(80),
             content: z.string().max(40000),
           })
