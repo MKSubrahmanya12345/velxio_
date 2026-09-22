@@ -83,21 +83,21 @@ class Settings(BaseSettings):
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
     AWS_SESSION_TOKEN: str = ""
-    BEDROCK_MAX_TOKENS: int = 10000
+    BEDROCK_MAX_TOKENS: int = 30000
     BEDROCK_TEMPERATURE: float = 0.2
     BEDROCK_TOP_P: float = 0.9
     BEDROCK_TIMEOUT_MS: int = 120000
     BEDROCK_MAX_RETRIES: int = 50
     # Agent loop bounds — repair attempts, tool rounds, provider resilience.
-    AGENT_MAX_ATTEMPTS: int = 3
+    AGENT_MAX_ATTEMPTS: int = 15
     # Research rounds are cheap (catalog lookups) and are what make the loop
     # agentic; draft rounds compile and may simulate, so they are separate.
-    AGENT_MAX_TOOL_ROUNDS: int = 5
-    AGENT_MAX_DRAFT_ROUNDS: int = 4
-    AGENT_PROVIDER_TIMEOUT_S: float = 60.0
-    AGENT_PROVIDER_RETRIES: int = 2
+    AGENT_MAX_TOOL_ROUNDS: int = 15
+    AGENT_MAX_DRAFT_ROUNDS: int = 15
+    AGENT_PROVIDER_TIMEOUT_S: float = 500.0
+    AGENT_PROVIDER_RETRIES: int = 15
     # Live Arduino library search from the agent's search_libraries tool.
-    AGENT_ALLOW_LIBRARY_SEARCH: bool = False
+    AGENT_ALLOW_LIBRARY_SEARCH: bool = True
     # Forge project memory (JEV-governed) for the agent — a direct connection to
     # the standalone <repo>/forge service over its own HTTP API. Fail-open: when
     # forge is unreachable the agent simply runs without memory context. Nothing
