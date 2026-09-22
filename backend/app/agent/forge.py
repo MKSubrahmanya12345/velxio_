@@ -270,14 +270,17 @@ def _turn_summary(conversation: dict, response: dict) -> dict:
 async def run_turn(prompt: str, session: str = "default") -> dict:
     """One guarded forge turn for the agent's user prompt.
 
-    Returns {ok, context, summary} — on any failure ok=False and context=""
-    so the caller can fail open. Never raises to the agent loop.
+    Returns {ok, context, summary, clarification, pending_questions} — on any
+    failure ok=False and context="" so the caller can fail open. Never raises
+    to the agent loop. Clarification is the assistant's response content (which
+    may contain JEV-driven clarifying questions) so Velxio can surface it with
+    a Skip-to-coding option.
     """
     if not is_enabled() or not str(prompt or "").strip():
-        return {"ok": False, "context": "", "summary": {}, "error": "forge memory is disabled"}
+        return {"ok": False, "context": "", "summary": {}, "clarification": "", "pending_questions": [], "error": "forge memory is disabled"}
     live, _health = await ensure_live()
     if not live:
-        return {"ok": False, "context": "", "summary": {},
+        return {"ok": False, "context": "", "summary": {}, "clarification": "", "pending_questions": [],
                 "error": "forge service is not reachable and autostart is off or failed"}
     try:
         conv_id = await _conversation_for(session, prompt)
@@ -288,12 +291,29 @@ async def run_turn(prompt: str, session: str = "default") -> dict:
         notes = _notes_of(conversation)
         active = [n for n in notes if n.get("status") == "active"]
         tentative = [n for n in notes if n.get("status") in ("pending", "proposed")]
+        # Assistant content may contain clarifying questions (JEV-driven)
+        clarification = str(response.get("content", ""))[:4000] if isinstance(response, dict) else ""
+        # Pending open questions from memory
+        pending_questions = []
+        for n in notes:
+            if n.get("status") in ("pending", "proposed") and n.get("kind") == "question":
+                t = str(n.get("text", ""))[:300].strip()
+                if t:
+                    pending_questions.append(t)
+        # Also include active questions if any (should be rare)
+        for n in active:
+            if n.get("kind") == "question":
+                t = str(n.get("text", ""))[:300].strip()
+                if t and t not in pending_questions:
+                    pending_questions.append(t)
         return {"ok": True, "context": _context_block(active, tentative),
-                "summary": _turn_summary({**conversation, "id": conv_id}, response)}
+                "summary": _turn_summary({**conversation, "id": conv_id}, response),
+                "clarification": clarification,
+                "pending_questions": pending_questions[:8]}
     except ForgeUnavailable as exc:
-        return {"ok": False, "context": "", "summary": {}, "error": str(exc)[:300]}
+        return {"ok": False, "context": "", "summary": {}, "clarification": "", "pending_questions": [], "error": str(exc)[:300]}
     except Exception as exc:  # a memory layer must never sink a build run
-        return {"ok": False, "context": "", "summary": {}, "error": f"forge turn failed: {type(exc).__name__}"}
+        return {"ok": False, "context": "", "summary": {}, "clarification": "", "pending_questions": [], "error": f"forge turn failed: {type(exc).__name__}"}
 
 
 async def memory_snapshot(session: str) -> dict:

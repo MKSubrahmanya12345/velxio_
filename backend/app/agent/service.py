@@ -1371,10 +1371,18 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
     forge_state = {"emitted": False}
 
     def _forge_event_payload(turn: dict) -> dict:
-        return {"type": "forge",
+        payload = {"type": "forge",
                 "status": "ok" if turn.get("ok") else "unavailable",
                 "summary": turn.get("summary") or {},
                 "message": str(turn.get("error", ""))[:300]}
+        # Surface JEV-driven clarifying questions so Velxio can ask user with Skip option
+        if turn.get("clarification"):
+            payload["clarification"] = str(turn.get("clarification", ""))[:4000]
+        if turn.get("pending_questions"):
+            pq = turn.get("pending_questions")
+            if isinstance(pq, list):
+                payload["pending_questions"] = [str(x)[:300] for x in pq][:8]
+        return payload
 
     def consume_forge(allow_prefix: bool) -> dict | None:
         """Look at the background forge task and act on it, once.
