@@ -6,12 +6,13 @@ the contract that matters: fail-open everywhere, the runtime toggle wins over
 env, sessions map to one forge conversation, and accepted memory reaches the
 model prompt via _base_messages.
 """
+import asyncio
 import json
 
 import pytest
 
 from app.agent import forge
-from app.agent.models import AgentRequest
+from app.agent.models import AgentRequest, Proposal
 
 
 @pytest.fixture(autouse=True)
@@ -188,9 +189,15 @@ def _minimal_request():
 def test_base_messages_injects_forge_block():
     from app.agent.service import _base_messages
     request = _minimal_request()
-    assert "PROJECT MEMORY" not in _base_messages(request)[-1]["content"]
+    messages = _base_messages(request)
+    # Layout: [system] → [history] → [state] → [request]; the request (last)
+    # must stay free of memory, and without context the state block is clean too.
+    assert "PROJECT MEMORY" not in messages[-1]["content"]
+    assert "PROJECT MEMORY" not in messages[-2]["content"]
     request._forge_context = "PROJECT MEMORY (user-established, JEV-reviewed; rules are binding):\n- [rule] Only one LED."
-    assert "[rule] Only one LED." in _base_messages(request)[-1]["content"]
+    # Accepted memory reaches the state message (second to last), which the
+    # cache-friendly layout keeps byte-stable for the whole run.
+    assert "[rule] Only one LED." in _base_messages(request)[-2]["content"]
 
 
 def test_agent_request_accepts_forge_session():
@@ -204,44 +211,47 @@ def test_agent_request_accepts_forge_session():
 
 @pytest.mark.asyncio
 async def test_run_agent_yields_forge_event_and_survives_failures(monkeypatch):
+    """Memory no longer blocks the first provider call: the turn runs as a
+    background task, its verdict is yielded when it lands, and a dead forge
+    degrades to an 'unavailable' event instead of a crash."""
     import app.agent.service as service
 
     turns = {"count": 0}
 
     async def fake_run_turn(prompt, session="default"):
         turns["count"] += 1
+        await asyncio.sleep(0)
         return {"ok": True, "context": "PROJECT MEMORY (user-established, JEV-reviewed; rules are binding):\n- [rule] Use a red LED only.",
                 "summary": {"conversation_id": "c", "active_notes": 1, "open_notes": 0,
                             "withheld": False, "jev_calls": 3, "guard": "Passed"}}
 
     async def dead_turn(prompt, session="default"):
         turns["count"] += 1
+        await asyncio.sleep(0)
         raise forge.ForgeUnavailable("forge is not reachable")
 
-    monkeypatch.setattr(forge, "run_turn", fake_run_turn)
+    async def llm(messages, spec=None, max_tokens=None):
+        # A real provider call yields to the loop (network I/O); the sleep is
+        # the parity for that, letting the forge task run during the call.
+        await asyncio.sleep(0)
+        return Proposal(summary="ok")
 
-    async def collect():
-        events: list[dict] = []
-        agen = service.run_agent(request)
-        try:
-            async for ev in agen:
-                events.append(ev)
-                if ev["type"] == "forge":
-                    break
-        finally:
-            await agen.aclose()
-        return events
+    monkeypatch.setattr(forge, "run_turn", fake_run_turn)
+    monkeypatch.setattr(service, "propose", llm)
 
     request = _minimal_request()
-    events = await collect()
-    # ordering: run_started, then a forge stage note, then the forge verdict
+    events = [e async for e in service.run_agent(request)]
     kinds = [e["type"] for e in events]
-    assert kinds == ["run_started", "stage", "forge"], kinds
-    assert events[-1]["status"] == "ok" and events[-1]["summary"]["active_notes"] == 1
+    assert kinds[0] == "run_started"
+    assert "forge" in kinds
+    forge_ev = [e for e in events if e["type"] == "forge"][0]
+    assert forge_ev["status"] == "ok" and forge_ev["summary"]["active_notes"] == 1
+    # The terminal event stays last for consumers that key on events[-1].
+    assert events[-1]["type"] == "answer"
 
     # fail-open: an unavailable forge yields an 'unavailable' event, not a crash.
     # `count` is deliberately not reset: it proves both runs attempted the turn.
     monkeypatch.setattr(forge, "run_turn", dead_turn)
-    events = await collect()
+    events = [e async for e in service.run_agent(request)]
     assert [e for e in events if e["type"] == "forge"][0]["status"] == "unavailable"
     assert turns["count"] == 2  # both runs attempted the turn, neither propagated an error

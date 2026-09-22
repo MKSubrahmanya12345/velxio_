@@ -27,6 +27,11 @@ class RunRecord:
     tool_calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Per-call trace (stage, attempt, ms, tokens incl. cached) — the answer
+    # to "which round was slow". JSON-fix sub-calls are best-effort and are
+    # not tracked individually; provider_calls/provider_ms cover them only in
+    # aggregate.
+    calls: list[dict] = field(default_factory=list)
     provider_ms: int = 0
     compile_ms: int = 0
     verified: bool | None = None  # behavioural verification result, if declared

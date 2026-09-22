@@ -53,7 +53,7 @@ async def collect(request):
 async def test_tool_round_runs_then_patches(monkeypatch):
     calls = []
 
-    async def llm(messages, spec=None):
+    async def llm(messages, spec=None, max_tokens=None):
         calls.append(messages)
         if len(calls) == 1:
             return Proposal(summary="checking", tool_calls=[ToolCall(tool="board_pinout")])
@@ -76,7 +76,7 @@ async def test_tool_budget_is_enforced(monkeypatch):
     monkeypatch.setattr(service.settings, "AGENT_MAX_TOOL_ROUNDS", 1)
     calls = []
 
-    async def llm(messages, spec=None):
+    async def llm(messages, spec=None, max_tokens=None):
         calls.append(messages)
         return Proposal(summary="checking", tool_calls=[ToolCall(tool="check_design")])
 
@@ -98,7 +98,7 @@ async def test_tool_budget_is_enforced(monkeypatch):
 async def test_failing_tool_does_not_kill_the_run(monkeypatch):
     calls = []
 
-    async def llm(messages, spec=None):
+    async def llm(messages, spec=None, max_tokens=None):
         calls.append(messages)
         if len(calls) == 1:
             return Proposal(summary="hmm", tool_calls=[ToolCall(tool="read_file", args={})])
@@ -134,7 +134,7 @@ async def test_transient_provider_errors_retry_with_backoff(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_permanent_provider_error_is_a_graceful_error_event(monkeypatch):
-    async def llm(messages, spec=None):
+    async def llm(messages, spec=None, max_tokens=None):
         raise service.ProviderError("Model provider returned HTTP 401. Check server configuration or quota.")
 
     monkeypatch.setattr(service, "propose", llm)
@@ -147,7 +147,7 @@ async def test_permanent_provider_error_is_a_graceful_error_event(monkeypatch):
 async def test_run_uses_the_requested_provider(monkeypatch):
     seen = []
 
-    async def fake_propose_once(messages, spec):
+    async def fake_propose_once(messages, spec, max_tokens=None):
         seen.append(spec)
         return Proposal(summary="explained")
 
@@ -171,7 +171,7 @@ async def test_unconfigured_provider_is_a_graceful_error(monkeypatch):
 async def test_run_defaults_to_opencode(monkeypatch):
     seen = []
 
-    async def fake_propose_once(messages, spec):
+    async def fake_propose_once(messages, spec, max_tokens=None):
         seen.append(spec)
         return Proposal(summary="explained")
 
@@ -188,7 +188,7 @@ async def test_run_defaults_to_opencode(monkeypatch):
 async def test_run_uses_the_requested_opencode_provider(monkeypatch):
     seen = []
 
-    async def fake_propose_once(messages, spec):
+    async def fake_propose_once(messages, spec, max_tokens=None):
         seen.append(spec)
         return Proposal(summary="explained")
 
@@ -203,7 +203,7 @@ async def test_run_uses_the_requested_opencode_provider(monkeypatch):
 async def test_run_uses_the_requested_bedrock_provider(monkeypatch):
     seen = []
 
-    async def fake_propose_once(messages, spec):
+    async def fake_propose_once(messages, spec, max_tokens=None):
         seen.append(spec)
         return Proposal(summary="explained")
 
