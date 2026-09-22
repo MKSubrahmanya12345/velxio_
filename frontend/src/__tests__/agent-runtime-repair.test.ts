@@ -77,8 +77,8 @@ const result = {
 };
 const options = () => ({
   prompt: 'blink',
-  token: '',
   messages: [] as { role: 'user' | 'assistant'; content: string }[],
+  provider: 'groq',
   signal: new AbortController().signal,
   onEvent: vi.fn(),
 });

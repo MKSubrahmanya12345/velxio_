@@ -27,7 +27,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the serial batcher, and `lib/proHardwareSerial.ts` lets an installed monitor
   intercept a board's serial input while attached
 
+### Changed
+- The agent no longer uses a workspace access token. `AGENT_ACCESS_TOKEN` /
+  `AGENT_ALLOW_ANONYMOUS` are gone: with `AGENT_ENABLED=true` and a configured
+  provider the agent endpoints (`/api/agent/runs`, `records`, `forge/*`,
+  `feedback`) are open, and the agent settings panel no longer asks for a
+  token. Run the backend on a trusted network or behind an authenticated
+  reverse proxy when exposing it
+
 ### Fixed
+- The forge project memory (JEV) toggle in agent settings now actually sticks.
+  It was unreachable two ways: the toggle POST shared the agent's token
+  authorization, so without a valid workspace token the server answered 401
+  and the checkbox snapped back, and the box was disabled until the forge
+  status poll had succeeded, leaving it permanently unclickable on any failed
+  or slow status fetch. The toggle is now always clickable (busy during the
+  POST) and the backend no longer requires a token
 - Agent responses are now parsed identically on every provider. The Bedrock adapters
   (native Converse and the Kimi K2.5 Mantle gateway) called `Proposal.model_validate_json()`
   directly, skipping the JSON salvage, shape coercion and model-side repair the

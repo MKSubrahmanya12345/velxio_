@@ -23,7 +23,6 @@ import { useAgentJournal } from './journal';
  * notes without the caller having to thread run_id through the UI. */
 interface ActiveRun {
   runId: string;
-  token: string;
 }
 let _active: ActiveRun | null = null;
 
@@ -51,10 +50,7 @@ export async function sendFeedback(note: string): Promise<boolean> {
   try {
     const res = await fetch(`${getApiBase()}/agent/runs/${encodeURIComponent(active.runId)}/feedback`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(active.token ? { Authorization: `Bearer ${active.token}` } : {}),
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ note: note.slice(0, 1000) }),
     });
     return res.ok;
@@ -87,7 +83,6 @@ async function requestRun(
   messages: ChatMessage[],
   project: ReturnType<typeof toAgentProject>,
   options: {
-    token: string;
     provider: string;
     signal: AbortSignal;
     onEvent: (event: AgentEvent) => void;
@@ -97,10 +92,7 @@ async function requestRun(
   const response = await fetch(`${getApiBase()}/agent/runs`, {
     method: 'POST',
     signal,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       prompt,
       project,
@@ -128,7 +120,7 @@ async function requestRun(
     for await (const event of readEvents(response.body)) {
       signal.throwIfAborted();
       if (event.type === 'run_started') {
-        _active = { runId: event.run_id, token: options.token };
+        _active = { runId: event.run_id };
         continue; // internal event, no user-visible handling
       }
       onEvent(event);
@@ -160,7 +152,6 @@ async function requestRun(
 export async function runAgent(options: {
   prompt: string;
   messages: ChatMessage[];
-  token: string;
   provider: string;
   signal: AbortSignal;
   onEvent: (event: AgentEvent) => void;

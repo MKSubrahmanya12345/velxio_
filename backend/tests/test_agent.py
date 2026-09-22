@@ -178,15 +178,17 @@ async def test_invalid_model_output_repairs_without_compilation(monkeypatch):
 def client(monkeypatch):
     monkeypatch.setattr(agent.settings, "AGENT_ENABLED", True)
     monkeypatch.setattr(agent.settings, "AGENT_API_KEY", "server-secret")
-    monkeypatch.setattr(agent.settings, "AGENT_ACCESS_TOKEN", "workspace-token")
     app = FastAPI()
     app.include_router(agent.router, prefix="/api/agent")
     return TestClient(app)
 
 
-def test_auth_disabled_and_no_secret_leaks(client, monkeypatch):
+def test_runs_open_and_no_secret_leaks(client, monkeypatch):
+    async def fake(_body):
+        yield {"type": "answer", "summary": "Hello"}
+    monkeypatch.setattr(agent, "run_agent", fake)
     payload = AgentRequest(prompt="hi", project=Project()).model_dump()
-    assert client.post("/api/agent/runs", json=payload).status_code == 401
+    assert client.post("/api/agent/runs", json=payload).status_code == 200
     assert "server-secret" not in client.get("/api/agent/status").text
     monkeypatch.setattr(agent.settings, "AGENT_ENABLED", False)
     assert client.post("/api/agent/runs", json=payload).status_code == 503
@@ -196,7 +198,7 @@ def test_stream_endpoint_and_slot_release(client, monkeypatch):
     async def fake(_body):
         yield {"type": "answer", "summary": "Hello"}
     monkeypatch.setattr(agent, "run_agent", fake)
-    response = client.post("/api/agent/runs", json=AgentRequest(prompt="hi", project=Project()).model_dump(), headers={"Authorization": "Bearer workspace-token"})
+    response = client.post("/api/agent/runs", json=AgentRequest(prompt="hi", project=Project()).model_dump())
     assert response.status_code == 200
     assert json.loads(response.text)["summary"] == "Hello"
     assert not agent._slots.locked()
@@ -207,7 +209,7 @@ def test_internal_exception_not_exposed(client, monkeypatch):
         raise RuntimeError("server-secret")
         yield
     monkeypatch.setattr(agent, "run_agent", fake)
-    response = client.post("/api/agent/runs", json=AgentRequest(prompt="hi", project=Project()).model_dump(), headers={"Authorization": "Bearer workspace-token"})
+    response = client.post("/api/agent/runs", json=AgentRequest(prompt="hi", project=Project()).model_dump())
     assert "server-secret" not in response.text
     assert json.loads(response.text)["type"] == "error"
     assert not agent._slots.locked()

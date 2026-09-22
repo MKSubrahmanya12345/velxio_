@@ -91,8 +91,8 @@ const result = {
 };
 const options = () => ({
   prompt: 'build',
-  token: '',
   messages: [],
+  provider: 'groq',
   signal: new AbortController().signal,
   onEvent: vi.fn(),
 });

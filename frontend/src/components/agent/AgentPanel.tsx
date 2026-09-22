@@ -48,7 +48,6 @@ interface ProviderInfo {
 }
 interface Status {
   configured: boolean;
-  requires_token: boolean;
   model: string | null;
   providers: ProviderInfo[];
   scope: string;
@@ -105,10 +104,8 @@ interface RunRecord {
 }
 
 /** Recent runs from GET /agent/runs/records (per-worker, in-memory). */
-async function fetchAgentRuns(token: string, signal?: AbortSignal): Promise<RunRecord[]> {
-  const headers: Record<string, string> = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${getApiBase()}/agent/runs/records`, { signal, headers });
+async function fetchAgentRuns(signal?: AbortSignal): Promise<RunRecord[]> {
+  const response = await fetch(`${getApiBase()}/agent/runs/records`, { signal });
   if (!response.ok) throw new Error('Could not read the server run log.');
   const body = await response.json();
   return body.runs ?? [];
@@ -139,7 +136,6 @@ export function AgentPanel() {
   const [open, setOpen] = useState(true);
   const [tab, setTab] = useState<'chat' | 'history'>('chat');
   const [prompt, setPrompt] = useState('');
-  const [token, setToken] = useState(''); // Never persist provider or access credentials.
   const [providerId, setProviderId] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
@@ -187,12 +183,12 @@ export function AgentPanel() {
     }
   }
 
-  /** Refresh the server's recent-run log; degrade silently without a token. */
+  /** Refresh the server's recent-run log; degrade silently if unavailable. */
   async function loadRuns() {
     try {
-      setRuns(await fetchAgentRuns(token));
+      setRuns(await fetchAgentRuns());
     } catch {
-      /* The records endpoint shares the workspace token; skip if unavailable. */
+      /* Backend unreachable; the settings note already says so. */
     }
   }
   async function checkForge() {
@@ -203,11 +199,9 @@ export function AgentPanel() {
   async function toggleForgeMemory(enabled: boolean) {
     setForgeBusy(true);
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (token) headers.Authorization = `Bearer ${token}`;
       const response = await fetch(`${getApiBase()}/agent/forge/toggle`, {
         method: 'POST',
-        headers,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
       });
       if (response.ok) setForge((await response.json()) as ForgeStatus);
@@ -220,14 +214,11 @@ export function AgentPanel() {
   }
   async function showForgeMemory() {
     try {
-      const headers: Record<string, string> = {};
-      if (token) headers.Authorization = `Bearer ${token}`;
       const response = await fetch(
         `${getApiBase()}/agent/forge/memory?session=${encodeURIComponent(forgeSession())}`,
-        { headers },
       );
       if (response.ok) setForgeMemory((await response.json()) as ForgeMemory);
-      else setForgeMemory({ enabled: false, conversation_id: null, notes: [], message: 'Requires the workspace token.' });
+      else setForgeMemory({ enabled: false, conversation_id: null, notes: [], message: 'Forge memory is unavailable right now.' });
     } catch {
       setForgeMemory({ enabled: false, conversation_id: null, notes: [], message: 'Could not reach forge memory.' });
     }
@@ -275,7 +266,7 @@ export function AgentPanel() {
 
   async function submit(text = prompt) {
     if (!text.trim() || controller.current) return;
-    if (!status?.configured || (status.requires_token && !token)) {
+    if (!status?.configured) {
       setSettingsOpen(true);
       return;
     }
@@ -301,7 +292,6 @@ export function AgentPanel() {
       const answer = await runAgent({
         prompt: content,
         messages: context,
-        token,
         provider: providerId || 'groq',
         signal: abort.signal,
         onEvent: (event: AgentEvent) => {
@@ -496,22 +486,9 @@ export function AgentPanel() {
             </button>
           </div>
           <p>The model runs through your backend. Provider keys never enter the browser.</p>
-          {status?.requires_token && (
-            <label>
-              Workspace access token
-              <input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder="Token from your administrator"
-                autoComplete="off"
-              />
-            </label>
-          )}
           <p className="agent-muted">
             Providers are configured on the server. Pick one in the dropdown
             next to the composer; the current model is shown in the footer.
-            <span>Token held in memory only.</span>
           </p>
           {(status?.providers ?? []).length > 0 && (
             <ul className="agent-provider-list" aria-label="Configured providers">
@@ -537,7 +514,7 @@ export function AgentPanel() {
             <input
               type="checkbox"
               checked={!!forge?.enabled}
-              disabled={forgeBusy || forge === null}
+              disabled={forgeBusy}
               onChange={(e) => void toggleForgeMemory(e.target.checked)}
             />
             <span>Use forge project memory in agent runs</span>
@@ -591,7 +568,6 @@ export function AgentPanel() {
               AGENT_API_KEY=your-groq-api-key{'\n'}AGENT_MODEL=openai/gpt-oss-120b{'\n'}
               AGENT_GEMINI_API_KEY=your-google-ai-studio-key{'\n'}AGENT_GEMINI_MODEL=gemini-2.5-flash{'\n'}
               BEDROCK_MODEL_ID=moonshotai.kimi-k2.5{'\n'}AWS_REGION=eu-north-1{'\n'}BEDROCK_API_KEY=your-mantle-key{'\n'}
-              AGENT_ACCESS_TOKEN=your-private-token{'\n'}
               FORGE_ENABLED=true{'\n'}FORGE_BASE_URL=http://127.0.0.1:4321{'\n'}FORGE_AUTOSTART=true
             </pre>
             <p>
@@ -606,14 +582,11 @@ export function AgentPanel() {
         </section>
       )}
 
-      {(statusError || status?.configured === false || (status?.requires_token && !token)) && (
+      {(statusError || status?.configured === false) && (
         <div className="agent-connection-note">
           <AlertCircle size={15} />
           <span>
-            {statusError ||
-              (status?.configured
-                ? 'Enter your workspace token to start building.'
-                : 'Connect a model to bring your ideas to life.')}{' '}
+            {statusError || 'Connect a model to bring your ideas to life.'}{' '}
             <button onClick={() => setSettingsOpen(true)}>
               Configure agent <ChevronRight size={12} />
             </button>

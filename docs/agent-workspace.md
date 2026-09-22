@@ -88,7 +88,6 @@ AGENT_MODEL=openai/gpt-oss-120b
 # Second provider (optional, via Google's OpenAI-compatible layer):
 # AGENT_GEMINI_API_KEY=your-google-ai-studio-api-key
 # AGENT_GEMINI_MODEL=gemini-2.5-flash
-AGENT_ACCESS_TOKEN=choose-a-long-random-private-token
 # Optional loop bounds / resilience:
 # AGENT_MAX_ATTEMPTS=3            repair attempts (proposal -> validate/compile)
 # AGENT_MAX_TOOL_ROUNDS=5        research rounds before a patch is required
@@ -144,17 +143,18 @@ also regenerates metadata/SVGs. Vite proxies `/api` to the backend, so the brows
 not need a localhost backend URL. Arena `*.e2b.app` preview hosts are allowed.
 
 Open `/editor`. Choose a Uno starter (or cancel the starter dialog to build from
-empty), open **Agent settings**, and enter the **workspace access token**, not the
-provider key. The token is held in memory and must be re-entered after a reload.
-Docker Compose already loads `backend/.env`; restart/rebuild after changing settings.
+empty), and open **Agent settings** to check the connection, pick a provider and
+toggle forge project memory (JEV). Docker Compose already loads `backend/.env`;
+restart/rebuild after changing settings.
 
 ### Hosted deployment / privacy
 
-- The agent is disabled by default. Enabling it requires a provider key and an access
-  token, unless `AGENT_ALLOW_ANONYMOUS=true` is explicitly set for a trusted local host.
-- Keep tokens private and use HTTPS. Add authenticated reverse-proxy access, rate
-  limits, provider spending limits and per-user quotas before offering this publicly.
-  The shared token is **not** a multi-user account/billing system.
+- The agent is disabled by default. Enabling it requires `AGENT_ENABLED=true` and a
+  configured provider key. The agent endpoints have no per-user authentication, so
+  run the backend on a trusted network or behind your own authenticated reverse proxy.
+- Use HTTPS. Add authenticated reverse-proxy access, rate limits, provider spending
+  limits and per-user quotas before offering this publicly — there is no account
+  or billing system behind the agent.
 - The backend allows at most two active agent requests **per worker process**. Use one
   API worker or an external distributed limiter for a global cap.
 - Prompt, recent conversation, source files, and supported circuit data are sent to
