@@ -17,6 +17,19 @@ def wire(id, a, ap, b, bp):
     return Connection(id=id, start=Endpoint(componentId=a, pinName=ap), end=Endpoint(componentId=b, pinName=bp))
 
 
+@pytest.fixture(autouse=True)
+def no_forge_memory(monkeypatch):
+    """Keep the run-loop tests hermetic: project memory is pinned by test_agent_forge.
+
+    FORGE_ENABLED defaults to on, and run_agent asks forge for context before the
+    first propose — which adds a `stage` and a `forge` event to the stream and, in
+    an offline run, waits for an unreachable server.
+    """
+    from app.agent import forge
+
+    monkeypatch.setattr(forge, "is_enabled", lambda: False)
+
+
 def blink_patch():
     return Patch(
         board=Board(id="uno"),
@@ -124,10 +137,81 @@ def test_capabilities_are_strict(kwargs):
 async def test_stream_success(monkeypatch):
     monkeypatch.setattr(service, "propose", AsyncMock(return_value=Proposal(summary="Blink", plan=["Wire LED"], patch=blink_patch())))
     monkeypatch.setattr(service, "compile_project", AsyncMock(return_value={"success": True, "hex_content": ":00000001FF", "stdout": "compiled"}))
-    events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project()))]
-    assert [e["type"] for e in events] == ["run_started", "stage", "plan", "stage", "stage", "compile", "result"]
+    # fast_mode=False: this is the full pipeline (compile stage + real HEX).
+    # Fast Mode is pinned by test_fast_mode_returns_a_result_without_waiting.
+    events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project(), fast_mode=False))]
+    # canvas_update events stream the progressive build and are not part of the
+    # stage contract asserted here.
+    assert [e["type"] for e in events if e["type"] != "canvas_update"] == [
+        "run_started", "stage", "plan", "stage", "stage", "compile", "result"]
     assert events[-1]["project"]["board"]["id"] == "uno"
     assert events[-1]["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fast_mode_returns_a_result_without_waiting_for_the_toolchain(monkeypatch):
+    """Fast Mode: one proposal, then a result carrying the fallback HEX.
+
+    The compile still runs, but a slow or failing toolchain no longer blocks the
+    canvas — the browser verifies behaviour against the live simulation instead.
+    """
+    llm = AsyncMock(return_value=Proposal(summary="Blink", patch=blink_patch()))
+    monkeypatch.setattr(service, "propose", llm)
+    monkeypatch.setattr(service, "compile_project",
+                        AsyncMock(return_value={"success": False, "stderr": "no toolchain"}))
+    events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project()))]
+    assert events[-1]["type"] == "result"
+    assert events[-1]["hex"] == service.FALLBACK_HEX
+    assert llm.await_count == 1
+
+
+def button_patch(gnd_pin):
+    """Pushbutton on pin 2; GND on the button leg named by `gnd_pin`.
+
+    1.l/1.r are the two legs of ONE contact, 2.l/2.r the other, so `1.r` is the
+    miswire (the pin is tied straight to GND and the switch does nothing) and
+    `2.l` is the correct one.
+    """
+    return Patch(
+        board=Board(id="uno"),
+        upsert_components=[Part(id="btn1", metadataId="pushbutton", x=500, y=300)],
+        upsert_wires=[wire("b1", "uno", "2", "btn1", "1.l"), wire("b2", "btn1", gnd_pin, "uno", "GND.1")],
+        upsert_files=[Source(name="sketch.ino", content=(
+            "void setup(){pinMode(2,INPUT_PULLUP);}\nvoid loop(){if(!digitalRead(2)){}}"))],
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejected_patch_is_shown_to_the_model_on_the_repair_turn(monkeypatch):
+    """The bug behind "Repairing from diagnostics · attempt 4" with nothing built.
+
+    A rejected patch was never put back into the conversation, so the model saw
+    only the ORIGINAL project — which does not contain the draft it had just
+    produced — plus one generic diagnostic line. It re-derived the same
+    miswiring on every attempt until the run gave up. The repair turn now
+    carries the rejected candidate and a diagnostic that names the part and the
+    wire to move, so a single repair turn is enough.
+    """
+    seen: list[list[dict]] = []
+
+    async def llm(messages, spec=None):
+        seen.append(messages)
+        diagnostics = "\n".join(m["content"] for m in messages if m["role"] == "user")
+        return Proposal(summary="Button on pin 2",
+                        patch=button_patch("2.l" if "SAME contact" in diagnostics else "1.r"))
+
+    monkeypatch.setattr(service, "propose", llm)
+    monkeypatch.setattr(service, "compile_project",
+                        AsyncMock(return_value={"success": True, "hex_content": ":00000001FF"}))
+    events = [e async for e in service.run_agent(AgentRequest(prompt="a button on pin 2", project=Project()))]
+
+    assert [e["type"] for e in events].count("diagnostic") == 1
+    assert events[-1]["type"] == "result" and events[-1]["attempts"] == 2
+    repair_turn = seen[1]
+    # The failing candidate travels with the diagnostic…
+    assert any(m["role"] == "assistant" and '"1.r"' in m["content"] for m in repair_turn)
+    # …and the diagnostic points at the wire to move, not at "add a component".
+    assert any("Move the GND.1 wire from btn1.1.r to btn1.2.l" in m["content"] for m in repair_turn)
 
 
 @pytest.mark.asyncio
@@ -136,7 +220,7 @@ async def test_bounded_compile_repair_against_original(monkeypatch):
     compiler = AsyncMock(side_effect=[{"success": False, "stderr": "syntax error"}, {"success": True, "hex_content": ":00000001FF"}])
     monkeypatch.setattr(service, "propose", llm)
     monkeypatch.setattr(service, "compile_project", compiler)
-    events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project()))]
+    events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project(), fast_mode=False))]
     assert events[-1]["attempts"] == 2
     assert compiler.call_args_list[0].args[0] == compiler.call_args_list[1].args[0]
     assert any(e["type"] == "diagnostic" and e["message"] == "syntax error" for e in events)
@@ -144,10 +228,12 @@ async def test_bounded_compile_repair_against_original(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stops_after_three_failures(monkeypatch):
+    # The cap is a setting; pin it so the test says what it means.
+    monkeypatch.setattr(service.settings, "AGENT_MAX_ATTEMPTS", 3)
     llm = AsyncMock(return_value=Proposal(summary="Blink", patch=blink_patch()))
     monkeypatch.setattr(service, "propose", llm)
     monkeypatch.setattr(service, "compile_project", AsyncMock(return_value={"success": False, "stderr": "broken"}))
-    events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project()))]
+    events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project(), fast_mode=False))]
     assert events[-1]["type"] == "error"
     assert llm.await_count == 3
     assert not any(e["type"] == "result" for e in events)
@@ -261,7 +347,7 @@ async def test_toolchain_failure_does_not_spend_tokens_on_code_repairs(monkeypat
     llm = AsyncMock(return_value=Proposal(summary="Blink", patch=blink_patch()))
     monkeypatch.setattr(service, "propose", llm)
     monkeypatch.setattr(service, "compile_project", AsyncMock(return_value={"success": False, "error_kind": "toolchain_unavailable"}))
-    events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project()))]
+    events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project(), fast_mode=False))]
     assert events[-1]["type"] == "error"
     assert "arduino-cli" in events[-1]["message"]
     assert llm.await_count == 1

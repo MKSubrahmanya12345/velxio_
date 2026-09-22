@@ -24,8 +24,10 @@ how to walk nets and phrase findings.
   * LEDs need a series resistor; motor/relay/stepper coils need a driver
   * declared expectations must describe pins and interactions that exist
 
-`analyse()` returns findings; `assert_clean()` raises on the errors so
-`apply_patch` keeps its existing "reject, never half-apply" contract.
+`analyse()` returns findings; `assert_clean()` raises a ValueError carrying every
+error (and the wording that says which wire to move) so `apply_patch` keeps its
+existing "reject, never half-apply" contract and the repair loop has something
+actionable to work with on its first repair turn.
 """
 from __future__ import annotations
 
@@ -40,6 +42,9 @@ Severity = Literal["error", "warning"]
 
 # Board pins that are never a signal: they are power distribution.
 POWER_PINS = {"5V", "3.3V", "GND", "GND.1", "GND.2", "GND.3", "VIN", "VCC", "AREF", "IOREF"}
+
+# How many distinct error messages the repair prompt carries (see assert_clean).
+_MAX_ERROR_LINES = 6
 
 WRITE_CALLS = {"digitalWrite", "analogWrite", "tone", "noTone", "attach"}
 READ_CALLS = {"digitalRead", "analogRead", "pulseIn"}
@@ -316,6 +321,58 @@ def _bus_satisfied(nets: Netlist, spec: PartSpec, bus, key) -> bool:
     return all(_pin_satisfies(nets, key(pin), capability) for pin, capability in bus.pins.items())
 
 
+def _wired_straight_to(project, board: str, pin: str, key: str) -> bool:
+    """True when one wire runs straight between board pin `pin` and `key`."""
+    return any(
+        {Netlist.key(wire.start), Netlist.key(wire.end)} == {f"{board}:{pin}", key}
+        for wire in project.wires
+    )
+
+
+def _shorted_contact_hint(project, net: set[str], gpio: str, rail: str) -> str:
+    """Explain the *part* when a rail shares a joined contact with a GPIO.
+
+    The failure this exists for: a pushbutton's four legs are two contacts joined
+    inside the part (1.l=1.r, 2.l=2.r). Wiring the GPIO to 1.l and GND to 1.r is
+    *both legs of one contact* — a dead short, and the switch can never do
+    anything. The generic wording ("put the load between the pin and the rail")
+    instead reads as "add another component", so a repair loop rebuilt the same
+    two wires until its attempts ran out. Naming the part, the contact and the
+    exact wire to move is what makes this diagnostic actionable.
+    """
+    board = project.board.id if project.board else DEFAULT_BOARD
+    fallback = ""
+    for part in project.components:
+        spec = catalog.get(part.metadataId)
+        if spec is None:
+            continue
+        names = list(spec.pins_for(part.properties))
+        for a, b in spec.internal_pairs:
+            if f"{part.id}:{a}" not in net or f"{part.id}:{b}" not in net:
+                continue
+            free = [name for name in names if f"{part.id}:{name}" not in net]
+            if not free:
+                return (f" {a} and {b} of {spec.name} {part.id} are joined inside the part, so they "
+                        f"are one single contact — nothing separates pin {gpio} from {rail}.")
+            target = f"{part.id}.{free[0]}"
+            # Which leg holds which wire, when the model wired them straight through.
+            rail_leg = next((f"{part.id}.{name}" for name in (a, b)
+                             if _wired_straight_to(project, board, rail, f"{part.id}:{name}")), None)
+            gpio_leg = next((f"{part.id}.{name}" for name in (a, b)
+                             if _wired_straight_to(project, board, gpio, f"{part.id}:{name}")), None)
+            move = (f"Move the {rail} wire from {rail_leg} to {target}" if rail_leg
+                    else f"Move the {rail} wire to the part's other contact, {target}")
+            keep = (f", and keep the pin on {gpio_leg}." if gpio_leg and gpio_leg != rail_leg
+                    else f", so the pin and {rail} end up on opposite contacts.")
+            message = (f" {a} and {b} of {spec.name} {part.id} are joined inside the part, so pin "
+                       f"{gpio} and {rail} share the SAME contact — a dead short, not a switch; the "
+                       f"switch closes between that contact and {target}. {move}{keep}")
+            if gpio_leg:
+                return message  # this is the part the pin is actually wired to
+            fallback = fallback or message  # another part shares this net (a common GND)
+    return fallback
+
+
 def _series_resistor_present(project, nets: Netlist, terminals: list[str]) -> bool:
     """True when a resistor is genuinely in series with one of `terminals`.
 
@@ -403,9 +460,17 @@ def analyse(project, expectations=None) -> list[Finding]:
         net = nets.net_of(f"{board}:{pin}")
         hit = sorted({p.split(":", 1)[1] for p in net if p.startswith(f"{board}:") and p.split(":", 1)[1] in rails})
         if hit:
-            findings.append(Finding("error", "gpio-shorted",
-                f"Pin {pin} is wired directly to {hit[0]} with no component in between. "
-                f"That shorts the GPIO; put the load between the pin and the rail."))
+            # A rail on the same net is a short — but when the net also sits on
+            # both legs of one internally-joined contact the message has to name
+            # that part and the wire to move, or the repair loop "fixes" it by
+            # regenerating the identical wiring.
+            hint = _shorted_contact_hint(project, net, pin, hit[0])
+            if hint:
+                message = f"Pin {pin} is wired directly to {hit[0]}." + hint
+            else:
+                message = (f"Pin {pin} is wired directly to {hit[0]} with no component in between. "
+                           f"That shorts the GPIO; put the load between the pin and the rail.")
+            findings.append(Finding("error", "gpio-shorted", message))
     by_net: dict[str, list[str]] = {}
     for pin in sorted(wired):
         by_net.setdefault(nets.find(f"{board}:{pin}"), []).append(pin)
@@ -634,12 +699,32 @@ def analyse(project, expectations=None) -> list[Finding]:
 
 
 def assert_clean(project, expectations=None) -> list[Finding]:
-    """Raise ValueError on the first error finding; return all findings."""
+    """Raise ValueError describing every error finding; return all findings.
+
+    Every error, not just the first: three identically miswired buttons are
+    three findings, and reporting one per attempt spent three repair turns on a
+    fix that fits in one (the loop is capped, so the run ended with nothing
+    applied). Messages are grouped per code and capped, so one mistake repeated
+    across twenty pins cannot flood the repair prompt.
+    """
     findings = analyse(project, expectations)
-    for finding in findings:
-        if finding.severity == "error":
-            raise ValueError(finding.message)
-    return findings
+    errors = [f for f in findings if f.severity == "error"]
+    if not errors:
+        return findings
+    lines: list[str] = []
+    per_code: dict[str, int] = {}
+    dropped = 0
+    for finding in errors:
+        per_code[finding.code] = per_code.get(finding.code, 0) + 1
+        if per_code[finding.code] <= 2 and len(lines) < _MAX_ERROR_LINES:
+            lines.append(finding.message)
+        else:
+            dropped += 1
+    if dropped:
+        lines.append(f"({dropped} more error{'s' if dropped != 1 else ''} of "
+                     f"{'these kinds were' if dropped != 1 else 'this kind was'} also found — "
+                     f"fix every occurrence, not only the first.)")
+    raise ValueError("\n".join(lines))
 
 
 def netlist_summary(project) -> list[dict[str, Any]]:

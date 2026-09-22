@@ -885,7 +885,7 @@
       "interactions": [
         "press"
       ],
-      "notes": "Momentary pushbutton: 1.l-1.r and 2.l-2.r are joined inside. Wire one side to a GPIO with pinMode(INPUT_PULLUP) and the opposite side to GND; it reads LOW while pressed."
+      "notes": "Momentary pushbutton. It has TWO contacts and each contact has two legs joined inside the part: contact 1 = 1.l + 1.r, contact 2 = 2.l + 2.r; pressing closes contact 1 to contact 2. Wire the GPIO to ONE contact and GND to the OTHER (e.g. GPIO to 1.l, GND to 2.l) and read it with pinMode(pin, INPUT_PULLUP) - it reads LOW while pressed. GPIO on 1.l with GND on 1.r is both legs of the SAME contact: a dead short that ties the pin to GND and never switches."
     },
     "pushbutton-6mm": {
       "class": "switch",
@@ -916,7 +916,7 @@
       "interactions": [
         "press"
       ],
-      "notes": "Panel-mount pushbutton — same contacts as the standard one (1.l/1.r, 2.l/2.r). GPIO to one side, GND to the other, INPUT_PULLUP."
+      "notes": "Panel-mount pushbutton — same contacts as the standard one: contact 1 = 1.l + 1.r, contact 2 = 2.l + 2.r (legs of one contact are joined inside). GPIO (INPUT_PULLUP) on one contact and GND on the OTHER (GPIO to 1.l, GND to 2.l); GPIO on 1.l with GND on 1.r is the same contact, a dead short."
     },
     "slide-switch": {
       "class": "switch",

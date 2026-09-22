@@ -239,8 +239,8 @@ async def test_run_agent_yields_forge_event_and_survives_failures(monkeypatch):
     assert kinds == ["run_started", "stage", "forge"], kinds
     assert events[-1]["status"] == "ok" and events[-1]["summary"]["active_notes"] == 1
 
-    # fail-open: an unavailable forge yields an 'unavailable' event, not a crash
-    turns = {"count": 0}
+    # fail-open: an unavailable forge yields an 'unavailable' event, not a crash.
+    # `count` is deliberately not reset: it proves both runs attempted the turn.
     monkeypatch.setattr(forge, "run_turn", dead_turn)
     events = await collect()
     assert [e for e in events if e["type"] == "forge"][0]["status"] == "unavailable"
