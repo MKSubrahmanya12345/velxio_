@@ -109,6 +109,16 @@ class Settings(BaseSettings):
     FORGE_AUTOSTART: bool = True
     FORGE_SPAWN_WAIT_S: float = 8.0
     FORGE_TURN_TIMEOUT_S: float = 130.0
+    # Where the forge server code lives. Empty = derive from the repo layout
+    # (<repo>/forge/server, works in dev checkouts). The standalone Docker
+    # image keeps the backend at /app/app — no repo root to derive from — and
+    # ships forge at /forge-server, so it sets this explicitly. Without it
+    # autostart silently no-ops and the Create tab reports forge offline.
+    FORGE_SERVER_DIR: str = ""
+    # Where the bridge persists its state (toggle override, session →
+    # conversation ids, spawned pid). Empty = <repo>/backend/data/. The image
+    # points it at /app/data (the mounted persistence volume).
+    FORGE_STATE_PATH: str = ""
 
     # Velxio Create (creative tab) talks to Forge, same as the circuit agent's
     # memory layer — no separate keys. Long jobs (YouTube transcription,

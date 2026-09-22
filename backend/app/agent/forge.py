@@ -33,7 +33,12 @@ import httpx
 from app.core.config import settings
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-FORGE_SERVER_DIR = REPO_ROOT / "forge" / "server"
+# Default dev location. The standalone Docker image ships the backend at
+# /app/app (no repo root to derive from) and forge at /forge-server, so it
+# overrides this via FORGE_SERVER_DIR — without which autostart would
+# silently no-op and the Create tab would report forge offline forever.
+_DEFAULT_FORGE_SERVER_DIR = REPO_ROOT / "forge" / "server"
+FORGE_SERVER_DIR = Path(settings.FORGE_SERVER_DIR).expanduser() if settings.FORGE_SERVER_DIR else _DEFAULT_FORGE_SERVER_DIR
 
 
 class ForgeUnavailable(Exception):
@@ -43,6 +48,11 @@ class ForgeUnavailable(Exception):
 # ── persisted state (toggle override + session → conversation ids) ──────────
 
 def _state_path() -> Path:
+    # The image keeps backend state under /app/data (the mounted volume) —
+    # its REPO_ROOT resolves to /, so the repo-derived default would write
+    # to /backend/data on the container's root filesystem.
+    if settings.FORGE_STATE_PATH:
+        return Path(settings.FORGE_STATE_PATH).expanduser()
     return REPO_ROOT / "backend" / "data" / "forge_state.json"
 
 
