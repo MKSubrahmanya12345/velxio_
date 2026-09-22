@@ -40,9 +40,15 @@ Velxio is a **fully local, multi-board emulator and electronics simulator** that
 |  +---------------------------------------------------------------+  |
 |  | Electrical engine (lazy, ~39 MB ngspice WASM bundle)          |  |
 |  | NetlistBuilder (Union-Find on wires) -> SPICE cards           |  |
-|  | useElectricalStore + analog instruments (V/A/scope/funcgen)   |  |
-|  +---------------------------------------------------------------+  |
-|                                  v                                  |
+  |  | useElectricalStore + analog instruments (V/A/scope/funcgen)   |  |
+  |  +---------------------------------------------------------------+  |
+  |  | Physics scene layer (generic rigid bodies)                    |  |
+  |  | simulation/physics: scene spec + PhysicsWorld integrator      |  |
+  |  | usePhysicsWorld hook: rAF stepping, PWM->actuator bindings,   |  |
+  |  | body state -> virtual sensors (MPU6050/GPS) via               |  |
+  |  | dispatchSensorUpdate; same core bundles headless for Node     |  |
+  |  +---------------------------------------------------------------+  |
+  |                                  v                                  |
 |  +---------------------------------------------------------------+  |
 |  | Component Layer                                                |  |
 |  | wokwi-elements (Lit) + Velxio-native Web Components            |  |

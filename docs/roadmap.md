@@ -6,6 +6,22 @@ What's shipped, what's underway, what's planned.
 
 ## Implemented
 
+### Physics scene layer
+
+- Generic rigid-body extension interface (`frontend/src/simulation/physics`):
+  scene documents (bodies, thrust/torque actuators with motor lag, sensor
+  links, environment with gravity/wind/drag/floor), deterministic 1 ms
+  substep integrator — the layer drones, rovers and spacecraft are all built
+  from, nothing is drone-specific. See [physics-scene.md](physics-scene.md).
+- Headless runner (`backend/app/mcp/physics_sim.cjs` + bundled
+  `physics-core.cjs`) — the same core in Node, driven from JSON.
+- Agent + MCP access: `physics_capabilities` and `physics_simulate` tools
+  (in-editor agent draft family and MCP server) so an agent can design a
+  scene, run it, and verify behaviour (hover, rest, escape) numerically.
+- Browser live layer: `usePhysicsStore` + `usePhysicsWorld` hook — steps the
+  scene on rAF, pushes body state into virtual sensors (MPU6050/GPS) via the
+  standard injection API, and accepts circuit PWM → actuator bindings.
+
 ### Editor
 
 - Monaco Editor with C++ and Python syntax highlighting, autocomplete, minimap, dark theme
