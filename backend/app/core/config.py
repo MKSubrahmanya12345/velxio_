@@ -110,6 +110,11 @@ class Settings(BaseSettings):
     FORGE_SPAWN_WAIT_S: float = 8.0
     FORGE_TURN_TIMEOUT_S: float = 130.0
 
+    # Velxio Create (creative tab) talks to Forge, same as the circuit agent's
+    # memory layer — no separate keys. Long jobs (YouTube transcription,
+    # ingest, idea/script generation) get their own timeout.
+    CREATIVE_JOB_TIMEOUT_S: float = 300.0
+
     # CORS — used by main.py to whitelist the SPA origin during local dev
     # and to build redirect URLs from auth routes in the overlay.
     FRONTEND_URL: str = "http://localhost:5173"
