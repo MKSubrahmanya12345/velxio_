@@ -303,6 +303,8 @@ TOOL_NAMES = (
     "draft_simulate",
     "search_libraries",
     "library_api",
+    "physics_capabilities",
+    "physics_simulate",
 )
 ToolName = Literal[TOOL_NAMES]
 
@@ -310,7 +312,9 @@ ToolName = Literal[TOOL_NAMES]
 # the workspace: they build the candidate, run the deterministic stack (and, for
 # `draft_simulate`, the real emulator) and hand the observations back, so the
 # model can debug its own proposal before the user ever sees it.
-DRAFT_TOOLS = ("draft_validate", "draft_compile", "draft_simulate")
+# `physics_simulate` follows the same pattern with an inline scene document
+# instead of a project patch.
+DRAFT_TOOLS = ("draft_validate", "draft_compile", "draft_simulate", "physics_simulate")
 
 
 class ToolCall(StrictModel):
