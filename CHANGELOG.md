@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Velxio Create (`CREATE` tab in the agent sidebar, `docs/creative-chat.md`):
+  chat-only content workspace backed by Forge memory. **Learn**: ingest
+  YouTube links (Gemini watches natively first, then keyless caption fallback
+  through the 10-round provider failover), articles, or pasted text into
+  collections; transcripts are stored and distilled into JEV-governed nodes.
+  **Create**: prompts generate grounded ideas that JEV cross-compares against
+  stored nodes (support/conflict badges, advisory-ranked), expanding into a
+  full pack (script + hooks + titles + thumbnails + sources + needs-check).
+  Nodes are manually editable/deletable with no review interruptions. Python
+  `/api/creative/*` thin-proxies Forge `/api/creative/*` (`CREATIVE_JOB_TIMEOUT_S`)
 - Forge **Providers** page (`forge/client/src/components/ProvidersView.tsx`): add API keys for
   Gemini, OpenRouter, AWS Bedrock, Ollama, OpenCode Zen, Groq and any OpenAI-compatible endpoint,
   each with a model, base URL and a free-text note. Keys are entered and shown in plain text

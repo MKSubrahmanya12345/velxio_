@@ -20,6 +20,7 @@ import { createPlanner } from './providers/planner.js';
 import { createReasoner } from './memory/reasoner.js';
 import { createProviderRegistry } from './providers/registry.js';
 import { createRouter } from './routes.js';
+import { createCreativeRouter } from './creative/routes.js';
 
 const cfg = loadConfig();
 const store = await createStore(cfg);
@@ -53,6 +54,7 @@ const app = express();
 app.use(cors(cfg.corsOrigin ? { origin: cfg.corsOrigin } : {}));
 app.use(express.json({ limit: '1mb' }));
 app.use(createRouter(deps));
+app.use(createCreativeRouter(deps));
 
 // Serve the built client when present (same-origin deployment).
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

@@ -38,6 +38,7 @@ import {
 } from '../../agent/workspace';
 import type { AgentEvent } from '../../agent/protocol';
 import { triggerDownloadVlx } from '../../utils/vlxFile';
+import { CreativePanel } from '../creative/CreativePanel';
 import './AgentPanel.css';
 
 interface ProviderInfo {
@@ -134,7 +135,7 @@ const suggestions = [
 
 export function AgentPanel() {
   const [open, setOpen] = useState(true);
-  const [tab, setTab] = useState<'chat' | 'history'>('chat');
+  const [tab, setTab] = useState<'chat' | 'history' | 'create'>('chat');
   const [prompt, setPrompt] = useState('');
   const [providerId, setProviderId] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -436,6 +437,15 @@ export function AgentPanel() {
           >
             <History size={14} /> CHECKPOINTS {revisions.length > 0 && <b>{revisions.length}</b>}
           </button>
+          <button
+            role="tab"
+            aria-selected={tab === 'create'}
+            onClick={() => setTab('create')}
+            className={tab === 'create' ? 'active' : ''}
+            title="Velxio Create — learn from links, generate validated scripts"
+          >
+            <Sparkles size={14} /> CREATE
+          </button>
         </div>
         <div className="agent-header-actions">
           <button
@@ -465,6 +475,10 @@ export function AgentPanel() {
           </button>
         </div>
       </header>
+      {tab === 'create' ? (
+        <CreativePanel />
+      ) : (
+        <>
       <div className="agent-context">
         <Cpu size={13} />
         <span>SUPPORTS</span>
@@ -960,6 +974,8 @@ export function AgentPanel() {
           )}
         </span>
       </footer>
+        </>
+      )}
     </aside>
   );
 }
