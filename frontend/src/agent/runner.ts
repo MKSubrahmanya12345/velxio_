@@ -84,11 +84,13 @@ async function requestRun(
   project: ReturnType<typeof toAgentProject>,
   options: {
     provider: string;
+    fastMode?: boolean;
     signal: AbortSignal;
     onEvent: (event: AgentEvent) => void;
   },
 ): Promise<TerminalEvent> {
   const { signal, onEvent } = options;
+  const before = captureWorkspace();
   const response = await fetch(`${getApiBase()}/agent/runs`, {
     method: 'POST',
     signal,
@@ -97,6 +99,7 @@ async function requestRun(
       prompt,
       project,
       provider: options.provider,
+      fast_mode: options.fastMode ?? true,
       forge_session: forgeSession(),
       messages: messages
         .slice(-12)
@@ -122,6 +125,15 @@ async function requestRun(
       if (event.type === 'run_started') {
         _active = { runId: event.run_id };
         continue; // internal event, no user-visible handling
+      }
+      if (event.type === 'canvas_update') {
+        try {
+          const progressive = fromAgentProject(event.project, before);
+          loadWorkspace(progressive);
+          runEditorCommand('view.reset');
+        } catch {
+          /* best effort live progressive canvas render */
+        }
       }
       onEvent(event);
       if (event.type === 'error')
@@ -153,6 +165,7 @@ export async function runAgent(options: {
   prompt: string;
   messages: ChatMessage[];
   provider: string;
+  fastMode?: boolean;
   signal: AbortSignal;
   onEvent: (event: AgentEvent) => void;
 }): Promise<string> {

@@ -154,6 +154,12 @@ export const eventSchema = z.discriminatedUnion('type', [
     ...runId,
   }),
   z.object({
+    type: z.literal('canvas_update'),
+    project: projectSchema,
+    label: z.string().optional(),
+    ...runId,
+  }),
+  z.object({
     type: z.literal('result'),
     project: projectSchema,
     hex: z.string().min(1).max(1000000),
