@@ -46,10 +46,9 @@ write a patch and wait for the compiler is guessing; this one works the problem:
    properties, wiring notes), `board_pinout`, `netlist` (what is connected to
    what right now), `read_file`/`list_files`, `check_design` (static analysis of
    the current project), `library_api`/`search_libraries`. Results are appended
-   to the conversation for the next round; the calls in one round run
-   concurrently, and identical (tool, args, project) results are memoized for
-   the run so repeats return instantly.
-   to the conversation and the model is asked again; nothing is applied.
+   to the conversation and the model is asked again; nothing is applied. The
+   calls in one round run concurrently, and identical (tool, args, project)
+   results are memoized for the run so repeats return instantly.
 2. **Draft rounds** (`AGENT_MAX_DRAFT_ROUNDS`, default 4) — the model passes a
    candidate patch *inline* to `draft_validate` (full schema + electrical +
    static analysis), `draft_compile` (the real `arduino-cli` build) and
