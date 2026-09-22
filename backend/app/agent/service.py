@@ -475,6 +475,20 @@ async def _fix_json_via_model(raw_text: str, error: str, spec: ProviderSpec | No
     returned None every time — the repair looked wired up but never ran.
     """
     prompt = _json_fixer_prompt(raw_text, error, pos)
+    # Cheap-model routing: the fixer only repairs JSON syntax, so when a
+    # small fast model is configured (AGENT_FIXER_*) it handles the call
+    # instead of the run's frontier model — bracket repair never pays
+    # big-model latency. Any failure falls through to the provider-routed
+    # fixer below, exactly as before.
+    if settings.AGENT_FIXER_BASE_URL and settings.AGENT_FIXER_MODEL and settings.AGENT_FIXER_API_KEY:
+        try:
+            fixed = await _fix_json_openai(prompt, settings.AGENT_FIXER_BASE_URL,
+                                           settings.AGENT_FIXER_MODEL, settings.AGENT_FIXER_API_KEY)
+            if fixed:
+                return fixed
+            logger.warning("configured JSON fixer returned nothing; falling back to the run's provider")
+        except Exception:  # noqa: BLE001 — a failed fixer must never kill the run
+            logger.warning("configured JSON fixer failed; falling back to the run's provider", exc_info=True)
     try:
         if spec is None:
             return await _fix_json_openai(prompt, settings.AGENT_BASE_URL,
@@ -647,16 +661,21 @@ class ProviderTransientError(ProviderError):
     """Retryable provider failure: HTTP 429/5xx, timeouts, transport errors."""
 
 
-async def _propose_once(messages: list[dict], spec: ProviderSpec) -> Proposal:
+async def _propose_once(messages: list[dict], spec: ProviderSpec,
+                        max_tokens: int | None = None) -> Proposal:
     if spec.kind == "opencode":
-        return await _propose_once_opencode(messages, spec)
+        return await _propose_once_opencode(messages, spec, max_tokens)
     if spec.kind == "bedrock":
-        return await _propose_once_bedrock(messages, spec)
-    return await _propose_once_openai(messages, spec)
+        return await _propose_once_bedrock(messages, spec, max_tokens)
+    return await _propose_once_openai(messages, spec, max_tokens)
 
 
-async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec) -> Proposal:
+async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec,
+                                 max_tokens: int | None = None) -> Proposal:
     """Route through a local `opencode serve` server (the TUI's own server).
+
+    `max_tokens` is accepted for interface parity: the opencode REST API has
+    no output-ceiling parameter, so it is ignored here.
 
     The opencode v2 server has no OpenAI-compatible endpoint, so we use its
     REST API directly: create a throwaway session, POST the whole conversation
@@ -723,10 +742,16 @@ async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec) -> Pr
     if isinstance(tokens, dict):
         input_tokens = tokens.get("input", 0) or 0
         output_tokens = tokens.get("output", 0) or 0
-        proposal._usage = {"prompt_tokens": input_tokens,
-                           "completion_tokens": output_tokens,
-                           "total_tokens": input_tokens + output_tokens}
-        usage = {"prompt_tokens": input_tokens, "completion_tokens": output_tokens}
+        usage = {"prompt_tokens": input_tokens,
+                 "completion_tokens": output_tokens,
+                 "total_tokens": input_tokens + output_tokens}
+        # The opencode server reports cache hits under info.tokens when its
+        # upstream model supports them; pass the field through so
+        # _log_proposal_ok can show the hit rate like every other provider.
+        cached = tokens.get("cached", tokens.get("cached_tokens"))
+        if isinstance(cached, int):
+            usage["cached_tokens"] = cached
+        proposal._usage = usage
     else:
         usage = None
     part_types = ",".join(sorted({p.get("type", "?") for p in parts if isinstance(p, dict)}))
@@ -736,7 +761,8 @@ async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec) -> Pr
     return proposal
 
 
-async def _propose_once_openai(messages: list[dict], spec: ProviderSpec) -> Proposal:
+async def _propose_once_openai(messages: list[dict], spec: ProviderSpec,
+                               max_tokens: int | None = None) -> Proposal:
     start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=settings.AGENT_PROVIDER_TIMEOUT_S) as client:
@@ -744,7 +770,8 @@ async def _propose_once_openai(messages: list[dict], spec: ProviderSpec) -> Prop
                 spec.base_url.rstrip("/") + "/chat/completions",
                 headers={"Authorization": f"Bearer {spec.api_key}"},
                 json={"model": spec.model, "messages": messages,
-                      "response_format": {"type": "json_object"}, "max_tokens": 10000},
+                      "response_format": {"type": "json_object"},
+                      "max_tokens": max_tokens or settings.AGENT_MAX_TOKENS_PROPOSAL},
             )
     except httpx.HTTPError:
         raise ProviderTransientError("Model provider is unreachable. Retrying…") from None
@@ -767,12 +794,33 @@ async def _propose_once_openai(messages: list[dict], spec: ProviderSpec) -> Prop
     proposal = await parse_proposal_with_fix(content, spec, finish_reason)
     usage = payload.get("usage")
     if isinstance(usage, dict):
+        cached = _cached_tokens_from_usage(usage)
+        if cached is not None:
+            usage["cached_tokens"] = cached
         proposal._usage = {k: usage.get(k) for k in
-                           ("prompt_tokens", "completion_tokens", "total_tokens")
+                           ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
                            if isinstance(usage.get(k), int)}
     _log_proposal_ok(spec, response.status_code, start, content, usage)
     _debug_calls(spec, messages, content)
     return proposal
+
+
+def _cached_tokens_from_usage(usage: dict | None) -> int | None:
+    """Cached (served-from-cache) input tokens, or None when the provider
+    doesn't report them. One parser for every spelling that exists in the
+    wild: OpenAI-compatible endpoints report prompt_tokens_details.cached_
+    tokens; some gateways use a top-level cached_tokens; Anthropic-style ones
+    use cache_read_input_tokens. Feeds both the per-call trace and the run
+    record's latency summary."""
+    if not isinstance(usage, dict):
+        return None
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict) and isinstance(details.get("cached_tokens"), int):
+        return details["cached_tokens"]
+    for key in ("cached_tokens", "cache_read_input_tokens"):
+        if isinstance(usage.get(key), int):
+            return usage[key]
+    return None
 
 
 def _log_proposal_ok(spec: ProviderSpec, status: int, start: float, content: str,
@@ -781,11 +829,18 @@ def _log_proposal_ok(spec: ProviderSpec, status: int, start: float, content: str
     token usage. Enough to answer "which provider did what and how much."""
     ms = int((time.monotonic() - start) * 1000)
     tokens = None
+    cache = ""
     if isinstance(usage, dict):
         tokens = {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens")
                   if isinstance(usage.get(k), int)}
-    logger.info("propose %s ok http=%d ms=%d out_chars=%d tokens=%s%s",
-                spec.id, status, ms, len(content), tokens, f" {extra}" if extra else "")
+        cached = _cached_tokens_from_usage(usage)
+        if (isinstance(cached, int) and isinstance(tokens, dict)
+                and tokens.get("prompt_tokens")):
+            cache = (f" cache={cached}/{tokens['prompt_tokens']}"
+                     f"({round(100.0 * cached / tokens['prompt_tokens'])}%)")
+    logger.info("propose %s ok http=%d ms=%d out_chars=%d tokens=%s%s%s",
+                spec.id, status, ms, len(content), tokens,
+                f" {extra}" if extra else "", cache)
 
 
 def _debug_calls(spec: ProviderSpec, messages: list[dict], content: str) -> None:
@@ -801,13 +856,14 @@ def _debug_calls(spec: ProviderSpec, messages: list[dict], content: str) -> None
 _MANTLE_JSON_MODE = True
 
 
-async def _propose_once_bedrock(messages: list[dict], spec: ProviderSpec) -> Proposal:
+async def _propose_once_bedrock(messages: list[dict], spec: ProviderSpec,
+                                max_tokens: int | None = None) -> Proposal:
     if _is_mantle_model(spec.model):
         # Kimi K2.5 is NOT served by native Bedrock Converse on this account
         # ("Operation not allowed"); wireup routes it through the Bedrock
         # Mantle Chat Completions endpoint, which is OpenAI-compatible.
-        return await _propose_once_mantle(messages, spec)
-    return await _propose_once_converse(messages, spec)
+        return await _propose_once_mantle(messages, spec, max_tokens)
+    return await _propose_once_converse(messages, spec, max_tokens)
 
 
 def _is_mantle_model(model: str) -> bool:
@@ -896,21 +952,23 @@ async def _mantle_post(spec: ProviderSpec, payload: dict) -> httpx.Response:
         raise ProviderTransientError("Bedrock is unreachable. Retrying…") from None
 
 
-async def _propose_once_mantle(messages: list[dict], spec: ProviderSpec) -> Proposal:
+async def _propose_once_mantle(messages: list[dict], spec: ProviderSpec,
+                               max_tokens: int | None = None) -> Proposal:
     global _MANTLE_JSON_MODE
     if not spec.region:
         raise ProviderError("Bedrock needs a region. Ask an administrator to set AWS_REGION in backend/.env.")
     if not (settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY) and not spec.api_key:
         raise ProviderError("Bedrock Mantle needs AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) or BEDROCK_API_KEY in backend/.env.")
     start = time.monotonic()
-    response = await _mantle_post(spec, _mantle_payload(spec, messages,
+    response = await _mantle_post(spec, _mantle_payload(spec, messages, max_tokens=max_tokens,
                                                         json_mode=_MANTLE_JSON_MODE))
     if response.status_code == 400 and _MANTLE_JSON_MODE and _rejects_json_mode(response):
         # This gateway doesn't implement response_format: drop it for the rest
         # of the process instead of failing every call the same way.
         logger.warning("propose %s: gateway rejected response_format; JSON mode disabled", spec.id)
         _MANTLE_JSON_MODE = False
-        response = await _mantle_post(spec, _mantle_payload(spec, messages, json_mode=False))
+        response = await _mantle_post(spec, _mantle_payload(spec, messages, max_tokens=max_tokens,
+                                                            json_mode=False))
     if response.status_code == 429 or response.status_code >= 500:
         raise ProviderTransientError(f"Bedrock returned HTTP {response.status_code}. Retrying…")
     if response.status_code >= 400:
@@ -934,8 +992,11 @@ async def _propose_once_mantle(messages: list[dict], spec: ProviderSpec) -> Prop
     proposal = await parse_proposal_with_fix(content, spec, choice.get("finish_reason"))
     usage = payload.get("usage")
     if isinstance(usage, dict):
+        cached = _cached_tokens_from_usage(usage)
+        if cached is not None:
+            usage["cached_tokens"] = cached
         proposal._usage = {k: usage.get(k) for k in
-                           ("prompt_tokens", "completion_tokens", "total_tokens")
+                           ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
                            if isinstance(usage.get(k), int)}
     _log_proposal_ok(spec, response.status_code, start, content, usage,
                      extra=f"model={spec.model} json_mode={_MANTLE_JSON_MODE}")
@@ -964,20 +1025,6 @@ def _bedrock_converse_blocking(messages: list[dict], spec: ProviderSpec,
     timeout = max(1.0, settings.BEDROCK_TIMEOUT_MS / 1000.0)
     config = Config(retries={"max_attempts": max(1, settings.BEDROCK_MAX_RETRIES + 1)},
                     connect_timeout=min(10.0, timeout), read_timeout=timeout)
-    client = boto3.client("bedrock-runtime", config=config, **client_kwargs)
-    system = [{"text": m["content"]} for m in messages if m["role"] == "system"]
-    conversation = [{"role": m["role"], "content": [{"text": m["content"]}]}
-                    for m in messages if m["role"] != "system"]
-    response = client.converse(
-        modelId=spec.model,
-        messages=conversation,
-        system=system,
-        inferenceConfig={"maxTokens": max_tokens or settings.BEDROCK_MAX_TOKENS,
-                         "temperature": settings.BEDROCK_TEMPERATURE,
-                         "topP": settings.BEDROCK_TOP_P},
-    )
-    try:
-        content = "".join(block.get("text", "") for block in
                           response["output"]["message"]["content"] if block.get("type") == "text")
     except (KeyError, TypeError):
         raise ProviderError("Bedrock returned a malformed Converse response") from None
@@ -991,7 +1038,8 @@ def _bedrock_converse_blocking(messages: list[dict], spec: ProviderSpec,
     return content, usage, str(response.get("stopReason") or "")
 
 
-async def _propose_once_converse(messages: list[dict], spec: ProviderSpec) -> Proposal:
+async def _propose_once_converse(messages: list[dict], spec: ProviderSpec,
+                                 max_tokens: int | None = None) -> Proposal:
     if not spec.region:
         raise ProviderError("Bedrock needs a region. Ask an administrator to set AWS_REGION in backend/.env.")
     import boto3
@@ -999,8 +1047,10 @@ async def _propose_once_converse(messages: list[dict], spec: ProviderSpec) -> Pr
 
     start = time.monotonic()
     try:
+        # Native Converse reports no cache-token breakdown; the latency
+        # summary treats a missing cached_tokens as "not reported", not zero.
         content, usage, stop_reason = await asyncio.to_thread(
-            _bedrock_converse_blocking, messages, spec)
+            _bedrock_converse_blocking, messages, spec, max_tokens)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code in {"ThrottlingException", "ServiceQuotaExceededException",
@@ -1035,14 +1085,19 @@ def _resolve_provider(provider_id: str) -> ProviderSpec:
     return spec
 
 
-async def propose(messages: list[dict], spec: ProviderSpec | None = None) -> Proposal:
-    """One provider call with bounded retry/backoff on transient failures."""
+async def propose(messages: list[dict], spec: ProviderSpec | None = None,
+                  max_tokens: int | None = None) -> Proposal:
+    """One provider call with bounded retry/backoff on transient failures.
+
+    `max_tokens` is the output ceiling for this call type (see
+    AGENT_MAX_TOKENS_PROPOSAL / AGENT_MAX_TOKENS_TOOL_ROUNDS); None keeps
+    each path's historical default."""
     if spec is None:
         spec = _resolve_provider("opencode")
     last: ProviderTransientError | None = None
     for try_index in range(settings.AGENT_PROVIDER_RETRIES + 1):
         try:
-            return await _propose_once(messages, spec)
+            return await _propose_once(messages, spec, max_tokens)
         except ProviderTransientError as exc:
             last = exc
             if try_index < settings.AGENT_PROVIDER_RETRIES:
@@ -1084,21 +1139,130 @@ def _scrubbed_project_json(project) -> str:
     return json.dumps(data)
 
 
+def _summarize_proposal(proposal: Proposal) -> str:
+    """One-line echo of an older round's proposal (in-run compaction).
+
+    The full proposal JSON of old rounds is what makes every later call
+    re-prefill the same patch bytes; the model needs WHAT it did and what it
+    asked for, not the bytes again — the tool results that followed each
+    round are kept verbatim. This is the priority-budgeting pattern from
+    docs/research/cursor-ai.md §2.2, applied without the JSX layer."""
+    parts = [f"earlier proposal (summary): {proposal.summary[:200]}"]
+    if proposal.patch is not None:
+        p = proposal.patch
+        touched = []
+        if p.upsert_components:
+            touched.append(f"{len(p.upsert_components)} components")
+        if p.remove_components:
+            touched.append(f"{len(p.remove_components)} components removed")
+        if p.upsert_wires:
+            touched.append(f"{len(p.upsert_wires)} wires")
+        if p.remove_wires:
+            touched.append(f"{len(p.remove_wires)} wires removed")
+        if p.upsert_files:
+            touched.append(f"{len(p.upsert_files)} files")
+        if p.remove_files:
+            touched.append(f"{len(p.remove_files)} files removed")
+        if touched:
+            parts.append("patch touched: " + ", ".join(touched))
+    if proposal.tool_calls:
+        parts.append("requested tools: " + ", ".join(tc.tool for tc in proposal.tool_calls))
+    return scrub_secrets("; ".join(parts))
+
+
 def _base_messages(request: AgentRequest) -> list[dict]:
-    request_text = "CURRENT PROJECT:\n" + _scrubbed_project_json(request.project) \
-        + "\nREQUEST:\n" + scrub_secrets(request.prompt)
+    """Assemble the provider conversation with a cache-friendly layout.
+
+    Provider prefix caching (automatic on OpenAI-compatible endpoints for
+    byte-identical prefixes of ~1k+ tokens) only pays off if the FRONT of
+    this list is byte-identical across calls. The layout is therefore:
+
+      [system]   static per board + catalog (rules, tools, schema) — never varies
+      [history]  user chat, append-only — varies only when the browser adds a turn
+      [state]    project JSON + forge block — constant for the whole run (nothing
+                 in this loop mutates request.project mid-run)
+      [request]  the new user prompt — the only genuinely fresh content
+      [tool rounds…] appended later by the loop, one assistant/user pair per round
+
+    Every propose_counted() call re-sends everything up to the point of
+    divergence; keeping the front stable is what lets the provider serve it
+    from cache instead of re-prefilling it (see _log_proposal_ok, which logs
+    the cached-token share of each call so a hit/miss is visible).
+    INVARIANT: never place dynamic content (timestamps, run ids, per-call
+    state) anywhere above [request], and never reorder these blocks —
+    reordering silently invalidates the cached prefix.
+    """
+    state_text = "CURRENT PROJECT (state — unchanged during this run):\n" \
+        + _scrubbed_project_json(request.project)
     # JEV-reviewed project memory (forge bridge). Fail-open by construction: the
     # attribute is empty unless a forge turn actually returned a block this run.
     if request._forge_context:
-        request_text += ("\n\n" + request._forge_context
-                         + "\nApply these constraints to the circuit design and firmware; do not contradict an active rule.")
+        state_text += ("\n\nPROJECT MEMORY:\n" + request._forge_context
+                       + "\nApply these constraints to the circuit design and firmware; do not contradict an active rule.")
     return [
         {"role": "system", "content": system_prompt()
          + "\n" + describe_tools()
          + "\nResponse schema: " + json.dumps(Proposal.model_json_schema())},
         *[{"role": m.role, "content": scrub_secrets(m.content)} for m in request.messages],
-        {"role": "user", "content": request_text},
+        {"role": "user", "content": state_text},
+        {"role": "user", "content": "REQUEST:\n" + scrub_secrets(request.prompt)},
     ]
+
+
+async def _forge_turn(request: AgentRequest) -> dict:
+    """The bounded forge memory turn, shaped to run as a background task.
+
+    Never raises: every failure (timeout, HTTP, schema) becomes an
+    {"ok": False, ...} dict, so a memory-layer problem can only ever cost a
+    run a missing context — never a failure (the old serial path's
+    guarantee, preserved).
+    """
+    try:
+        from app.agent import forge as forge_bridge
+        return await asyncio.wait_for(
+            forge_bridge.run_turn(request.prompt, request.forge_session or "default"),
+            timeout=min(150.0, settings.FORGE_TURN_TIMEOUT_S + 20.0),
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open by design
+        return {"ok": False, "context": "", "summary": {},
+                "error": f"forge turn failed: {type(exc).__name__}"}
+
+
+def _discard_task_result(task: "asyncio.Task") -> None:
+    """Consume a background task's outcome so a late/cancelled forge turn
+    never surfaces as an un-retrieved-exception warning."""
+    if not task.cancelled():
+        try:
+            task.exception()
+        except Exception:  # noqa: BLE001 — outcome already shaped by _forge_turn
+            pass
+
+
+def _latency_summary(record: RunRecord, started: float) -> dict | None:
+    """Run-level latency rollup, yielded once just before the terminal event
+    and logged server-side. The per-call entries answer "which round was
+    slow"; the totals keep the old provider/compile split. None when no call
+    was recorded. cache_hit_pct is None when no provider reported cached
+    tokens (that is "unknown", not "0%")."""
+    if not record.calls:
+        return None
+    prompt = sum(c.get("prompt_tokens", 0) for c in record.calls)
+    reporting = [c for c in record.calls if c.get("cached_tokens") is not None]
+    if reporting:
+        cached = sum(c["cached_tokens"] for c in reporting)
+        hit = round(100.0 * cached / max(prompt, 1), 1)
+    else:
+        hit = None
+    return {
+        "type": "latency_summary",
+        "calls": record.calls,
+        "total_ms": int((time.monotonic() - started) * 1000),
+        "provider_ms": record.provider_ms,
+        "compile_ms": record.compile_ms,
+        "prompt_tokens": prompt,
+        "completion_tokens": record.completion_tokens,
+        "cache_hit_pct": hit,
+    }
 
 
 async def run_agent(request: AgentRequest):
@@ -1110,47 +1274,61 @@ async def run_agent(request: AgentRequest):
                 len(request.project.files))
     record = start_run_record(run_id)
     rid, feedback_q = register_feedback(run_id)
+    # Forge project memory (opt-in, direct connection, fail-open) runs as a
+    # background task instead of a serial pre-run step: the first provider
+    # call no longer waits for it. If it lands before the first call it is in
+    # the stable prefix (cache-friendly); otherwise it is folded in as a
+    # clarification before the next round. Any forge problem degrades to "no
+    # memory this run" — never to a failure.
+    request._forge_context = ""
+    forge_task: asyncio.Task | None = None
+    try:
+        from app.agent import forge as forge_bridge
+        if forge_bridge.is_enabled():
+            forge_task = asyncio.create_task(_forge_turn(request))
+    except Exception:  # noqa: BLE001 — the bridge import itself must not kill a run
+        forge_task = None
     try:
         # First event carries run_id explicitly so the browser knows where to
         # POST mid-run notes. Subsequent events inherit run_id from event().
         yield {"type": "run_started", "run_id": rid}
-        # Forge project memory (opt-in, direct connection, fail-open). Any
-        # forge problem degrades to "no memory this run" — never to a failure.
-        try:
-            from app.agent import forge as forge_bridge
-            if forge_bridge.is_enabled():
-                yield {"type": "stage", "run_id": rid, "stage": "planning",
-                       "message": "Checking project memory (forge · JEV)"}
-                # A slow forge must never eat the run's global 240 s budget:
-                # bound the turn and degrade to "no memory", not to a timeout.
-                turn = await asyncio.wait_for(
-                    forge_bridge.run_turn(request.prompt, request.forge_session or "default"),
-                    timeout=min(150.0, settings.FORGE_TURN_TIMEOUT_S + 20.0),
-                )
-                request._forge_context = turn.get("context", "")
-                yield {"type": "forge", "run_id": rid,
-                       "status": "ok" if turn.get("ok") else "unavailable",
-                       "summary": turn.get("summary") or {},
-                       "message": str(turn.get("error", ""))[:300]}
-        except Exception:
-            # Fail-open, but not silent: without this event an unreachable forge
-            # (or a turn that raised) is indistinguishable from "no memory
-            # configured", and the run quietly ignores the project's rules.
-            request._forge_context = ""
-            yield {"type": "forge", "run_id": rid, "status": "unavailable", "summary": {},
-                   "message": "Project memory (forge) is not reachable; continuing without it."}
-        async for event in _run(request, rid, started, record, feedback_q):
-            yield event
+        # Buffer the terminal event: the latency summary is inserted just
+        # BEFORE it, so consumers keying on events[-1] still see the final
+        # result/answer/error there.
+        last_event: dict | None = None
+        async for event in _run(request, rid, started, record, feedback_q, forge_task):
+            if last_event is not None:
+                yield last_event
+            last_event = event
+        if last_event is not None:
+            summary = _latency_summary(record, started)
+            if summary is not None:
+                logger.info("run %s latency: calls=%d total_ms=%d provider_ms=%d compile_ms=%d "
+                            "prompt=%s completion=%s cache_hit=%s",
+                            run_id, len(record.calls), summary["total_ms"],
+                            summary["provider_ms"], summary["compile_ms"],
+                            summary["prompt_tokens"], summary["completion_tokens"],
+                            summary["cache_hit_pct"])
+                yield {"run_id": rid, **summary}
+            yield last_event
     except (asyncio.CancelledError, GeneratorExit):
         logger.info("run %s cancelled after %.1fs", rid, time.monotonic() - started)
         record.finish("cancelled")
         raise
     finally:
+        if forge_task is not None:
+            if not forge_task.done():
+                if record.outcome != "running":
+                    logger.info("run %s: forge turn still pending at run end; memory not used",
+                                run_id)
+                forge_task.cancel()
+            forge_task.add_done_callback(_discard_task_result)
         unregister(rid)
 
 
 async def _run(request: AgentRequest, run_id: str, started: float, record: RunRecord,
-               feedback_q: asyncio.Queue[str] | None = None):
+               feedback_q: asyncio.Queue[str] | None = None,
+               forge_task: asyncio.Task | None = None):
     def event(payload: dict) -> dict:
         return {"run_id": run_id, **payload}
 
@@ -1163,19 +1341,80 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         return
     record.provider = spec.id
 
-    async def propose_counted(messages: list[dict]) -> Proposal:
-        """One provider call, counted for the run record (retries included)."""
+    async def propose_counted(messages: list[dict], max_tokens: int | None = None,
+                              stage: str = "", attempt: int = 0) -> Proposal:
+        """One provider call, counted for the run record (retries included).
+
+        stage/attempt feed the per-call latency trace (record.calls) — the
+        answer to "which round was slow"."""
         t0 = time.monotonic()
-        proposal = await propose(messages, spec)
+        proposal = await propose(messages, spec, max_tokens)
+        ms = int((time.monotonic() - t0) * 1000)
         record.provider_calls += 1
-        record.provider_ms += int((time.monotonic() - t0) * 1000)
+        record.provider_ms += ms
         usage = proposal.usage
         if usage:
             record.prompt_tokens += usage.get("prompt_tokens", 0)
             record.completion_tokens += usage.get("completion_tokens", 0)
+            record.calls.append({
+                "stage": stage,
+                "attempt": attempt,
+                "ms": ms,
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "cached_tokens": usage.get("cached_tokens"),  # None = not reported
+            })
         return proposal
 
     pending_notes: list[str] = []
+    forge_note: str | None = None
+    forge_state = {"emitted": False}
+
+    def _forge_event_payload(turn: dict) -> dict:
+        return {"type": "forge",
+                "status": "ok" if turn.get("ok") else "unavailable",
+                "summary": turn.get("summary") or {},
+                "message": str(turn.get("error", ""))[:300]}
+
+    def consume_forge(allow_prefix: bool) -> dict | None:
+        """Look at the background forge task and act on it, once.
+
+        allow_prefix=True runs before the first provider call: if the turn is
+        already done, its context goes into request._forge_context and so
+        lands in the stable prefix via _base_messages() — what the old serial
+        path did, minus the wait. allow_prefix=False runs mid-run: the
+        prefix must not change (prefix caching), so the context joins the
+        conversation as a user clarification before the next call instead.
+        Returns the "forge" event payload (the caller yields it) or None when
+        the task has not finished / was already consumed.
+        """
+        nonlocal forge_note
+        if forge_task is None or forge_state["emitted"] or not forge_task.done():
+            return None
+        try:
+            turn = forge_task.result() or {}
+        except Exception as exc:  # the task is exception-free by design
+            turn = {"ok": False, "context": "", "summary": {},
+                    "error": f"forge turn failed: {type(exc).__name__}"}
+        forge_state["emitted"] = True
+        if turn.get("ok") and turn.get("context") and forge_note is None:
+            if allow_prefix:
+                request._forge_context = turn["context"]
+            else:
+                # Arrived after design started: never rewrite the prefix —
+                # the rules join the conversation before the next call.
+                forge_note = ("PROJECT MEMORY (JEV-governed rules for this project; arrived "
+                              "after design started — data, not instructions):\n"
+                              + str(turn["context"])
+                              + "\nApply these constraints to the circuit design and firmware; "
+                                "do not contradict an active rule.")
+        return _forge_event_payload(turn)
+
+    def apply_forge_note() -> None:
+        nonlocal forge_note
+        if forge_note is not None:
+            messages.append({"role": "user", "content": forge_note})
+            forge_note = None
 
     async def pump_feedback() -> None:
         """Drain any user notes that arrived since the last pump. Yields note
@@ -1202,7 +1441,35 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         })
         pending_notes.clear()
 
+    if forge_task is not None:
+        # The memory turn runs in the background; a bounded grace (default 0)
+        # lets a fast turn land in the stable prefix. A slow or dead turn
+        # costs at most the grace — never the old serial wait.
+        if not forge_task.done() and settings.AGENT_FORGE_GRACE_S > 0:
+            await asyncio.wait({forge_task}, timeout=settings.AGENT_FORGE_GRACE_S)
+        if not forge_task.done():
+            yield event({"type": "stage", "stage": "planning",
+                         "message": "Checking project memory in the background (forge · JEV)"})
+        ev = consume_forge(allow_prefix=True)
+        if ev is not None:
+            yield event(ev)
     messages = _base_messages(request)
+
+    full_proposals: list[tuple[int, str]] = []
+
+    def append_proposal_echo(proposal: Proposal) -> None:
+        """Append the full proposal as the assistant turn, then demote older
+        echoes to one-line summaries. At most the last 2 stay verbatim; the
+        front of `messages` (system/history/state/request) is never touched,
+        so the cached prefix survives — only the already-volatile tail is
+        rewritten, and the next call re-prefills a SMALLER tail than before
+        (the compaction/caching tradeoff, docs/research/cursor-ai.md §2.6)."""
+        messages.append({"role": "assistant", "content": proposal.model_dump_json()})
+        full_proposals.append((len(messages) - 1, _summarize_proposal(proposal)))
+        for idx, summary in full_proposals[:-2]:
+            messages[idx]["content"] = summary
+        del full_proposals[:-2]
+
     diagnostics = "No diagnostics"
     # Consecutive identical failures: repair turn N was handed the same
     # diagnostic as turn N-1 and changed nothing that mattered. One repeat can
@@ -1224,6 +1491,10 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         async for ev in pump_feedback():
             yield ev
         apply_notes()
+        ev = consume_forge(allow_prefix=False)
+        if ev is not None:
+            yield event(ev)
+        apply_forge_note()
         stage = "planning" if attempt == 0 else "repairing"
         yield event({"type": "stage", "stage": stage, "attempt": attempt + 1,
                      "message": "Designing circuit and firmware" if attempt == 0
@@ -1236,7 +1507,9 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         user_short = ""  # short human-readable label for the diagnostic event
         while proposal is None:
             try:
-                proposal = await propose_counted(messages)
+                proposal = await propose_counted(messages,
+                                                 max_tokens=settings.AGENT_MAX_TOKENS_PROPOSAL,
+                                                 stage=stage, attempt=attempt + 1)
             except ProviderError as exc:
                 logger.error("run %s: %s", run_id, exc)
                 record.finish("error", str(exc))
@@ -1261,6 +1534,10 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                 logger.info("run %s attempt %d: malformed response: %s",
                             run_id, attempt + 1, str(exc)[:300])
                 break
+            ev = consume_forge(allow_prefix=False)
+            if ev is not None:
+                yield event(ev)
+            apply_forge_note()
             # --- tool rounds: the model works before it commits -------------
             # Nothing in this loop applies a patch: research tools read (catalog,
             # pinout, netlist, project files) and draft_* tools build a CANDIDATE
@@ -1279,10 +1556,12 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                     # Out of budget for this family of tools: one final nudge to
                     # return the response itself, never another loop.
                     nudged = True
-                    messages.append({"role": "assistant", "content": proposal.model_dump_json()})
+                    append_proposal_echo(proposal)
                     messages.append({"role": "user", "content": tool_results_message([], 0)})
                     try:
-                        proposal = await propose_counted(messages)
+                        proposal = await propose_counted(messages,
+                                                         max_tokens=settings.AGENT_MAX_TOKENS_TOOL_ROUNDS,
+                                                         stage="nudge", attempt=attempt + 1)
                     except ProviderError as exc:
                         logger.error("run %s: %s", run_id, exc)
                         record.finish("error", str(exc))
@@ -1304,6 +1583,10 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                         diagnostics = f"{user_short}\n{exc}"
                         logger.info("run %s attempt %d: malformed after nudge: %s",
                                     run_id, attempt + 1, str(exc)[:300])
+                    ev = consume_forge(allow_prefix=False)
+                    if ev is not None:
+                        yield event(ev)
+                    apply_forge_note()
                     break
                 results = []
                 for call in calls:
@@ -1313,19 +1596,26 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                     logger.info("run %s tool %s ok=%s", run_id, call.tool, outcome.get("ok"))
                 yield event({"type": "tools", "calls": [{"tool": c.tool, "ok": r.get("ok", False)}
                                                         for c, r in zip(calls, results)]})
-                messages.append({"role": "assistant", "content": proposal.model_dump_json()})
+                append_proposal_echo(proposal)
                 messages.append({"role": "user",
                                  "content": tool_results_message(results, max(tool_rounds_left, draft_rounds_left))})
                 # Give the user a chance to steer between tool calls.
                 async for ev in pump_feedback():
                     yield ev
                 apply_notes()
+                ev = consume_forge(allow_prefix=False)
+                if ev is not None:
+                    yield event(ev)
+                apply_forge_note()
                 yield event({"type": "stage",
                              "stage": "testing" if drafting else "research",
                              "message": "Testing the draft against the real toolchain and emulator"
                              if drafting else "Consulting the catalog, pinout and netlist"})
                 try:
-                    proposal = await propose_counted(messages)
+                    proposal = await propose_counted(messages,
+                                                     max_tokens=settings.AGENT_MAX_TOKENS_TOOL_ROUNDS,
+                                                     stage="testing" if drafting else "research",
+                                                     attempt=attempt + 1)
                 except ProviderError as exc:
                     logger.error("run %s: %s", run_id, exc)
                     record.finish("error", str(exc))
@@ -1461,7 +1751,7 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                 yield event({"type": "error", "message": "Arduino toolchain is unavailable. Install arduino-cli and the arduino:avr core on the build server, then retry; your workspace is unchanged."})
                 return
             # A real assistant proposal anchors the diagnostic to the failed candidate.
-            messages.append({"role": "assistant", "content": proposal.model_dump_json()})
+            append_proposal_echo(proposal)
             logger.info("run %s attempt %d: compile failed, repairing", run_id, attempt + 1)
         except (ValidationError, ValueError) as exc:
             # describe_error, not str(exc): a raw ValidationError embeds the whole
@@ -1475,7 +1765,7 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
             # line — it re-derived the design from scratch and reproduced the
             # same miswiring on every attempt until the run gave up.
             if proposal is not None:
-                messages.append({"role": "assistant", "content": proposal.model_dump_json()})
+                append_proposal_echo(proposal)
             logger.info("run %s attempt %d: rejected, repairing: %s", run_id, attempt + 1,
                         diagnostics[:200])
         if diagnostics == last_diagnostics:

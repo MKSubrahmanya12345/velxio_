@@ -194,7 +194,7 @@ async def test_rejected_patch_is_shown_to_the_model_on_the_repair_turn(monkeypat
     """
     seen: list[list[dict]] = []
 
-    async def llm(messages, spec=None):
+    async def llm(messages, spec=None, max_tokens=None):
         seen.append(messages)
         diagnostics = "\n".join(m["content"] for m in messages if m["role"] == "user")
         return Proposal(summary="Button on pin 2",

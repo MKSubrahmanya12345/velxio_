@@ -96,6 +96,32 @@ class Settings(BaseSettings):
     AGENT_MAX_DRAFT_ROUNDS: int = 15
     AGENT_PROVIDER_TIMEOUT_S: float = 500.0
     AGENT_PROVIDER_RETRIES: int = 15
+    # Output budget per provider call type (a ceiling, not a target — the
+    # model stops when its response is complete). Tool-round calls usually
+    # answer with tool_calls only or a small patch, so they get the lower
+    # ceiling; proposal/repair calls must fit the full patch + expectations.
+    # Hitting the ceiling is not a failure: the salvage + repair pipeline
+    # catches the truncation and asks the model to send only what it changes.
+    # Set AGENT_MAX_TOKENS_TOOL_ROUNDS to the proposal value for the old
+    # single-ceiling behavior.
+    AGENT_MAX_TOKENS_PROPOSAL: int = 10000
+    AGENT_MAX_TOKENS_TOOL_ROUNDS: int = 4000
+    # Optional small/fast model dedicated to the JSON repair sub-call. The
+    # fixer only repairs JSON syntax — it never designs — so it should never
+    # pay frontier-model latency in the user's critical path (Cursor routes
+    # exactly this kind of call to a fast model). Set all three, e.g. a fast
+    # model on an OpenAI-compatible endpoint; on any fixer failure the run's
+    # own provider handles the repair, exactly as before. Empty = unchanged.
+    AGENT_FIXER_BASE_URL: str = ""
+    AGENT_FIXER_MODEL: str = ""
+    AGENT_FIXER_API_KEY: str = ""
+    # How long the agent waits for the forge memory turn before starting the
+    # first provider call (the turn itself keeps running in the background to
+    # its 150 s bound). 0 = never wait: memory lands in the stable prefix only
+    # if it is already done, otherwise it is folded in as a clarification
+    # before the next round (a single-shot run then misses it — raise this to
+    # trade serial wait for first-call memory inclusion).
+    AGENT_FORGE_GRACE_S: float = 0.0
     # Live Arduino library search from the agent's search_libraries tool.
     AGENT_ALLOW_LIBRARY_SEARCH: bool = True
     # Forge project memory (JEV-governed) for the agent — a direct connection to
