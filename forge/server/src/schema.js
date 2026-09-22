@@ -98,6 +98,10 @@ export function makeConversation(input = {}) {
     // Human tool pending calls
     pendingHumanTools: Array.isArray(input.pendingHumanTools) ? input.pendingHumanTools : [],
     counters: input.counters || { messages: 0, jevCalls: 0, humanCalls: 0, plans: 0 },
+    // Creative collections (Velxio Create): { collection: true, sources: [...] }.
+    // Null for normal build chats. Sources hold ingested transcripts/texts;
+    // memory.notes hold the JEV-governed notes distilled from them.
+    creative: input.creative && typeof input.creative === 'object' ? input.creative : null,
     // For backward compat, also expose state alias
     get state() { return this.projectState; },
   };
@@ -130,6 +134,7 @@ export function normalizeConversation(raw, fallbackId = '') {
       pendingHumanTools: raw.pendingHumanTools,
       memory: raw.memory,
       counters: raw.counters,
+      creative: raw.creative,
     });
   }
   return null;

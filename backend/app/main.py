@@ -137,6 +137,12 @@ app.include_router(iot_gateway.router, prefix="/api/gateway", tags=["iot-gateway
 from app.api.routes import news
 app.include_router(news.router, prefix="/api/news", tags=["news"])
 
+# Velxio Create — chat-only content creation. Thin proxy to the Forge
+# server's creative routes (collections, ingest, ideas, scripts); Forge
+# holds the memory, providers and JEV review. Anonymous like the agent.
+from app.api.routes import creative
+app.include_router(creative.router, prefix="/api/creative", tags=["creative"])
+
 # Optional pro extension. The `app.pro` package only exists in private builds
 # (overlaid at Docker build time by an external repo) — its absence in the
 # open-source image is expected and silently ignored. Anyone with private
