@@ -178,6 +178,7 @@ export function AgentPanel() {
   }, [busy, startTime]);
   // Re-render on named project/example switches; don't send another project's chat.
   useProjectStore((s) => s.currentProject?.id ?? s.currentExampleId);
+  const journal = useAgentJournal();
   const scope = scopeKey();
   const messages = journal.messages.filter((m) => m.scope === scope);
   const revisions = journal.revisions.filter((r) => r.scope === scope);
