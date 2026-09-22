@@ -148,7 +148,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({ editorMenu, editorToolbar 
               <path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4" />
             </svg>
             <Link to={localize('/')} style={{ textDecoration: 'none', color: 'inherit' }}>
-              <span className="header-title">Velxio</span>
+              <span className="header-title">Wireup</span>
             </Link>
           </div>
 

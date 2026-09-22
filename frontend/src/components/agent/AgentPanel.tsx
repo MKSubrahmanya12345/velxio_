@@ -491,7 +491,7 @@ export function AgentPanel() {
             aria-selected={tab === 'create'}
             onClick={() => setTab('create')}
             className={tab === 'create' ? 'active' : ''}
-            title="Velxio Create — learn from links, generate validated scripts"
+            title="Wireup Create — learn from links, generate validated scripts"
           >
             <Sparkles size={14} /> CREATE
           </button>
