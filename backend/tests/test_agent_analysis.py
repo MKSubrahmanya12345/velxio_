@@ -130,6 +130,51 @@ def test_driven_pin_pulled_to_ground_by_a_button_warns():
     assert codes(candidate)["button-shorts-pin"].severity == "warning"
 
 
+BUTTON_SRC = "void setup(){pinMode(2,INPUT_PULLUP);}void loop(){if(!digitalRead(2)){}}"
+
+
+def test_button_gpio_on_one_contact_and_gnd_on_the_other_is_clean():
+    # 1.l/1.r is contact 1 and 2.l/2.r is contact 2, so the GND belongs on the
+    # *other* contact — not on the second leg of the pin's own contact.
+    wires = [wire("w1", "uno", "2", "btn1", "1.l"), wire("w2", "btn1", "2.l", "uno", "GND.1")]
+    candidate = build(patch(components=(BTN,), wires=wires, source=BUTTON_SRC))
+    assert candidate.findings == []
+
+
+def test_button_gpio_and_gnd_on_one_contact_names_the_wire_to_move():
+    # The miswire a model actually emits when it reads "one side to a GPIO, the
+    # opposite side to GND" as left/right instead of contact/contact. The
+    # diagnostic has to name the button and the wire, because the old wording
+    # ("put the load between the pin and the rail") reads as "add a component":
+    # the repair loop rebuilt the same two wires until the attempts ran out and
+    # the user got nothing.
+    wires = [wire("w1", "uno", "2", "btn1", "1.l"), wire("w2", "btn1", "1.r", "uno", "GND.1")]
+    direct = Project(board=Board(id="uno"), components=[BTN], wires=wires,
+                     files=[Source(name="sketch.ino", content=BUTTON_SRC)])
+    message = codes(direct)["gpio-shorted"].message
+    assert "SAME contact" in message
+    assert "Move the GND.1 wire from btn1.1.r to btn1.2.l" in message
+    assert "no component in between" not in message
+    with pytest.raises(ValueError, match="Move the GND.1 wire from btn1.1.r to btn1.2.l"):
+        build(patch(components=(BTN,), wires=wires, source=BUTTON_SRC))
+
+
+def test_every_error_reaches_the_repair_prompt_not_only_the_first():
+    # Three identically miswired buttons used to cost one repair attempt per
+    # button (assert_clean raised on the first finding), and the run ended with
+    # nothing applied. Every error travels in one diagnostic now.
+    buttons = [Part(id=f"btn{i}", metadataId="pushbutton", x=200 + i * 80, y=300) for i in (1, 2, 3)]
+    wires = [wire(f"a{i}", "uno", str(1 + i), f"btn{i}", "1.l") for i in (1, 2, 3)] \
+        + [wire(f"b{i}", f"btn{i}", "1.r", "uno", "GND.1") for i in (1, 2, 3)]
+    source = ("void setup(){pinMode(2,INPUT_PULLUP);pinMode(3,INPUT_PULLUP);pinMode(4,INPUT_PULLUP);}"
+              "void loop(){if(!digitalRead(2)){}if(!digitalRead(3)){}if(!digitalRead(4)){}}")
+    with pytest.raises(ValueError) as excinfo:
+        build(patch(components=tuple(buttons), wires=wires, source=source))
+    diagnostics = str(excinfo.value)
+    assert "Pin 2" in diagnostics and "Pin 3" in diagnostics  # not just the first
+    assert "fix every occurrence" in diagnostics
+
+
 def test_potentiometer_wiper_must_be_analog():
     wires = BLINK + [wire("w20", "pot1", "VCC", "uno", "5V"), wire("w21", "pot1", "GND", "uno", "GND.1"),
                      wire("w22", "pot1", "SIG", "uno", "13")]

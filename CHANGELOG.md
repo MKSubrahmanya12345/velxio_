@@ -46,6 +46,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   reverse proxy when exposing it
 
 ### Fixed
+- The agent's repair loop converges instead of repeating one diagnostic until the
+  attempt budget runs out ("Repairing from diagnostics · attempt 4" with nothing
+  applied). A patch rejected by the static analysis was never put back into the
+  conversation, so the model saw only the unchanged project plus one generic
+  line and re-derived the same draft every attempt; the repair turn now carries
+  the rejected proposal, `assert_clean` reports every error instead of only the
+  first, and a diagnostic that comes back three times in a row ends the run with
+  an honest message. A pushbutton miswire (GPIO on `1.l` with GND on `1.r` — both
+  legs of ONE contact, a dead short rather than a switch) is now named with the
+  part and the exact wire to move, and the pushbutton catalog note plus the agent
+  system prompt say "contact 1 vs contact 2" instead of "one side / the opposite
+  side", which is what produced that miswire
+- An unreachable forge no longer disappears silently from an agent run: the
+  stream reports `forge` / `unavailable` (an event the frontend schema always
+  accepted) instead of continuing as if no project memory were configured
 - The forge project memory (JEV) toggle in agent settings now actually sticks.
   It was unreachable two ways: the toggle POST shared the agent's token
   authorization, so without a valid workspace token the server answered 401
