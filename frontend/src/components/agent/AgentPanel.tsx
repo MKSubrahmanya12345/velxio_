@@ -27,7 +27,7 @@ import { useProjectStore } from '../../store/useProjectStore';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
 import { CATALOG_SIZE, PLACEABLE_SIZE } from '../../agent/catalog';
 import { useAgentJournal, type Revision } from '../../agent/journal';
-import { forgeSession, runAgent, sendFeedback as sendFeedbackApi } from '../../agent/runner';
+import { forgeSession, newForgeSession, runAgent, sendFeedback as sendFeedbackApi } from '../../agent/runner';
 import {
   assertFresh,
   captureWorkspace,
@@ -160,6 +160,9 @@ export function AgentPanel() {
   const [forgeBusy, setForgeBusy] = useState(false);
   const [forgeNote, setForgeNote] = useState('');
   const [forgeMemory, setForgeMemory] = useState<ForgeMemory | null>(null);
+  const [forgeClarification, setForgeClarification] = useState<string | null>(null);
+  const [forgeQuestions, setForgeQuestions] = useState<string[]>([]);
+  const [showClarification, setShowClarification] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -328,11 +331,34 @@ export function AgentPanel() {
           }
           if (event.type === 'plan') setPlan(event.plan);
           if (event.type === 'forge') {
-            const summary = event.summary ?? {};
+            const summary = event.summary ?? {} as any;
+            const evAny = event as any;
+            const clar = evAny.clarification as string | undefined;
+            const pqs = (evAny.pending_questions as string[] | undefined) || [];
+            // If clarification looks like questions, surface it
+            if (evAny.status === 'ok' && (clar || pqs.length)) {
+              const hasQuestionMark = !!(clar && clar.includes('?'));
+              const hasQuestions = pqs.length > 0 || hasQuestionMark;
+              // Heuristic: if clarification contains "?" or asks for specifics, show it
+              if (hasQuestions && clar && clar.trim().length > 20) {
+                setForgeClarification(clar);
+                setForgeQuestions(pqs);
+                setShowClarification(true);
+                // Also push clarification as assistant message so user sees JEV asking
+                journal.addMessage({ role: 'assistant', content: `**JEV Clarification (Forge):**\n\n${clar}`, scope: requestScope });
+              } else if (pqs.length) {
+                const combined = pqs.map((q, i) => `${i+1}. ${q}`).join('\n');
+                const content = `**JEV has ${pqs.length} open question(s) for this build:**\n\n${combined}\n\nAnswer in chat, or skip to coding.`;
+                setForgeClarification(content);
+                setForgeQuestions(pqs);
+                setShowClarification(true);
+                journal.addMessage({ role: 'assistant', content, scope: requestScope });
+              }
+            }
             setForgeNote(
               event.status === 'ok'
                 ? `forge memory · ${Number(summary.active_notes ?? 0)} active note(s) · ${
-                    summary.withheld ? 'draft held by JEV check' : 'JEV-checked'
+                    (summary as any).withheld ? 'draft held by JEV check' : 'JEV-checked'
                   }`
                 : `forge memory unavailable: ${event.message || 'service offline'} — the agent continues without it`,
             );
@@ -465,23 +491,29 @@ export function AgentPanel() {
             aria-selected={tab === 'create'}
             onClick={() => setTab('create')}
             className={tab === 'create' ? 'active' : ''}
-            title="Velxio Create — learn from links, generate validated scripts"
+            title="Wireup Create — learn from links, generate validated scripts"
           >
             <Sparkles size={14} /> CREATE
           </button>
         </div>
         <div className="agent-header-actions">
           <button
-            title="New conversation (keeps checkpoints)"
+            title="New conversation (new forge session, keeps checkpoints)"
             aria-label="New conversation"
             disabled={busy}
             onClick={() => {
               journal.clearMessages(scope);
-              setNotice('');
+              newForgeSession();
+              setForgeClarification(null);
+              setForgeQuestions([]);
+              setShowClarification(false);
+              setForgeNote('');
+              setNotice('New chat started — new forge session created');
               setPlan([]);
               setDiagnostics([]);
               setLastRunFailed(false);
               setLastUserPrompt('');
+              void checkForge();
             }}
           >
             <Plus size={16} />
@@ -767,6 +799,40 @@ export function AgentPanel() {
                 <small>
                   Components drop onto your canvas immediately as generated.
                 </small>
+              </div>
+            )}
+            {showClarification && forgeClarification && (
+              <div className="agent-forge-clarify" style={{border:'1px solid #3fb950', borderRadius:8, padding:12, margin:'8px 0', background:'rgba(63,185,80,0.08)'}}>
+                <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:8}}>
+                  <Brain size={14} />
+                  <strong>JEV is asking for clarification</strong>
+                  <span style={{marginLeft:'auto', fontSize:11, opacity:0.7}}>{forgeQuestions.length} question(s)</span>
+                </div>
+                <div style={{maxHeight:200, overflowY:'auto', marginBottom:10, fontSize:13}}>
+                  <ReactMarkdown>{forgeClarification}</ReactMarkdown>
+                </div>
+                {forgeQuestions.length>0 && (
+                  <ul style={{margin:'0 0 10px 18px', fontSize:13}}>
+                    {forgeQuestions.map((q,i)=><li key={i}>{q}</li>)}
+                  </ul>
+                )}
+                <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
+                  <button className="agent-secondary" onClick={() => { input.current?.focus(); }} style={{fontSize:13}}>
+                    Answer in chat
+                  </button>
+                  <button className="agent-primary" onClick={() => {
+                    const skipNote = 'Skip clarification — proceed to coding with best assumptions. Use sensible defaults for any open questions.';
+                    if (busy) { void sendNote(skipNote); } else { setPrompt(skipNote); }
+                    setShowClarification(false);
+                    setNotice('Skipped clarification — coding with best assumptions');
+                  }} style={{fontSize:13, background:'#3fb950', color:'#000', border:'none', padding:'6px 12px', borderRadius:6, cursor:'pointer'}}>
+                    Skip to coding →
+                  </button>
+                  <button className="agent-secondary" onClick={() => setShowClarification(false)} style={{fontSize:12}}>
+                    Dismiss
+                  </button>
+                </div>
+                <small style={{display:'block', marginTop:8, opacity:0.7}}>JEV will keep asking until you answer or skip. Your answer becomes project memory.</small>
               </div>
             )}
             {!busy && forgeNote && (

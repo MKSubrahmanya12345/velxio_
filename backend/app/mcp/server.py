@@ -46,6 +46,7 @@ from app.mcp.validate import validate_circuit as _validate_circuit
 from app.services.arduino_cli import ArduinoCLIService
 
 _AVR_SIM_SCRIPT = Path(__file__).with_name("avr_sim.cjs")
+_PHYSICS_SIM_SCRIPT = Path(__file__).with_name("physics_sim.cjs")
 
 # ---------------------------------------------------------------------------
 # Server setup
@@ -58,7 +59,10 @@ mcp = FastMCP(
         "generate Arduino code, compile projects and simulate firmware. "
         "Call list_components/component_info/board_pinout before wiring, "
         "validate_circuit before compiling, and simulate_firmware to verify "
-        "behaviour. Pin names must match the component's real pins."
+        "behaviour. Pin names must match the component's real pins. For "
+        "mechanical designs (drones, rovers, spacecraft), use "
+        "physics_capabilities then physics_simulate: a scene document with "
+        "rigid bodies + actuators is integrated headlessly and checked."
     ),
 )
 
@@ -673,4 +677,114 @@ async def simulate_firmware(
         result = json.loads(out.decode())
     except ValueError:
         return {"success": False, "supported": True, "error": "Simulator returned unparseable output."}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# physics scene layer
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def physics_capabilities() -> dict[str, Any]:
+    """
+    Reference for the Velxio physics scene layer.
+
+    A scene is a JSON document: rigid bodies (mass, inertia, shape, pose),
+    actuators (thrust/torque along a body-local axis, with motor lag),
+    optional sensor links (feed a body's state into virtual sensors like an
+    MPU6050 or GPS), and an environment (gravity, wind, drag, floor).
+
+    The layer is generic — a quadrotor is one body + four thrust actuators,
+    a rover a body + drive actuators on a floor, a spacecraft a body with
+    zero gravity. Call physics_simulate with a scene to verify it behaves.
+    """
+    from app.agent.tools import PHYSICS_CAPABILITIES  # lazy: keep import graph light
+    return {"ok": True, **PHYSICS_CAPABILITIES}
+
+
+@mcp.tool()
+async def physics_simulate(
+    scene: Annotated[
+        dict[str, Any],
+        "Physics scene document (see physics_capabilities): version, environment, "
+        "bodies[], actuators[], sensorLinks[].",
+    ],
+    duration_ms: Annotated[int, "How long to simulate. 10..60000, default 3000."] = 3000,
+    sample_every_ms: Annotated[int, "Telemetry sampling interval. 10..10000, default 100."] = 100,
+    inputs: Annotated[
+        list[dict[str, Any]] | None,
+        "Actuator input timeline. Each item: {at_ms, actuator, value 0..1}. "
+        "Example: [{'at_ms': 0, 'actuator': 't1', 'value': 1}].",
+    ] = None,
+    checks: Annotated[
+        list[dict[str, Any]] | None,
+        "Assertions evaluated at a time. Each item: {kind: 'altitude'|'position'|"
+        "'velocity'|'actuator', body?, actuator?, at_ms, target, tolerance}. "
+        "target is a number for altitude/actuator, [x,y,z] for position/velocity.",
+    ] = None,
+) -> dict[str, Any]:
+    """
+    Run a physics scene headlessly and OBSERVE the trajectory.
+
+    Returns telemetry samples (per-body pos/vel/quaternion, actuator outputs)
+    plus the result of every check. This is how you VERIFY a mechanical design
+    instead of assuming it — e.g. "does it hover at 2 m?" becomes a check
+    {kind: 'altitude', body: 'craft', at_ms: 3000, target: 2, tolerance: 0.1}.
+
+    Returns { ok, simulated_ms, sample_count, samples, checks }. ok=false with
+    a `scene:` prefix means the scene document itself is invalid — read the
+    message and fix the scene.
+    """
+    if not isinstance(scene, dict) or not scene:
+        return {"ok": False, "error": "scene is required (see physics_capabilities)."}
+    payload = {
+        "scene": scene,
+        "duration_ms": max(10, min(int(duration_ms or 3000), 60000)),
+        "sample_every_ms": max(10, min(int(sample_every_ms or 100), 10000)),
+        "inputs": [
+            {"at_ms": max(0, int(e.get("at_ms", 0) or 0)),
+             "actuator": str(e.get("actuator", ""))[:64],
+             "value": e.get("value") if isinstance(e.get("value"), (int, float)) else 0}
+            for e in (inputs or [])[:64] if isinstance(e, dict)
+        ],
+        "checks": [
+            {"kind": str(c.get("kind", ""))[:16],
+             "body": str(c.get("body", ""))[:64] or None,
+             "actuator": str(c.get("actuator", ""))[:64] or None,
+             "at_ms": max(0, int(c.get("at_ms", 0) or 0)),
+             "target": c.get("target"),
+             "tolerance": c.get("tolerance") if isinstance(c.get("tolerance"), (int, float)) else 0.1}
+            for c in (checks or [])[:32] if isinstance(c, dict)
+        ],
+    }
+    if not _PHYSICS_SIM_SCRIPT.exists():
+        return {"ok": False, "supported": False,
+                "error": "The physics runner is missing from this install."}
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "node", str(_PHYSICS_SIM_SCRIPT),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(
+                process.communicate(json.dumps(payload).encode()), timeout=90)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return {"ok": False, "error": "Physics simulation timed out."}
+    except FileNotFoundError:
+        return {"ok": False, "supported": False,
+                "error": "Node.js is not installed on the server; headless physics is unavailable."}
+    if process.returncode != 0:
+        return {"ok": False,
+                "error": "Physics runner failed." + f" Detail: {err.decode(errors='replace').strip()[:300]}"}
+    try:
+        result = json.loads(out.decode())
+    except ValueError:
+        return {"ok": False, "error": "Physics runner returned unparseable output."}
+    if not result.get("ok") and "physics-core-not-found" in str(result.get("error", "")):
+        result["supported"] = False
+        result["error"] += " Rebuild it with `node scripts/build-physics-core.mjs`."
     return result

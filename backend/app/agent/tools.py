@@ -349,6 +349,159 @@ async def draft_simulate(project: Project, args: dict) -> dict:
     }
 
 
+# ── physics scene layer tools ──────────────────────────────────────────────
+# The physics scene layer (frontend/src/simulation/physics) is a generic
+# rigid-body interface: a JSON scene document of bodies + actuators + sensor
+# links + environment, integrated by the same deterministic core in the
+# browser and headlessly here. A quadrotor is one instantiation (one body,
+# four thrust actuators), not a special case in the code.
+
+_PHYSICS_SIM_SCRIPT = Path(__file__).resolve().parent.parent / "mcp" / "physics_sim.cjs"
+
+PHYSICS_CAPABILITIES: dict[str, Any] = {
+    "what": (
+        "Velxio physics scene layer — a generic rigid-body simulation shared by the "
+        "simulator, agents and (later) a 3D renderer. Nothing here is drone-specific: "
+        "a quadrotor is one body + four thrust actuators in a scene document."
+    ),
+    "scene": {
+        "version": 1,
+        "name": "optional label",
+        "environment": {
+            "gravity": "{x,y,z} m/s² — default {0,-9.81,0}; {0,0,0} for space",
+            "wind": "{x,y,z} m/s constant — default 0",
+            "linearDrag": "N·s/m — default 0",
+            "angularDrag": "N·m·s — default 0",
+            "floorY": "ground plane at world Y (default 0) or null for an open world",
+            "restitution": "bounce 0..1 — default 0.1",
+        },
+        "bodies": [{
+            "id": "string",
+            "label": "optional",
+            "position": "{x,y,z} m — X=east, Y=up, Z=north",
+            "orientation": "{x,y,z,w} quaternion (default identity)",
+            "velocity": "{x,y,z} m/s",
+            "angularVelocity": "{x,y,z} rad/s body frame",
+            "mass": "kg (0.001..1e6)",
+            "inertia": "{ix,iy,iz} kg·m² principal moments, body frame",
+            "shape": "point | {type:'sphere',radius} | {type:'box',halfExtents:{x,y,z}}",
+        }],
+        "actuators": [{
+            "id": "string",
+            "name": "optional",
+            "bodyId": "body it is mounted on",
+            "kind": "thrust (force along axis) | torque (body-frame torque about axis)",
+            "axis": "body-local direction, default {0,1,0}",
+            "maxForce": "N at input 1 (thrust)",
+            "maxTorque": "N·m at input 1 (torque)",
+            "timeConstantMs": "first-order motor lag, default 15",
+            "inputDefault": "commanded input 0..1, default 0",
+            "inputPin": "{componentId,pin} — optional live circuit PWM binding (browser only)",
+        }],
+        "sensorLinks": [{
+            "sensorId": "canvas component id of the virtual sensor (e.g. an mpu6050 or gps-neo6m instance)",
+            "bodyId": "body whose state feeds it",
+            "kind": "imu (accel g + gyro deg/s, body frame) | gps (lat/lng/alt around ref)",
+            "refLat": "WGS84 degrees, default 0",
+            "refLng": "WGS84 degrees, default 0",
+            "refAltitude": "m, default 0",
+        }],
+    },
+    "limits": "8 bodies, 16 actuators, 8 sensor links per scene",
+    "integrator": (
+        "deterministic fixed 1 ms substep; semi-implicit Euler; first-order actuator lag; "
+        "ground plane with restitution + contact damping. step() clamps to 50 ms per call."
+    ),
+    "verify": (
+        "physics_simulate runs a scene headlessly and returns telemetry samples plus "
+        "check results — design a scene, run it, read the numbers, iterate. This is how "
+        "you prove a mechanical design behaves (hovering, resting, escaping a floor) "
+        "before it is wired to a circuit."
+    ),
+}
+
+
+def physics_capabilities(project: Project, args: dict) -> dict:
+    """Static reference for the physics scene interface."""
+    return {"ok": True, **PHYSICS_CAPABILITIES}
+
+
+async def physics_simulate(project: Project, args: dict) -> dict:
+    """Run a candidate physics scene headlessly and return telemetry + checks."""
+    scene = args.get("scene")
+    if not isinstance(scene, dict):
+        return {"ok": False,
+                "error": "scene must be a JSON object — call physics_capabilities for the schema."}
+
+    def _int(value: Any, fallback: int, lo: int, hi: int) -> int:
+        try:
+            return max(lo, min(hi, int(value)))
+        except (TypeError, ValueError):
+            return fallback
+
+    duration_ms = _int(args.get("duration_ms"), 3000, 10, 60000)
+    sample_every_ms = _int(args.get("sample_every_ms"), 100, 10, 10000)
+    raw_inputs = args.get("inputs") if isinstance(args.get("inputs"), list) else []
+    raw_checks = args.get("checks") if isinstance(args.get("checks"), list) else []
+    payload = {
+        "scene": scene,
+        "duration_ms": duration_ms,
+        "sample_every_ms": sample_every_ms,
+        "inputs": [
+            {"at_ms": _int(i.get("at_ms"), 0, 0, duration_ms),
+             "actuator": str(i.get("actuator", ""))[:64],
+             "value": i.get("value") if isinstance(i.get("value"), (int, float)) else 0}
+            for i in raw_inputs[:64] if isinstance(i, dict)
+        ],
+        "checks": [
+            {"kind": str(c.get("kind", ""))[:16],
+             "body": str(c.get("body", ""))[:64] or None,
+             "actuator": str(c.get("actuator", ""))[:64] or None,
+             "at_ms": _int(c.get("at_ms"), duration_ms, 0, duration_ms),
+             "target": c.get("target"),
+             "tolerance": c.get("tolerance") if isinstance(c.get("tolerance"), (int, float)) else 0.1}
+            for c in raw_checks[:32] if isinstance(c, dict)
+        ],
+    }
+    if not _PHYSICS_SIM_SCRIPT.exists():
+        return {"ok": False, "supported": False,
+                "error": "The physics runner is missing from this install."}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "node", str(_PHYSICS_SIM_SCRIPT),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(
+                proc.communicate(json.dumps(payload).encode()), timeout=90)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return {"ok": False, "error": "Physics simulation timed out."}
+    except FileNotFoundError:
+        return {"ok": False, "supported": False,
+                "error": "Node.js is not installed on the server; headless physics is unavailable."}
+    if proc.returncode != 0:
+        return {"ok": False, "error": f"Physics runner failed: {err.decode(errors='replace')[:300]}"}
+    try:
+        result = json.loads(out.decode())
+    except ValueError:
+        return {"ok": False, "error": "Physics runner returned unparseable output."}
+    if not result.get("ok"):
+        if "physics-core-not-found" in str(result.get("error", "")):
+            return {"ok": False, "supported": False,
+                    "error": result["error"] + " Rebuild with `node scripts/build-physics-core.mjs`."}
+        return result
+    checks = result.get("checks") or []
+    failed = [c for c in checks if not c.get("ok")]
+    result["note"] = (
+        "Telemetry and checks from the deterministic integrator at the exact times shown. "
+        f"{len(failed)}/{len(checks)} check(s) failed." if checks else
+        "Telemetry only — add `checks` (kind: altitude|position|velocity|actuator) to verify behaviour.")
+    return result
+
+
 TOOLS = {
     "read_file": read_file,
     "list_files": list_files,
@@ -362,6 +515,8 @@ TOOLS = {
     "draft_simulate": draft_simulate,
     "search_libraries": search_libraries,
     "library_api": library_api,
+    "physics_capabilities": physics_capabilities,
+    "physics_simulate": physics_simulate,
 }
 assert set(TOOLS) == set(TOOL_NAMES), "TOOLS must match the model-facing TOOL_NAMES"
 
@@ -383,7 +538,15 @@ def describe_tools() -> str:
         "draft_simulate{patch, interactions?, observe_ms?, watch_pins?} — compile and RUN your "
         "patch on the emulator with the interactions applied, returning per-pin transitions, "
         "serial output and the stimulus actually delivered. Use draft_simulate whenever the "
-        "design has to behave a certain way; iterate until the observation matches the intent."
+        "design has to behave a certain way; iterate until the observation matches the intent; "
+        "physics_capabilities{} — reference for the physics scene layer (rigid bodies, "
+        "actuators, sensor links, environment — the generic layer a quadrotor, rover or "
+        "spacecraft are all built from); "
+        "physics_simulate{scene, duration_ms?, sample_every_ms?, inputs?, checks?} — run a "
+        "physics scene HEADLESSLY and return telemetry samples plus check results (kind: "
+        "altitude|position|velocity|actuator, each with target+tolerance). Use it to verify "
+        "a mechanical design behaves (e.g. hovers at altitude, rests on the floor) before "
+        "wiring it to a circuit."
     )
 
 

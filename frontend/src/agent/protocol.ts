@@ -178,6 +178,8 @@ export const eventSchema = z.discriminatedUnion('type', [
       .optional()
       .nullable(),
     message: z.string().optional(),
+    clarification: z.string().optional(),
+    pending_questions: z.array(z.string()).optional(),
     ...runId,
   }),
 ]);
