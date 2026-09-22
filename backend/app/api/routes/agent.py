@@ -1,9 +1,8 @@
 """Opt-in AI endpoint. Never accepts provider URLs or API keys from browsers."""
 import asyncio
 import json
-import secrets
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -19,17 +18,12 @@ _slots = asyncio.Semaphore(2)
 
 def configured():
     return (settings.AGENT_ENABLED
-            and any(spec.configured for spec in settings.providers())
-            and bool(settings.AGENT_ACCESS_TOKEN or settings.AGENT_ALLOW_ANONYMOUS))
+            and any(spec.configured for spec in settings.providers()))
 
 
-def authorize(authorization: str | None = Header(default=None)):
+def authorize():
     if not configured():
         raise HTTPException(503, "Agent is not configured. See docs/agent-workspace.md.")
-    if settings.AGENT_ACCESS_TOKEN and not secrets.compare_digest(
-        (authorization or "").encode(), ("Bearer " + settings.AGENT_ACCESS_TOKEN).encode()
-    ):
-        raise HTTPException(401, "Enter the workspace access token configured by your administrator.")
 
 
 @router.get("/status")
@@ -40,7 +34,7 @@ async def status():
     default = settings.provider("opencode")
     if default is None:
         default = next((spec for spec in settings.providers() if spec.configured), None)
-    return {"configured": configured(), "requires_token": bool(settings.AGENT_ACCESS_TOKEN),
+    return {"configured": configured(),
             "providers": providers,
             "model": default.model if configured() else None,
             "scope": "Arduino Uno · LED · resistor · button · potentiometer · buzzer · servo"}

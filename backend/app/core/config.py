@@ -72,8 +72,6 @@ class Settings(BaseSettings):
     AGENT_GEMINI_API_KEY: str = ""
     AGENT_GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     AGENT_GEMINI_MODEL: str = "gemini-2.5-flash"
-    AGENT_ACCESS_TOKEN: str = ""
-    AGENT_ALLOW_ANONYMOUS: bool = False
     # Third provider: Amazon Bedrock. Model id + region enable native Converse
     # (boto3); moonshotai.kimi-k2.5 is served through the Bedrock Mantle Chat
     # Completions endpoint instead, which needs BEDROCK_API_KEY. Static AWS

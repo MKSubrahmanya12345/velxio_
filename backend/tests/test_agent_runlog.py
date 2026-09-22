@@ -101,16 +101,13 @@ async def test_run_record_counts_provider_usage(monkeypatch):
 def client(monkeypatch):
     monkeypatch.setattr(agent.settings, "AGENT_ENABLED", True)
     monkeypatch.setattr(agent.settings, "AGENT_API_KEY", "server-secret")
-    monkeypatch.setattr(agent.settings, "AGENT_ACCESS_TOKEN", "workspace-token")
     app = FastAPI()
     app.include_router(agent.router, prefix="/api/agent")
     return TestClient(app)
 
 
-def test_records_endpoint_requires_the_workspace_token(client):
-    assert client.get("/api/agent/runs/records").status_code == 401
-    response = client.get("/api/agent/runs/records",
-                          headers={"Authorization": "Bearer workspace-token"})
+def test_records_endpoint_is_open_when_configured(client):
+    response = client.get("/api/agent/runs/records")
     assert response.status_code == 200
     assert isinstance(response.json()["runs"], list)
     assert all("outcome" in run and "run_id" in run for run in response.json()["runs"])
