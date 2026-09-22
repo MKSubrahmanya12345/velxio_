@@ -32,7 +32,8 @@ from app.agent.feedback import register as register_feedback, push as push_feedb
 from app.agent.models import AgentRequest, Proposal, apply_patch, describe_error
 from app.agent.runlog import RunRecord, start as start_run_record
 from app.agent.models import DRAFT_TOOLS
-from app.agent.tools import describe_tools, execute_tool, tool_results_message
+from app.agent.tools import ToolMemo, describe_tools, execute_tool, execute_tools, \
+    tool_results_message
 from app.core.config import ProviderSpec, settings
 
 
@@ -1483,6 +1484,10 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
     tool_rounds_left = settings.AGENT_MAX_TOOL_ROUNDS
     draft_rounds_left = settings.AGENT_MAX_DRAFT_ROUNDS
     final_attempt = settings.AGENT_MAX_ATTEMPTS - 1
+    # One memo for the whole run: identical (tool, args, project) is executed
+    # once — repeats across rounds return instantly, identical calls batched
+    # in the same round share a single in-flight execution (single-flight).
+    tool_memo = ToolMemo()
 
     for attempt in range(settings.AGENT_MAX_ATTEMPTS):
         # Consume any mid-run notes the user sent while the previous attempt
@@ -1588,9 +1593,14 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                         yield event(ev)
                     apply_forge_note()
                     break
+                # Parallel: up to 4 independent calls in this round run
+                # concurrently (order preserved) — a library search no longer
+                # delays the compile batched beside it. Repeats are answered
+                # from tool_memo, so the expensive subprocess/HTTP cost is
+                # paid once per run, not once per ask.
+                outcomes = await execute_tools(request.project, calls, memo=tool_memo)
                 results = []
-                for call in calls:
-                    outcome = await execute_tool(request.project, call)
+                for call, outcome in zip(calls, outcomes):
                     results.append({"tool": call.tool, "args": dict(call.args), **outcome})
                     record.tool_calls += 1
                     logger.info("run %s tool %s ok=%s", run_id, call.tool, outcome.get("ok"))

@@ -4,6 +4,11 @@ Tool use rides on the same JSON response as the patch (`Proposal.tool_calls`)
 instead of the provider's native tool-calling API, so any OpenAI-compatible
 chat-completions endpoint works.
 
+Speed: execute_tools() runs one round's calls concurrently (cost = slowest
+call, not the sum) and ToolMemo single-flights identical (tool, args,
+project) executions for the whole run, so a repeated pinout or an unchanged
+draft_compile does not re-pay the compiler/HTTP latency.
+
 Two families:
 
   research  read-only and deterministic (or network-gated): files, board
@@ -21,10 +26,13 @@ Two families:
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import inspect
 import json
 import logging
 import re
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -379,22 +387,117 @@ def describe_tools() -> str:
     )
 
 
-async def execute_tool(project: Project, call: ToolCall) -> dict:
-    """Run one tool call. Never raises: failures become {'ok': False} results."""
+async def execute_tool(project: Project, call: ToolCall,
+                       memo: ToolMemo | None = None) -> dict:
+    """Run one tool call. Never raises: failures become {'ok': False} results.
+
+    With `memo` (the per-run ToolMemo), an identical (tool, args, project)
+    already answered successfully returns the stored result immediately.
+    """
     handler = TOOLS.get(call.tool)
     if handler is None:
         return {"ok": False, "error": f"Unknown tool {call.tool!r}."}
-    try:
-        result = handler(project, dict(call.args))
-        if inspect.isawaitable(result):
-            result = await result
-    except Exception:  # noqa: BLE001 — a tool failure must not kill the run
-        logger.exception("tool %s failed", call.tool)
-        return {"ok": False, "error": "Tool execution failed on the server."}
+    if memo is None:
+        result = _run_handler(handler, project, call)
+    else:
+        result = await memo.run(project, call, handler)
+    if inspect.isawaitable(result):
+        result = await result
     return result
 
 
 _ROUND_LIMIT = 20000  # max chars of one tool-round results message
+
+# Cap on memoized successes per run. Bounds memory if a model loops on
+# ever-varying args; FIFO eviction keeps the hot first-round lookups.
+_MEMO_MAX = 512
+
+
+def _run_handler(handler, project: Project, call: ToolCall) -> Any:
+    """Invoke one tool handler; never raises (failures become {'ok': False})."""
+    try:
+        return handler(project, dict(call.args))
+    except Exception:  # noqa: BLE001 — a tool failure must not kill the run
+        logger.exception("tool %s failed", call.tool)
+        return {"ok": False, "error": "Tool execution failed on the server."}
+
+
+def _memo_key(project: Project, call: ToolCall) -> str:
+    """(tool, args, project state) — the full dependency surface of a result.
+
+    The project dump is in the key because netlist/read_file/draft_* answers
+    depend on it; hashing it (~KB, blake2b) is still orders of magnitude
+    cheaper than the subprocess/HTTP latencies the memo eliminates.
+    """
+    state = hashlib.blake2b(project.model_dump_json().encode("utf-8"),
+                            digest_size=16).hexdigest()
+    args = json.dumps(dict(call.args), sort_keys=True, default=str,
+                      ensure_ascii=False)
+    return f"{call.tool}\x00{state}\x00{args}"
+
+
+class ToolMemo:
+    """Per-run, single-flight tool-result cache.
+
+    Models re-ask for the same pinout/search across rounds and re-submit an
+    identical draft_* patch after editing something else — each repeat used to
+    re-pay the full cost (compiler subprocess, 15s HTTP library search). One
+    run now pays it once.
+
+    Single-flight: two identical calls in the SAME round (the model may batch
+    them before seeing the first result) share one execution, so parallel
+    rounds cannot double-spawn a compile for the same key.
+
+    Only `ok: true` outcomes are stored: a transient network/toolchain failure
+    stays retryable on the next round, while deterministic failures the model
+    must not re-buy (schema/static rejections, compile errors) arrive as
+    `ok: true` with the detail inside and ARE memoized.
+    """
+
+    def __init__(self) -> None:
+        self._hits: OrderedDict[str, dict] = OrderedDict()
+        self._inflight: dict[str, asyncio.Task] = {}
+
+    async def run(self, project: Project, call: ToolCall, handler) -> dict:
+        key = _memo_key(project, call)
+        hit = self._hits.get(key)
+        if hit is not None:
+            self._hits.move_to_end(key)
+            return hit
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.ensure_future(_run_handler(handler, project, call))
+            self._inflight[key] = task
+            try:
+                outcome = await task
+            finally:
+                self._inflight.pop(key, None)
+            if outcome.get("ok"):
+                self._hits[key] = outcome
+                if len(self._hits) > _MEMO_MAX:
+                    self._hits.popitem(last=False)
+            return outcome
+        return await task
+
+
+async def execute_tools(project: Project, calls: list[ToolCall],
+                        memo: ToolMemo | None = None) -> list[dict]:
+    """Run one round's tool calls CONCURRENTLY, preserving request order.
+
+    The calls are independent (read-only research, or candidates that never
+    touch the workspace), so awaiting them serially was pure added latency:
+    a round mixing a 15s library search with a compile used to cost the sum,
+    now it costs the max. `memo` de-duplicates identical keys within the
+    round (single-flight) and across the whole run.
+    """
+    if not calls:
+        return []
+    if memo is None:
+        memo = ToolMemo()
+    return list(await asyncio.gather(
+        *(memo.run(project, call, TOOLS[call.tool])
+          for call in calls)
+    ))
 
 
 def tool_results_message(results: list[dict], budget_left: int) -> str:
