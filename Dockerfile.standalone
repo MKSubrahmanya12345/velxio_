@@ -164,6 +164,21 @@ RUN rm -f package-lock.json \
  && npm run build:docker
 
 
+# ---- Stage 1b: Forge server (Velxio Create + agent project memory) ----
+# The FastAPI backend proxies /api/creative/* to the standalone forge
+# service and autostarts it on demand (`node --watch`, FORGE_AUTOSTART).
+# The final image is python:3.12-slim — no node — so without this stage the
+# Create tab is permanently offline in the standard deployment ("Forge is
+# not reachable"; collections/nodes inaccessible). Build the dependency
+# tree here (express/cors/mongodb are pure JS, no native builds) and copy
+# both the node binary and the ready-to-run server into the final image.
+FROM node:20 AS forge-builder
+WORKDIR /forge-server
+COPY forge/server/package.json ./package.json
+RUN npm install --omit=dev --no-audit --no-fund
+COPY forge/server/src ./src/
+
+
 # ---- Stage 2: Final Production Image ----
 FROM python:3.12-slim
 
@@ -266,6 +281,19 @@ COPY backend/sdk/ ./sdk/
 # One-off maintenance scripts (e.g. backfill_boards_2026_05). Pure stdlib —
 # run with: docker exec velxio-app python /app/scripts/<script> --apply
 COPY backend/scripts/ ./scripts/
+
+# ── Forge service (Velxio Create + agent project memory) ────────────────────
+# app/agent/forge.py autostarts `node --watch src/index.js` in FORGE_SERVER_DIR
+# the first time the Create tab or an agent turn needs it. This image has no
+# repo root (the backend lives at /app/app), so FORGE_SERVER_DIR pins the
+# bundled copy; FORGE_STATE_PATH + DATA_FILE/PROVIDERS_FILE keep all state on
+# the /app/data persistence volume (forged collections survive redeploys).
+COPY --from=forge-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=forge-builder /forge-server /forge-server
+ENV FORGE_SERVER_DIR=/forge-server \
+    FORGE_STATE_PATH=/app/data/forge_state.json \
+    DATA_FILE=/app/data/forge/projects.json \
+    PROVIDERS_FILE=/app/data/forge/providers.json
 
 # Setup Nginx configuration. Remove Debian's stock site so it doesn't shadow
 # ours as the default_server (was Issue #108: users behind reverse proxies got
