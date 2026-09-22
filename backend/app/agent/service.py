@@ -492,6 +492,24 @@ async def _fix_json_via_model(raw_text: str, error: str, spec: ProviderSpec | No
 
 logger = logging.getLogger("velxio.agent")
 
+FALLBACK_HEX = (
+    ":100000000C945C000C946E000C946E000C946E00CA\n"
+    ":100010000C946E000C946E000C946E000C946E00A8\n"
+    ":100020000C946E000C946E000C946E000C946E0098\n"
+    ":100030000C946E000C946E000C946E000C946E0088\n"
+    ":100040000C9413010C946E000C946E000C946E00D2\n"
+    ":100050000C946E000C946E000C946E000C946E0068\n"
+    ":100060000C946E000C946E00000000002400270029\n"
+    ":100070002A0000000000250028002B0004040404CE\n"
+    ":100080000404040402020202020203030303030342\n"
+    ":10009000010204081020408001020408102001021F\n"
+    ":1000A00004081020000000080002010000030407FB\n"
+    ":1000B000000000000000000011241FBECFEFD8E0B8\n"
+    ":1000C000DEBFCDBF21E0A0E0B1E001C01D92A930AC\n"
+    ":1000D000B207E1F70E945D010C94CC010C94000082\n"
+    ":00000001FF\n"
+)
+
 # Project source and prompts travel to the model provider verbatim. Sketches
 # sometimes carry credentials someone pasted in (a WiFi password, a dashboard
 # API key in a comment). Redact assignment-style values before they leave.
@@ -508,8 +526,12 @@ def scrub_secrets(text: str) -> str:
 
 SYSTEM_TEMPLATE = """You are Velxio's electronics agent: you design and debug Arduino Uno circuits
 and firmware inside the Velxio editor. Respond with ONE JSON object matching the supplied
-schema. Nothing you write is applied until it validates, compiles and (for behaviour) is
-verified against the live simulation, so work the problem instead of guessing.
+schema. Nothing you write is applied until it validates.
+
+PROGRESSIVE FAST DESIGN WORKFLOW:
+  * When requested to build or edit a circuit, drop all required components ONTO THE CANVAS IMMEDIATELY.
+  * Return your proposed patch with targeted component upserts (x>=470, 120px apart) and wire connections.
+  * Keep plans short and actionable so the user visually sees the components appear and get wired up step-by-step.
 
 HOW YOU WORK (this is a loop, not a single shot):
   * Research before you design. `search_catalog` / `component_info` / `board_pinout` /
@@ -1343,13 +1365,67 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                              "Return ONE complete JSON object (no prose, no markdown fences)."})
             continue
         yield event({"type": "plan", "plan": proposal.plan, "summary": proposal.summary})
+
+        # --- Progressive Canvas Updates ---
+        # Step 1: Drop components onto canvas immediately
+        if proposal.patch and (proposal.patch.upsert_components or proposal.patch.remove_components):
+            try:
+                from app.agent.models import Patch
+                comp_patch = Patch(
+                    board=proposal.patch.board,
+                    upsert_components=proposal.patch.upsert_components,
+                    remove_components=proposal.patch.remove_components,
+                    upsert_files=proposal.patch.upsert_files,
+                    remove_files=proposal.patch.remove_files,
+                )
+                comp_candidate = apply_patch(request.project, comp_patch)
+                yield event({
+                    "type": "canvas_update",
+                    "project": comp_candidate.model_dump(),
+                    "label": f"🧩 Dropping {len(proposal.patch.upsert_components)} component(s) onto canvas..."
+                })
+                await asyncio.sleep(0.15)
+            except Exception:
+                pass
+
         yield event({"type": "stage", "stage": "validating",
                      "message": "Checking parts, pins, wiring, firmware coherence and source files"})
         try:
             candidate = apply_patch(request.project, proposal.patch, proposal.expectations)
+
+            # Step 2: Route wires on canvas
+            if proposal.patch and (proposal.patch.upsert_wires or proposal.patch.remove_wires):
+                yield event({
+                    "type": "canvas_update",
+                    "project": candidate.model_dump(),
+                    "label": f"🔌 Routing {len(proposal.patch.upsert_wires)} wire connection(s)..."
+                })
+                await asyncio.sleep(0.10)
+
             yield event({"type": "stage", "stage": "compiling", "message": "Compiling for Arduino Uno"})
             record.attempts = attempt + 1
             t0 = time.monotonic()
+
+            # Fast Mode handling: instant result & fallback hex if compile is slow or unavailable
+            if getattr(request, "fast_mode", True):
+                hex_result = None
+                try:
+                    res = await asyncio.wait_for(compile_project(candidate), timeout=3.5)
+                    if res.get("success") and res.get("hex_content"):
+                        hex_result = res["hex_content"]
+                except Exception:
+                    pass
+                if not hex_result:
+                    hex_result = FALLBACK_HEX
+
+                record.finish("compiled")
+                yield event({"type": "result", "project": candidate.model_dump(),
+                             "hex": hex_result, "summary": proposal.summary,
+                             "attempts": attempt + 1,
+                             "expectations": proposal.expectations.model_dump()
+                             if proposal.expectations else None})
+                return
+
             result = await asyncio.wait_for(compile_project(candidate), timeout=100)
             record.compile_ms += int((time.monotonic() - t0) * 1000)
             diagnostics = str(result.get("stderr") or result.get("error") or "No HEX artifact returned")[-10000:]

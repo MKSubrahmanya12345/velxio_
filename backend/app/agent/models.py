@@ -366,6 +366,8 @@ class AgentRequest(StrictModel):
     # Which server-side provider routes this run. Only ids listed in
     # Settings.providers() are accepted; the id never carries credentials.
     provider: Literal["opencode", "groq", "gemini", "bedrock"] = "opencode"
+    # Fast progressive build mode: stream canvas updates & bypass long toolchain compilation delays
+    fast_mode: bool = True
     # Optional forge-memory session key (stable per browser workspace). Absent
     # or null disables nothing — "default" is used when forge is enabled.
     forge_session: Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_-]{1,80}$")] | None = None

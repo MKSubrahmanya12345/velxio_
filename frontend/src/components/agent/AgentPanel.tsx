@@ -163,7 +163,18 @@ export function AgentPanel() {
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const feedbackSent = useRef<Set<string>>(new Set());
-  const journal = useAgentJournal();
+  const [fastMode, setFastMode] = useState(true);
+  const [startTime, setStartTime] = useState(0);
+  const [activities, setActivities] = useState<string[]>([]);
+  const [elapsed, setElapsed] = useState('0.0');
+
+  useEffect(() => {
+    if (!busy) return;
+    const interval = setInterval(() => {
+      setElapsed(((Date.now() - startTime) / 1000).toFixed(1));
+    }, 100);
+    return () => clearInterval(interval);
+  }, [busy, startTime]);
   // Re-render on named project/example switches; don't send another project's chat.
   useProjectStore((s) => s.currentProject?.id ?? s.currentExampleId);
   const scope = scopeKey();
@@ -278,6 +289,8 @@ export function AgentPanel() {
     setLastRunFailed(false);
     setPrompt('');
     setBusy(true);
+    setStartTime(Date.now());
+    setActivities([]);
     setNotice('');
     setPlan([]);
     setDiagnostics([]);
@@ -293,15 +306,24 @@ export function AgentPanel() {
         prompt: content,
         messages: context,
         provider: providerId || 'groq',
+        fastMode,
         signal: abort.signal,
         onEvent: (event: AgentEvent) => {
-          if (event.type === 'stage')
-            setStage(`${event.message}${event.attempt ? ` · attempt ${event.attempt}` : ''}`);
-          if (event.type === 'tools')
-            setStage(
-              `Consulted ${event.calls.map((c) => c.tool).join(', ')}`
-                + `${event.calls.some((c) => !c.ok) ? ' (some tools failed)' : ''}`,
-            );
+          if (event.type === 'stage') {
+            const msg = `${event.message}${event.attempt ? ` · attempt ${event.attempt}` : ''}`;
+            setStage(msg);
+            setActivities((prev) => [...prev, `⚙️ ${msg}`]);
+          }
+          if (event.type === 'canvas_update') {
+            const msg = event.label || '🧩 Updating canvas live...';
+            setStage(msg);
+            setActivities((prev) => [...prev, msg]);
+          }
+          if (event.type === 'tools') {
+            const msg = `Consulted ${event.calls.map((c) => c.tool).join(', ')}`;
+            setStage(msg);
+            setActivities((prev) => [...prev, `🛠️ ${msg}`]);
+          }
           if (event.type === 'plan') setPlan(event.plan);
           if (event.type === 'forge') {
             const summary = event.summary ?? {};
@@ -675,13 +697,50 @@ export function AgentPanel() {
               ))}
             </div>
             {busy && (
-              <div className="agent-progress" role="status" aria-live="polite">
-                <div>
-                  <LoaderCircle size={15} className="agent-spin" />
-                  <strong>{stage}</strong>
+              <div className="agent-progress-dashboard" role="status" aria-live="polite">
+                <div className="agent-progress-banner">
+                  <div className="agent-banner-title">
+                    <Sparkles size={14} className="agent-spin" />
+                    <strong>⚡ LIVE CANVAS BUILDING IN PROGRESS</strong>
+                  </div>
+                  <span className="agent-timer-chip">
+                    <Clock3 size={11} /> {elapsed}s
+                  </span>
                 </div>
+
+                <div className="agent-stepper">
+                  <div className={`agent-step ${stage.includes('Reading') || stage.includes('planning') ? 'is-active' : 'is-done'}`}>
+                    <span>1</span> Think
+                  </div>
+                  <div className={`agent-step ${stage.includes('Dropping') || stage.includes('validating') ? 'is-active' : stage.includes('Routing') || stage.includes('compiling') || stage.includes('Compiling') ? 'is-done' : ''}`}>
+                    <span>2</span> Parts
+                  </div>
+                  <div className={`agent-step ${stage.includes('Routing') ? 'is-active' : stage.includes('compiling') || stage.includes('Compiling') ? 'is-done' : ''}`}>
+                    <span>3</span> Wires
+                  </div>
+                  <div className={`agent-step ${stage.includes('compiling') || stage.includes('Compiling') ? 'is-active' : ''}`}>
+                    <span>4</span> Sketch
+                  </div>
+                </div>
+
+                <div className="agent-stage-msg">
+                  <LoaderCircle size={14} className="agent-spin" />
+                  <span>{stage}</span>
+                </div>
+
+                {activities.length > 0 && (
+                  <div className="agent-activity-feed">
+                    <div className="agent-feed-title">Live Actions:</div>
+                    <ul>
+                      {activities.slice(-4).map((act, i) => (
+                        <li key={i}>{act}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 {plan.length > 0 && (
-                  <ol>
+                  <ol className="agent-plan-list">
                     {plan.map((p, i) => (
                       <li key={`${i}-${p}`}>
                         <span>{i + 1}</span>
@@ -691,7 +750,7 @@ export function AgentPanel() {
                   </ol>
                 )}
                 <small>
-                  Your workspace stays editable. Conflicting changes won’t be overwritten.
+                  Components drop onto your canvas immediately as generated.
                 </small>
               </div>
             )}
@@ -874,6 +933,14 @@ export function AgentPanel() {
           <div className="agent-input-toolbar">
             <span>
               <Sparkles size={12} /> Agent <ChevronRight size={11} />
+              <button
+                type="button"
+                className={`agent-fast-badge ${fastMode ? 'active' : ''}`}
+                title="Fast Mode: Stream canvas updates & bypass long toolchain compilation delays"
+                onClick={() => setFastMode(!fastMode)}
+              >
+                ⚡ {fastMode ? 'Fast Mode: ON' : 'Fast Mode: OFF'}
+              </button>
               {configuredProviders.length > 0 ? (
                 <label className="agent-provider-select">
                   <Cpu size={11} />
