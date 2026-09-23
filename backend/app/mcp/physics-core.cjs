@@ -140,9 +140,11 @@ var DEFAULT_ENVIRONMENT = {
   gravity: { x: 0, y: -9.81, z: 0 },
   wind: { x: 0, y: 0, z: 0 },
   linearDrag: 0,
+  quadraticDrag: 0,
   angularDrag: 0,
   floorY: 0,
-  restitution: 0.1
+  restitution: 0.1,
+  groundDamping: 8
 };
 var ID_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 function num(v, field, errors, fallback, min, max) {
@@ -206,9 +208,11 @@ function parsePhysicsScene(raw, version = PHYSICS_SCENE_VERSION) {
     gravity: vec3Of(envRaw.gravity, "environment.gravity", errors, DEFAULT_ENVIRONMENT.gravity, 1e3),
     wind: vec3Of(envRaw.wind, "environment.wind", errors, DEFAULT_ENVIRONMENT.wind, 1e3),
     linearDrag: num(envRaw.linearDrag, "environment.linearDrag", errors, 0, 0, 1e6),
+    quadraticDrag: num(envRaw.quadraticDrag, "environment.quadraticDrag", errors, 0, 0, 1e6),
     angularDrag: num(envRaw.angularDrag, "environment.angularDrag", errors, 0, 0, 1e6),
     floorY: envRaw.floorY === void 0 ? DEFAULT_ENVIRONMENT.floorY : envRaw.floorY === null ? null : typeof envRaw.floorY === "number" && Number.isFinite(envRaw.floorY) ? Math.min(L.maxExtent, Math.max(-L.maxExtent, envRaw.floorY)) : (errors.push("environment.floorY must be a number or null"), DEFAULT_ENVIRONMENT.floorY),
-    restitution: num(envRaw.restitution, "environment.restitution", errors, 0.1, 0, 1)
+    restitution: num(envRaw.restitution, "environment.restitution", errors, 0.1, 0, 1),
+    groundDamping: num(envRaw.groundDamping, "environment.groundDamping", errors, 8, 0, 1e4)
   };
   const bodies = [];
   const bodyIds = /* @__PURE__ */ new Set();
@@ -289,6 +293,10 @@ function parsePhysicsScene(raw, version = PHYSICS_SCENE_VERSION) {
       errors.push(`actuators[${i}].kind must be 'thrust' | 'torque'`);
     }
     const pinRaw = typeof a.inputPin === "object" && a.inputPin !== null ? a.inputPin : null;
+    const signed = a.signed === true;
+    if (a.signed !== void 0 && a.signed !== true && a.signed !== false) {
+      errors.push(`actuators[${i}].signed must be a boolean`);
+    }
     actuators.push({
       id,
       name: typeof a.name === "string" ? a.name.slice(0, L.maxLabelChars) : void 0,
@@ -298,7 +306,10 @@ function parsePhysicsScene(raw, version = PHYSICS_SCENE_VERSION) {
       maxForce: num(a.maxForce, `actuators[${i}].maxForce`, errors, 10, 0, L.maxForce),
       maxTorque: num(a.maxTorque, `actuators[${i}].maxTorque`, errors, 1, 0, L.maxTorque),
       timeConstantMs: num(a.timeConstantMs, `actuators[${i}].timeConstantMs`, errors, 15, 0, 5e3),
-      inputDefault: num(a.inputDefault, `actuators[${i}].inputDefault`, errors, 0, 0, 1),
+      inputDefault: num(a.inputDefault, `actuators[${i}].inputDefault`, errors, 0, signed ? -1 : 0, 1),
+      signed,
+      offset: vec3Of(a.offset, `actuators[${i}].offset`, errors, { x: 0, y: 0, z: 0 }, L.maxExtent),
+      reactionNmPerN: num(a.reactionNmPerN, `actuators[${i}].reactionNmPerN`, errors, 0, -100, 100),
       inputPin: pinRaw ? {
         componentId: typeof pinRaw.componentId === "string" ? pinRaw.componentId.slice(0, 64) : "",
         pin: typeof pinRaw.pin === "string" ? pinRaw.pin.slice(0, 16) : ""
@@ -402,14 +413,14 @@ var PhysicsWorld = class {
   scheduleActuatorInput(actuatorId, atMs, value) {
     const idx = this.actuatorIndex.get(actuatorId);
     if (idx === void 0) return false;
-    this.scheduled.push({ tMs: atMs, actuatorIdx: idx, value: Math.min(1, Math.max(0, value)) });
+    this.scheduled.push({ tMs: atMs, actuatorIdx: idx, value: clampActuatorInput(this.actuators[idx].spec, value) });
     return true;
   }
   /** Set an actuator's input immediately (UI / live binding). */
   setActuatorInput(actuatorId, value) {
     const idx = this.actuatorIndex.get(actuatorId);
     if (idx === void 0) return false;
-    this.actuators[idx].input = Math.min(1, Math.max(0, value));
+    this.actuators[idx].input = clampActuatorInput(this.actuators[idx].spec, value);
     return true;
   }
   getBodyState(id) {
@@ -450,18 +461,32 @@ var PhysicsWorld = class {
     for (const b of this.bodies) {
       const i = this.bodyIndex.get(b.spec.id);
       vAddForces(forces[i], vScale(env.gravity, b.spec.mass));
+      const rel = vSub(b.velocity, env.wind);
       if (env.linearDrag > 0) {
-        const rel = vSub(b.velocity, env.wind);
         vAddForces(forces[i], vScale(rel, -env.linearDrag));
+      }
+      const qDrag = env.quadraticDrag ?? 0;
+      if (qDrag > 0) {
+        const speed = vLength(rel);
+        if (speed > 0) vAddForces(forces[i], vScale(rel, -qDrag * speed));
       }
     }
     for (const a of this.actuators) {
       const bi = this.bodyIndex.get(a.spec.bodyId);
       if (bi === void 0) continue;
       const body = this.bodies[bi];
-      const axisWorld = qRotate(body.orientation, vNormalize(a.spec.axis));
+      const axisBody = vNormalize(a.spec.axis);
       if (a.kind === "thrust") {
+        const axisWorld = qRotate(body.orientation, axisBody);
         vAddForces(forces[bi], vScale(axisWorld, a.output));
+        const off = a.spec.offset ?? vec3();
+        if (off.x !== 0 || off.y !== 0 || off.z !== 0) {
+          torques[bi] = vAdd(torques[bi], vCross(off, vScale(axisBody, a.output)));
+        }
+        const react = a.spec.reactionNmPerN ?? 0;
+        if (react !== 0) {
+          torques[bi] = vAdd(torques[bi], vScale(axisBody, react * a.output));
+        }
       } else {
         torques[bi] = vAdd(torques[bi], vScale(a.spec.axis, a.output));
       }
@@ -495,7 +520,7 @@ var PhysicsWorld = class {
             b.velocity.y = -b.velocity.y * env.restitution;
             if (Math.abs(b.velocity.y) < 0.02) b.velocity.y = 0;
           }
-          const damp = Math.max(0, 1 - 8 * h);
+          const damp = Math.max(0, 1 - (env.groundDamping ?? 8) * h);
           b.velocity.x *= damp;
           b.velocity.z *= damp;
           b.angularVelocity.x *= damp;
@@ -554,6 +579,11 @@ var PhysicsWorld = class {
     };
   }
 };
+function clampActuatorInput(spec, value) {
+  const lo = spec.signed ? -1 : 0;
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(lo, value));
+}
 function vAddForces(target, f) {
   target.x += f.x;
   target.y += f.y;

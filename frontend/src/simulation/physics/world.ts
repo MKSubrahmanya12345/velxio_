@@ -9,7 +9,10 @@
  *    body-frame angular velocity), principal-axis inertia.
  *  - Actuators bound to a body along a body-local axis, each with a
  *    first-order lag (τ = timeConstantMs) toward its commanded input 0..1.
- *    `thrust` adds a force, `torque` adds a body-frame torque.
+ *    `thrust` adds a force along its axis. An `offset` makes that force
+ *    also apply τ = r × F, which is how differential thrust tilts a
+ *    vehicle; `reactionNmPerN` is prop-drag torque along the thrust axis.
+ *    `torque` adds a body-frame torque. `signed` torques accept −1..1.
  *  - Environment: gravity, constant wind, linear drag (translational +
  *    rotational), and an optional ground plane with restitution + contact
  *    damping.
@@ -23,7 +26,7 @@
 import {
   Quat, Vec3,
   qIntegrate, qNormalize, qRotate, qConjugate,
-  vAdd, vNormalize, vScale, vSub,
+  vAdd, vCross, vLength, vNormalize, vScale, vSub,
   vec3,
 } from './math';
 import type {
@@ -45,9 +48,9 @@ export interface ActuatorState {
   id: string;
   name?: string;
   kind: 'thrust' | 'torque';
-  /** Commanded input 0..1. */
+  /** Commanded input. 0..1, or −1..1 when the actuator is signed. */
   input: number;
-  /** Lagged, actually-producing input 0..1. */
+  /** Lagged, actually-producing input, same range as `input`. */
   state: number;
   /** Current force (N) or torque (N·m) magnitude. */
   output: number;
@@ -129,7 +132,7 @@ export class PhysicsWorld {
   scheduleActuatorInput(actuatorId: string, atMs: number, value: number): boolean {
     const idx = this.actuatorIndex.get(actuatorId);
     if (idx === undefined) return false;
-    this.scheduled.push({ tMs: atMs, actuatorIdx: idx, value: Math.min(1, Math.max(0, value)) });
+    this.scheduled.push({ tMs: atMs, actuatorIdx: idx, value: clampActuatorInput(this.actuators[idx].spec, value) });
     return true;
   }
 
@@ -137,7 +140,7 @@ export class PhysicsWorld {
   setActuatorInput(actuatorId: string, value: number): boolean {
     const idx = this.actuatorIndex.get(actuatorId);
     if (idx === undefined) return false;
-    this.actuators[idx].input = Math.min(1, Math.max(0, value));
+    this.actuators[idx].input = clampActuatorInput(this.actuators[idx].spec, value);
     return true;
   }
 
@@ -190,20 +193,37 @@ export class PhysicsWorld {
       // gravity
       vAddForces(forces[i], vScale(env.gravity, b.spec.mass));
       // drag vs relative air velocity
+      const rel = vSub(b.velocity, env.wind);
       if (env.linearDrag > 0) {
-        const rel = vSub(b.velocity, env.wind);
         vAddForces(forces[i], vScale(rel, -env.linearDrag));
+      }
+      const qDrag = env.quadraticDrag ?? 0;
+      if (qDrag > 0) {
+        const speed = vLength(rel);
+        if (speed > 0) vAddForces(forces[i], vScale(rel, -qDrag * speed));
       }
     }
     for (const a of this.actuators) {
       const bi = this.bodyIndex.get(a.spec.bodyId);
       if (bi === undefined) continue;
       const body = this.bodies[bi];
-      const axisWorld = qRotate(body.orientation, vNormalize(a.spec.axis));
+      const axisBody = vNormalize(a.spec.axis);
       if (a.kind === 'thrust') {
+        const axisWorld = qRotate(body.orientation, axisBody);
         vAddForces(forces[bi], vScale(axisWorld, a.output));
+        // Moment arm. Zero offset (the default) keeps the historical
+        // "thrust through the CoM" behaviour the hover tests rely on.
+        const off = a.spec.offset ?? vec3();
+        if (off.x !== 0 || off.y !== 0 || off.z !== 0) {
+          torques[bi] = vAdd(torques[bi], vCross(off, vScale(axisBody, a.output)));
+        }
+        const react = a.spec.reactionNmPerN ?? 0;
+        if (react !== 0) {
+          torques[bi] = vAdd(torques[bi], vScale(axisBody, react * a.output));
+        }
       } else {
-        // Torque is specified in the body frame.
+        // Torque is specified in the body frame. Axis is not normalised
+        // so an existing scene that encoded magnitude in the axis is unchanged.
         torques[bi] = vAdd(torques[bi], vScale(a.spec.axis, a.output));
       }
     }
@@ -242,8 +262,9 @@ export class PhysicsWorld {
             b.velocity.y = -b.velocity.y * env.restitution;
             if (Math.abs(b.velocity.y) < 0.02) b.velocity.y = 0;
           }
-          // Contact damping so vehicles can rest on the floor.
-          const damp = Math.max(0, 1 - 8 * h);
+          // Contact damping so a dropped body can rest. The coefficient
+          // defaults to the historical 8/s; driven vehicles set it near 0.
+          const damp = Math.max(0, 1 - (env.groundDamping ?? 8) * h);
           b.velocity.x *= damp;
           b.velocity.z *= damp;
           b.angularVelocity.x *= damp;
@@ -310,6 +331,12 @@ export class PhysicsWorld {
       force: { ...b.force },
     };
   }
+}
+
+function clampActuatorInput(spec: { signed?: boolean }, value: number): number {
+  const lo = spec.signed ? -1 : 0;
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(lo, value));
 }
 
 function vAddForces(target: Vec3, f: Vec3): void {

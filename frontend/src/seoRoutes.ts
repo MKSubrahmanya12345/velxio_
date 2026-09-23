@@ -69,6 +69,17 @@ const OSS_SEO_ROUTES: SeoRoute[] = [
     },
   },
   {
+    path: '/build',
+    priority: 0.85,
+    changefreq: 'weekly',
+    seoMeta: {
+      title: 'Build lab — research a machine, then simulate it | Velxio',
+      description:
+        'Describe a machine. Velxio researches the class, hands you the numbers to confirm, and simulates the configuration you keep. One project, in the browser.',
+      url: `${DOMAIN}/build`,
+    },
+  },
+  {
     path: '/examples',
     priority: 0.8,
     changefreq: 'weekly',

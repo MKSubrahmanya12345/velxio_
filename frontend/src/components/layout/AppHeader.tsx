@@ -176,6 +176,9 @@ export const AppHeader: React.FC<AppHeaderProps> = ({ editorMenu, editorToolbar 
                 </a>
               </>
             )}
+            <Link to={localize('/build')} className={'header-nav-link' + isActive('/build')}>
+              {t('header.nav.build', 'Build')}
+            </Link>
             <Link to={localize('/examples')} className={'header-nav-link' + isActive('/examples')}>
               {t('header.nav.examples')}
             </Link>
