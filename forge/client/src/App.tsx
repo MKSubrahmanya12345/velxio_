@@ -26,8 +26,9 @@ export default function App() {
   const [creating, setCreating] = useState(false);
   const [creationEvents, setCreationEvents] = useState<MemoryEvent[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  // 'chat' is the workspace; 'providers' is the key/failover management page.
-  const [view, setView] = useState<'chat' | 'providers'>('chat');
+  // 'chat' is the workspace; 'providers' is the key/failover management page;
+  // 'rules' is the cross-project global rule set behind the pre-turn gate.
+  const [view, setView] = useState<'chat' | 'providers' | 'rules'>('chat');
   const activeId = useRef<string | null>(null);
   const navigation = useRef(0);
   const refreshVersion = useRef(0);
@@ -198,6 +199,10 @@ export default function App() {
         <main className="fg-main-chat">
           <ProvidersView onBack={() => setView('chat')} onChanged={() => void refresh()} />
         </main>
+      ) : view === 'rules' ? (
+        <main className="fg-main-chat">
+          <GlobalRulesPanel onBack={() => setView('chat')} />
+        </main>
       ) : (
       <main className="fg-main-chat">
         {offline && (
@@ -291,6 +296,18 @@ export default function App() {
                         <div className="fg-hip-desc">The same LLM uses that memory. JEV checks the draft, sending conflicts back for revision before you see it.</div>
                       </div>
                     </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      </main>
+      )}
+    </div>
+  );
+}
+       </div>
                   </div>
                 </div>
               </div>

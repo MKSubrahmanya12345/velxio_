@@ -3,6 +3,7 @@
 import type {
   Conversation, Health, MessageResult, CreateResult, Project, ProjectState, MemoryEvent,
   ProvidersState, ProviderKey, ProviderKeyInput, ProviderTestResult, FailoverSettings,
+  GlobalRule, GlobalRuleKind, GlobalRulesState,
 } from './types';
 
 const BASE = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL ?? '/api';

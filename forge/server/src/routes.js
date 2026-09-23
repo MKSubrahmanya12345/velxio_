@@ -7,6 +7,7 @@ import { Router } from 'express';
 import { synthesizeChatProject, handleChatMessage } from './pipeline.js';
 import { makeConversation, nowIso, log } from './schema.js';
 import { createProviderRouter } from './providerRoutes.js';
+import { createGlobalRuleRouter } from './globalRuleRoutes.js';
 
 export function createRouter(deps) {
   const r = Router();
@@ -14,6 +15,9 @@ export function createRouter(deps) {
   // Mounted only when a registry exists, so hand-built dependency sets
   // (tests, scripts) keep working without one.
   if (deps.registry) r.use(createProviderRouter(deps));
+  // Global rules: the cross-project, user-authored rule set behind the JEV
+  // pre-turn gate (see memory/preturn.js). Mounted only when a store exists.
+  if (deps.globalRules) r.use(createGlobalRuleRouter(deps));
   const busy = new Set();
   const withLock = async (id, work) => {
     if (busy.has(id)) throw Object.assign(new Error('A turn is already running for this project. Wait for it to finish.'), { status: 409 });

@@ -28,6 +28,33 @@ what the user says**. There is no film-specific or electronics-specific schema i
 the live memory pipeline. JEV receives `{ state, questions }` with typed `choice`,
 `noul`, and `score` questions, not a request to write the assistant's response.
 
+### Global rules and the pre-turn gate
+
+The **Global rules** page (`/api/rules/global`, `GLOBAL_RULES_FILE`, default
+`data/global-rules.json`) is a user-authored, cross-project rule set that is
+hand-managed — add, edit, enable, disable, delete with **no LLM in the loop**.
+These rules apply to every conversation on the very next message.
+
+The turn loop now **decides before it generates**. A JEV **pre-turn gate**
+(`memory/preturn.js`) runs before any generation token is spent: one typed-JEV
+call over the message plus the candidate rules (enabled global rules first,
+then the project's active rules, capped at 25) decides
+
+- which rules are **in force for this exact message** (a missing value keeps a
+  rule in force and says so — a broken evaluation can never silently disable a rule),
+- the turn **mode**: `answer`, `clarify_first`, `rule_change`, or `out_of_scope`,
+- whether the message itself performs a **rule op** (`add`/`modify`/`remove`),
+  on which target, and whether the message explicitly authorizes it.
+
+Code compiles those answers into a **TURN DIRECTIVE** that is injected into the
+proposal and response prompts, and the output check covers exactly the rules
+the gate marked in force (deduped against the conversation's own notes) instead
+of blindly re-checking every note. The gate's single autonomous mutation is a
+**user-authorized removal** of a named global rule (`remove` + target ID +
+`change ≥ 0.9`); it is applied only after the turn passes every check, and it
+is a reversible disable, never a delete. Adds and modifies remain directives —
+the user's own words stay the source of truth.
+
 ### How decisions are applied
 
 - **Remembering is separate from classifying.** An active user commitment needs a
@@ -255,29 +282,7 @@ from `forge/server`. Do not commit credentials.
 |---|---|
 | `GET /api/health` | Actual configured providers, active key, failover policy |
 | `POST /api/chat`, `POST /api/chat/:id/messages` | Optional `provider` field: key id or provider id the loop starts from |
-| `GET /api/providers` | Catalog, every stored key (plain text), selection, loop order, attempt log |
-| `POST /api/providers/keys` | Add a key `{ provider, apiKey, note, model, baseUrl, secret?, region? }` |
-| `PATCH /api/providers/keys/:id` | Update note / model / base / enabled / credentials |
-| `DELETE /api/providers/keys/:id` | Remove a key (`.env` entries are restorable) |
-| `POST /api/providers/keys/:id/test` | Live probe of one credential, no failover |
-| `POST /api/providers/active` | Select the key that runs first |
-| `PATCH /api/providers/failover` | `{ enabled, maxRounds, retryRejected }` |
-| `POST /api/providers/restore-env` | Restore removed `.env` entries |
-| `GET /api/chat` | Saved conversations |
-| `POST /api/chat` | Start a memory-first project with `{ goal }` or `{ message }` |
-| `GET /api/chat/:id` | Conversation, memory, and recorded events |
-| `POST /api/chat/:id/messages` | Run a guarded turn with `{ text }` |
-| `DELETE /api/chat/:id` | Delete a conversation |
-
-JSON is the default. The UI requests `Accept: application/x-ndjson` on create/send:
-
-```json
-{"type":"progress","event":{"stage":"review","status":"running","label":"..."}}
-{"type":"result","result":{"conversation":{},"response":{},"decisions":[]}}
-```
-
-An `error` packet terminates a failed streamed turn. Progress is provisional; only
-`result` confirms persistence. Unchecked drafts are never streamed to the browser
+| `GET /api/providers` | Catalog, every stored the browser
 or stored in the trace. A disconnected client may miss a successful commit: reopen
 the project before resending. There is no automatic mutation retry/idempotency key.
 
@@ -326,6 +331,30 @@ integration, accounts, or guaranteed factual/physical verification.
 - `client/src/components/ProvidersView.tsx`: the Providers management page.
 - `server/src/memory/decisions.js`: typed JEV questions and conservative application.
 - `server/src/memory/turn.js`: propose → review → contextualize → draft → check/repair.
+- `server/src/schema.js`, `store.js`: persistence and backward compatibility.
+- `client/src/components/MemoryPanel.tsx`: live stages, note provenance, checks, replay.
+- `client/src/api.ts`: incremental NDJSON parser and final-result handling.
+
+## Validation
+
+```bash
+npm --prefix forge/server test       # memory, API, persistence, provider contracts
+npm --prefix forge/server run smoke # original build loop (11 checks, offline fixtures)
+npm --prefix forge/server run raw-reviews # one raw memory-review + one raw output-review response
+npm --prefix forge/client test       # workspace, memory UI, streaming parser
+npm --prefix forge/client run build # TypeScript + production bundle
+```
+
+The tests cover grounded notes, label-split and uncertain/missing decisions,
+uncertainty-vs-contradiction wording, named conflict targets, unauthorized rule
+replacement, question answering and turn-end reconciliation, disposition gating,
+repair and recheck, withheld drafts, raw-answer capture, rollback, concurrent API
+requests, file reloads, streaming interruptions, source visibility, and explicit
+replay.
+Provider request shapes are tested with stubbed HTTP, **not paid-provider E2E**.
+Desktop/mobile Chromium checks exercise the actual demo API and UI, including rule
+formation, future turns, scoped changes, replay, persisted reopening, and reduced motion.
+air.
 - `server/src/schema.js`, `store.js`: persistence and backward compatibility.
 - `client/src/components/MemoryPanel.tsx`: live stages, note provenance, checks, replay.
 - `client/src/api.ts`: incremental NDJSON parser and final-result handling.
