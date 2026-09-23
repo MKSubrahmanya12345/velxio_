@@ -1,0 +1,2672 @@
+diff --git a/WireGI/README.md b/WireGI/README.md
+new file mode 100644
+index 0000000..2240400
+--- /dev/null
++++ b/WireGI/README.md
+@@ -0,0 +1,85 @@
++# WireGI — agentic build assistant
++
++WireGI turns a build request ("make me a drone") into a **decomposed, researched, decision-gated
++project** with a persistent `IDEA → CURRENT → VERIFIED` state, and streams every decision and finding
++back to a communication UI. No simulation — text output only.
++
++It is built to mirror **Forge** (`../forge`): same backend/frontend split, `models / routes / controllers`
++layout, and — critically — it **reuses Forge's exact AI plumbing** (multi-provider LLM failover + the
++Jev typed-decision client) by importing it directly from `../forge/server/src`. It reads provider keys
++from **`../forge/server/.env`** and does **not** create a new `.env`.
++
++```
++WireGI/
++  server/                # Node (ESM), mirrors forge/server/src
++    src/
++      config.js          # loads Forge's config (=> forge/server/.env), overrides only paths/port
++      store.js           # zero-dep JSON project store
++      models/project.js  # Project + Part domain models (3-state: idea/current/verified)
++      services/
++        llm.js          # generate()/generateJSON() over Forge's failover loop
++        jevClient.js    # Jev decisions; LLM fallback when no TYPESAFE_API_KEY
++        indexer.js      # research index (speed-up: reuse prior findings)
++        research.js     # webSearch() + research→gather→understand→data pipeline
++        agent.js        # the orchestration: classify → decompose → parallel research → gate
++      controllers/       # project / research / decision controllers
++      routes/            # express routers (ndjson streaming for live UI)
++      index.js          # express entry; mounts Forge's provider router too
++  client/                # React + Vite (mirrors forge/client)
++    src/
++      api.ts            # REST + ndjson streaming client
++      pages/            # HomePage, ProjectPage
++      components/       # ChatView, PartCard, DecisionLog, ResearchLog, ProviderStrip,
++                        # HowItWorks, ConfidenceMeter, StepCard (Forge UI vocabulary)
++```
++
++## How a request flows
++
++```
++PROMPT
++  └─ Jev D1 (classify build + domains)
++  └─ LLM decomposes into PARTS (frame, motors, ESC, FC, props, RX, video, battery, firmware…)
++  └─ each PART runs, in PARALLEL:
++        research  (live web search if TAVILY_API_KEY/BRAVE_API_KEY present, else model knowledge)
++        → gather  (structured fields: part#, spec, price, source)
++        → understand (validate constraints, flag open questions)
++        → data    (BOM row, wiring, config, checklist)
++        → indexed (similar topics reuse prior research)
++  └─ Jev D4/D5/D6 gate: complete? needs-human-eyes? stop?
++  └─ merge into project state; stream decisions + research + parts to the UI
++```
++
++The human approves parts that need their own eyes; the agent keeps iterating until satisfied.
++
++## Run it
++
++```bash
++# 1) server (reuses forge keys from ../forge/server/.env)
++cd WireGI/server && npm install && npm start        # listens on :4322
++
++# 2) client (in another terminal)
++cd WireGI/client && npm install && npm run dev      # http://localhost:5173 (proxies /api → :4322)
++```
++
++Then open the client, type **`make me a drone`**, and watch the live event stream, the per-part cards
++(research/gather/understand/data), and the Jev decision log fill in.
++
++## Configuration (no new .env)
++
++WireGI does **not** create its own `.env`. It imports Forge's `loadConfig()`, which loads
++`../forge/server/.env`. So:
++
++- **LLM providers** (Groq, Gemini, OpenRouter, Ollama, OpenAI-compatible, Bedrock) — configured exactly as
++  in Forge.
++- **Jev** — set `TYPESAFE_API_KEY` in `forge/server/.env` (the decision-maker). Without it, WireGI falls
++  back to an LLM acting as the typed decision model so the flow still runs.
++- **Web search** (optional, for *proper* web research) — add `TAVILY_API_KEY` or `BRAVE_API_KEY` to
++  `forge/server/.env`. Without it, research uses model knowledge and the log notes that.
++
++WireGI overrides only its own runtime paths (`data/wiregi-*.json`) so it never clobbers Forge's data.
++
++## Notes
++
++- Text-only by design (no Velxio simulation here — that is Phase 2).
++- Provider management UI endpoints are reused from Forge (`/api/providers/*`).
++- Everything is durable: kill the server mid-project and resume — the project state is on disk.
+diff --git a/WireGI/client/index.html b/WireGI/client/index.html
+new file mode 100644
+index 0000000..ed18192
+--- /dev/null
++++ b/WireGI/client/index.html
+@@ -0,0 +1,12 @@
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="UTF-8" />
++    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
++    <title>WireGI — agentic build assistant</title>
++  </head>
++  <body>
++    <div id="root"></div>
++    <script type="module" src="/src/main.tsx"></script>
++  </body>
++</html>
+diff --git a/WireGI/client/package.json b/WireGI/client/package.json
+new file mode 100644
+index 0000000..a93f1ac
+--- /dev/null
++++ b/WireGI/client/package.json
+@@ -0,0 +1,22 @@
++{
++  "name": "wiregi-client",
++  "private": true,
++  "version": "0.1.0",
++  "type": "module",
++  "scripts": {
++    "dev": "vite",
++    "build": "vite build",
++    "preview": "vite preview"
++  },
++  "dependencies": {
++    "react": "^18.3.1",
++    "react-dom": "^18.3.1"
++  },
++  "devDependencies": {
++    "@types/react": "^18.3.3",
++    "@types/react-dom": "^18.3.0",
++    "@vitejs/plugin-react": "^4.3.1",
++    "typescript": "^5.5.3",
++    "vite": "^5.4.0"
++  }
++}
+diff --git a/WireGI/client/src/App.tsx b/WireGI/client/src/App.tsx
+new file mode 100644
+index 0000000..e8e5adb
+--- /dev/null
++++ b/WireGI/client/src/App.tsx
+@@ -0,0 +1,12 @@
++import { useState } from 'react';
++import HomePage from './pages/HomePage';
++import ProjectPage from './pages/ProjectPage';
++
++export default function App() {
++  const [projectId, setProjectId] = useState<string | null>(null);
++  return projectId ? (
++    <ProjectPage projectId={projectId} onHome={() => setProjectId(null)} />
++  ) : (
++    <HomePage onOpen={(id) => setProjectId(id)} />
++  );
++}
+diff --git a/WireGI/client/src/api.ts b/WireGI/client/src/api.ts
+new file mode 100644
+index 0000000..f9f311c
+--- /dev/null
++++ b/WireGI/client/src/api.ts
+@@ -0,0 +1,88 @@
++import type { Project, StreamEvent } from './types';
++
++const API = '/api';
++
++export async function health() {
++  const r = await fetch(`${API}/health`);
++  return r.json();
++}
++
++export async function listProjects(): Promise<Project[]> {
++  const r = await fetch(`${API}/projects`);
++  return r.json();
++}
++
++export async function getProject(id: string): Promise<Project> {
++  const r = await fetch(`${API}/projects/${id}`);
++  if (!r.ok) throw new Error('project not found');
++  return r.json();
++}
++
++export async function research(query: string) {
++  const r = await fetch(`${API}/research`, {
++    method: 'POST',
++    headers: { 'Content-Type': 'application/json' },
++    body: JSON.stringify({ query }),
++  });
++  return r.json();
++}
++
++// Stream a project request (create or message). Emits ndjson events live.
++function streamRequest(path: string, body: any, onEvent: (e: StreamEvent) => void): Promise<Project> {
++  return new Promise((resolve, reject) => {
++    fetch(`${API}${path}`, {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
++      body: JSON.stringify(body),
++    })
++      .then((r) => {
++        if (!r.ok) {
++          r.json()
++            .then((j) => reject(new Error(j.error || 'request failed')))
++            .catch(() => reject(new Error('request failed')));
++          return;
++        }
++        if (!r.body) {
++          r.json().then((j) => resolve(j)).catch(reject);
++          return;
++        }
++        let lastResult: Project | null = null;
++        const reader = r.body.getReader();
++        const decoder = new TextDecoder();
++        let buf = '';
++        const pump = () =>
++          reader.read().then(({ done, value }) => {
++            if (done) {
++              resolve(lastResult as Project);
++              return;
++            }
++            buf += decoder.decode(value, { stream: true });
++            let nl;
++            while ((nl = buf.indexOf('\n')) >= 0) {
++              const line = buf.slice(0, nl).trim();
++              buf = buf.slice(nl + 1);
++              if (!line) continue;
++              try {
++                const ev = JSON.parse(line) as StreamEvent;
++                onEvent(ev);
++                if (ev.type === 'result') lastResult = ev.result;
++                if (ev.type === 'error') reject(new Error(ev.error));
++              } catch {
++                /* ignore malformed line */
++              }
++            }
++            return pump();
++          });
++        pump().catch(reject);
++      })
++      .catch(reject);
++  });
++}
++
++export function createProject(goal: string, constraints: any, onEvent: (e: StreamEvent) => void) {
++  return streamRequest('/projects', { goal, constraints }, onEvent);
++}
++
++export function sendMessage(id: string, text: string, onEvent: (e: StreamEvent) => void) {
++  return streamRequest(`/projects/${id}/messages`, { text }, onEvent);
++}
+diff --git a/WireGI/client/src/components/ChatView.tsx b/WireGI/client/src/components/ChatView.tsx
+new file mode 100644
+index 0000000..f9d43f0
+--- /dev/null
++++ b/WireGI/client/src/components/ChatView.tsx
+@@ -0,0 +1,13 @@
++import type { Project } from '../types';
++
++export default function ChatView({ project }: { project: Project }) {
++  return (
++    <div className="chat">
++      {project.state.chat.map((m, i) => (
++        <div key={i} className={`msg ${m.role}`}>
++          <pre>{m.content}</pre>
++        </div>
++      ))}
++    </div>
++  );
++}
+diff --git a/WireGI/client/src/components/ConfidenceMeter.tsx b/WireGI/client/src/components/ConfidenceMeter.tsx
+new file mode 100644
+index 0000000..84421f9
+--- /dev/null
++++ b/WireGI/client/src/components/ConfidenceMeter.tsx
+@@ -0,0 +1,15 @@
++export default function ConfidenceMeter({ value, label }: { value: number; label?: string }) {
++  const pct = Math.max(0, Math.min(1, value)) * 100;
++  return (
++    <div>
++      {label && (
++        <div className="kv">
++          <b>{label}</b>
++        </div>
++      )}
++      <div className="meter">
++        <span style={{ width: `${pct}%` }} />
++      </div>
++    </div>
++  );
++}
+diff --git a/WireGI/client/src/components/DecisionLog.tsx b/WireGI/client/src/components/DecisionLog.tsx
+new file mode 100644
+index 0000000..8c6b09c
+--- /dev/null
++++ b/WireGI/client/src/components/DecisionLog.tsx
+@@ -0,0 +1,35 @@
++import type { Decision } from '../types';
++import ConfidenceMeter from './ConfidenceMeter';
++
++export default function DecisionLog({ decisions }: { decisions: Decision[] }) {
++  return (
++    <div className="panel">
++      <h3>Jev decisions</h3>
++      {decisions.length === 0 ? (
++        <div style={{ color: 'var(--muted)' }}>none yet</div>
++      ) : (
++        decisions.map((d, i) => (
++          <div className="decision" key={i}>
++            <div className="label">
++              {d.label}{' '}
++              <span className="src">
++                · {d.source || '?'} · {new Date(d.at).toLocaleTimeString()}
++              </span>
++            </div>
++            {d.answers &&
++              Object.entries(d.answers).map(([id, a]: any) => {
++                const val = a?.value ?? a?.probability ?? a?.score ?? a;
++                const conf = a?.confidence ?? a?.probability ?? null;
++                return (
++                  <div className="q" key={id}>
++                    <span className="id">{id}</span>: {JSON.stringify(val)}
++                    {conf != null && <ConfidenceMeter value={Number(conf)} />}
++                  </div>
++                );
++              })}
++          </div>
++        ))
++      )}
++    </div>
++  );
++}
+diff --git a/WireGI/client/src/components/HowItWorks.tsx b/WireGI/client/src/components/HowItWorks.tsx
+new file mode 100644
+index 0000000..effa5ca
+--- /dev/null
++++ b/WireGI/client/src/components/HowItWorks.tsx
+@@ -0,0 +1,25 @@
++import StepCard from './StepCard';
++
++export default function HowItWorks() {
++  const steps = [
++    ['1 · Classify', 'Prompt → Jev classifies the build (D1).'],
++    ['2 · Decompose', 'LLM splits it into parts: frame, motors, ESC, FC, props, RX, video, battery, firmware…'],
++    ['3 · Research loop', 'Each part runs research → gather → understand → data in parallel (web + model).'],
++    ['4 · Index', 'Findings are indexed so similar topics reuse prior research (speed-up).'],
++    ['5 · Gate', 'Jev gates completion + human-eyes (D4–D6). You approve with your own eyes.'],
++    ['6 · Persist', 'State: IDEA → CURRENT → VERIFIED. Agent keeps going until you are satisfied.'],
++  ];
++  return (
++    <div className="panel">
++      <h3>How WireGI works</h3>
++      {steps.map(([t, d]) => (
++        <StepCard key={t} title={t}>
++          <div style={{ fontSize: 13 }}>{d}</div>
++        </StepCard>
++      ))}
++      <p style={{ color: 'var(--muted)', fontSize: 12, marginTop: 8 }}>
++        Provider + Jev keys are reused from forge/server/.env. No new .env created.
++      </p>
++    </div>
++  );
++}
+diff --git a/WireGI/client/src/components/PartCard.tsx b/WireGI/client/src/components/PartCard.tsx
+new file mode 100644
+index 0000000..a015067
+--- /dev/null
++++ b/WireGI/client/src/components/PartCard.tsx
+@@ -0,0 +1,66 @@
++import { useState } from 'react';
++import type { Part } from '../types';
++
++export default function PartCard({ part }: { part: Part }) {
++  const [open, setOpen] = useState(false);
++  const d = part.current?.data;
++  return (
++    <div className="part-card">
++      <div className="part-head" onClick={() => setOpen(!open)}>
++        <span className="name">{part.name}</span>
++        <span className="badge">{part.domain}</span>
++        <span className={`badge ${part.status}`}>{part.status}</span>
++        {part.humanCheckpoint && <span className="badge human">⚠ eyes</span>}
++        <span style={{ flex: 1 }} />
++        <span className="badge">{open ? '▾' : '▸'}</span>
++      </div>
++      {open && (
++        <div className="part-body">
++          {part.current?.gathered?.length ? (
++            <div>
++              <b style={{ color: 'var(--muted)' }}>Gathered:</b>
++              <ul className="tight">
++                {part.current.gathered.map((g: any, i: number) => (
++                  <li key={i}>
++                    {g.field}: <code>{g.value}</code> {g.source ? `— ${g.source}` : ''}
++                  </li>
++                ))}
++              </ul>
++            </div>
++          ) : null}
++          {d?.bomRow && (
++            <div className="kv">
++              <b>BOM:</b> {d.bomRow}
++            </div>
++          )}
++          {d?.wiring && (
++            <div className="kv">
++              <b>Wiring:</b> {d.wiring}
++            </div>
++          )}
++          {d?.config && <div className="code">{d.config}</div>}
++          {part.checklist?.length ? (
++            <div>
++              <b style={{ color: 'var(--muted)' }}>Checklist:</b>
++              <ul className="tight">
++                {part.checklist.map((c: string, i: number) => (
++                  <li key={i}>{c}</li>
++                ))}
++              </ul>
++            </div>
++          ) : null}
++          {part.openQuestions?.length ? (
++            <div>
++              <b style={{ color: 'var(--warn)' }}>Open questions:</b>
++              <ul className="tight">
++                {part.openQuestions.map((q: string, i: number) => (
++                  <li key={i}>{q}</li>
++                ))}
++              </ul>
++            </div>
++          ) : null}
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/WireGI/client/src/components/ProviderStrip.tsx b/WireGI/client/src/components/ProviderStrip.tsx
+new file mode 100644
+index 0000000..24bcd27
+--- /dev/null
++++ b/WireGI/client/src/components/ProviderStrip.tsx
+@@ -0,0 +1,15 @@
++import { useEffect, useState } from 'react';
++import { health } from '../api';
++
++export default function ProviderStrip() {
++  const [info, setInfo] = useState<any>(null);
++  useEffect(() => {
++    health().then(setInfo).catch(() => {});
++  }, []);
++  if (!info) return <span className="status-pill">…</span>;
++  return (
++    <span className="status-pill">
++      JEV: {info.jev} · Providers: {info.providers}
++    </span>
++  );
++}
+diff --git a/WireGI/client/src/components/ResearchLog.tsx b/WireGI/client/src/components/ResearchLog.tsx
+new file mode 100644
+index 0000000..cdb9a4b
+--- /dev/null
++++ b/WireGI/client/src/components/ResearchLog.tsx
+@@ -0,0 +1,22 @@
++export default function ResearchLog({
++  log,
++}: {
++  log: Array<{ part: string; web: { engine: string; count: number }; ts: string }>;
++}) {
++  return (
++    <div className="panel">
++      <h3>Research log</h3>
++      {log.length === 0 ? (
++        <div style={{ color: 'var(--muted)' }}>none yet</div>
++      ) : (
++        <ul className="tight">
++          {log.map((r, i) => (
++            <li key={i}>
++              {r.part} — <code>{r.web.engine}</code> ({r.web.count})
++            </li>
++          ))}
++        </ul>
++      )}
++    </div>
++  );
++}
+diff --git a/WireGI/client/src/components/StepCard.tsx b/WireGI/client/src/components/StepCard.tsx
+new file mode 100644
+index 0000000..d61b813
+--- /dev/null
++++ b/WireGI/client/src/components/StepCard.tsx
+@@ -0,0 +1,21 @@
++import type { ReactNode } from 'react';
++
++export default function StepCard({
++  title,
++  children,
++  active,
++}: {
++  title: string;
++  children?: ReactNode;
++  active?: boolean;
++}) {
++  return (
++    <div className="part-card" style={{ borderColor: active ? 'var(--accent)' : 'var(--border)' }}>
++      <div className="part-head" style={{ cursor: 'default' }}>
++        <span className="name">{title}</span>
++        {active && <span className="badge data_ready">active</span>}
++      </div>
++      <div className="part-body">{children}</div>
++    </div>
++  );
++}
+diff --git a/WireGI/client/src/index.css b/WireGI/client/src/index.css
+new file mode 100644
+index 0000000..3003217
+--- /dev/null
++++ b/WireGI/client/src/index.css
+@@ -0,0 +1,99 @@
++:root {
++  --bg: #0d1117;
++  --panel: #161b22;
++  --panel-2: #1c232c;
++  --border: #2d333b;
++  --text: #e6edf3;
++  --muted: #8b949e;
++  --accent: #58a6ff;
++  --good: #3fb950;
++  --warn: #d29922;
++  --bad: #f85149;
++  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
++}
++
++* { box-sizing: border-box; }
++html, body, #root { height: 100%; margin: 0; }
++body {
++  background: var(--bg);
++  color: var(--text);
++  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
++  font-size: 14px;
++}
++
++a { color: var(--accent); }
++
++/* Layout */
++.app { display: flex; flex-direction: column; height: 100%; }
++.topbar {
++  display: flex; align-items: center; gap: 14px;
++  padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
++}
++.topbar h1 { font-size: 16px; margin: 0; letter-spacing: 0.5px; }
++.topbar .spacer { flex: 1; }
++.status-pill {
++  font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);
++  background: var(--panel-2); color: var(--muted);
++}
++
++.three-col { display: grid; grid-template-columns: 1.1fr 1.3fr 1fr; gap: 12px; padding: 12px; flex: 1; overflow: hidden; }
++.col { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; }
++.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
++.panel h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
++
++/* Home */
++.home { max-width: 720px; margin: 8vh auto; padding: 0 16px; }
++.home textarea, .panel textarea, input[type="text"] {
++  width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
++  border-radius: 8px; padding: 10px; font-size: 14px; resize: vertical; font-family: inherit;
++}
++button {
++  background: var(--accent); color: #04111f; border: none; border-radius: 8px; padding: 9px 16px;
++  font-size: 14px; font-weight: 600; cursor: pointer;
++}
++button:disabled { opacity: 0.5; cursor: not-allowed; }
++button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
++.btn-row { display: flex; gap: 8px; margin-top: 10px; }
++
++.event-log { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; color: var(--muted); max-height: 320px; overflow-y: auto; }
++.event-log .ev-decision { color: var(--accent); }
++.event-log .ev-research { color: var(--good); }
++.event-log .ev-error { color: var(--bad); }
++
++/* Chat */
++.chat { display: flex; flex-direction: column; gap: 8px; }
++.msg { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); }
++.msg.system { background: var(--panel-2); color: var(--muted); font-size: 12px; }
++.msg.user { background: #11324f; border-color: #1f6feb; }
++.msg.agent { background: var(--panel-2); }
++.msg pre { white-space: pre-wrap; font-family: var(--mono); font-size: 12.5px; margin: 0; }
++
++/* Parts */
++.part-card { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); padding: 10px 12px; }
++.part-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
++.part-head .name { font-weight: 600; }
++.badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
++.badge.data_ready { color: var(--good); border-color: var(--good); }
++.badge.awaiting_human { color: var(--warn); border-color: var(--warn); }
++.badge.verified { color: var(--good); border-color: var(--good); background: #0f2e18; }
++.badge.human { color: var(--warn); }
++.part-body { margin-top: 8px; font-size: 13px; }
++.kv { margin: 2px 0; }
++.kv b { color: var(--muted); font-weight: 500; }
++ul.tight { margin: 4px 0; padding-left: 18px; }
++.code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); padding: 8px; border-radius: 8px; white-space: pre-wrap; }
++
++/* Decisions */
++.decision { border-left: 3px solid var(--accent); padding: 4px 0 4px 10px; margin: 6px 0; }
++.decision .label { font-weight: 600; }
++.decision .src { color: var(--muted); font-size: 11px; }
++.q { font-family: var(--mono); font-size: 12px; margin: 2px 0; }
++.q .id { color: var(--accent); }
++
++/* meters */
++.meter { height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
++.meter > span { display: block; height: 100%; background: var(--accent); }
++
++/* research */
++.research-input { display: flex; gap: 6px; }
++.research-input input { flex: 1; }
+diff --git a/WireGI/client/src/main.tsx b/WireGI/client/src/main.tsx
+new file mode 100644
+index 0000000..486e16c
+--- /dev/null
++++ b/WireGI/client/src/main.tsx
+@@ -0,0 +1,10 @@
++import React from 'react';
++import { createRoot } from 'react-dom/client';
++import App from './App';
++import './index.css';
++
++createRoot(document.getElementById('root')!).render(
++  <React.StrictMode>
++    <App />
++  </React.StrictMode>,
++);
+diff --git a/WireGI/client/src/pages/HomePage.tsx b/WireGI/client/src/pages/HomePage.tsx
+new file mode 100644
+index 0000000..401d900
+--- /dev/null
++++ b/WireGI/client/src/pages/HomePage.tsx
+@@ -0,0 +1,98 @@
++import { useEffect, useState } from 'react';
++import { createProject, listProjects } from '../api';
++import HowItWorks from '../components/HowItWorks';
++
++export default function HomePage({ onOpen }: { onOpen: (id: string) => void }) {
++  const [goal, setGoal] = useState('');
++  const [log, setLog] = useState<string[]>([]);
++  const [running, setRunning] = useState(false);
++  const [projects, setProjects] = useState<any[]>([]);
++
++  const refresh = async () => {
++    try {
++      setProjects(await listProjects());
++    } catch {
++      /* ignore */
++    }
++  };
++  useEffect(() => {
++    refresh();
++  }, []);
++
++  const run = async () => {
++    if (!goal.trim() || running) return;
++    setRunning(true);
++    setLog([]);
++    const onEvent = (e: any) => {
++      const msg =
++        e.type === 'decision'
++          ? `DECISION ${e.label} (${e.source || '?'})`
++          : e.type === 'research'
++            ? `RESEARCH ${e.part}: ${e.message}`
++            : e.type === 'part'
++              ? `PART ${e.part} → ${e.stage}`
++              : e.type === 'project'
++                ? `DECOMPOSED ${e.parts?.length} parts`
++                : e.type === 'done'
++                  ? `DONE ${e.status}`
++                  : e.type === 'error'
++                    ? `ERROR ${e.error}`
++                    : '';
++      if (msg) setLog((l) => [...l, msg]);
++    };
++    try {
++      const proj = await createProject(goal, {}, onEvent);
++      onOpen(proj.id);
++    } catch (err: any) {
++      setLog((l) => [...l, 'ERROR ' + (err?.message || 'failed')]);
++    } finally {
++      setRunning(false);
++      refresh();
++    }
++  };
++
++  return (
++    <div className="home">
++      <h1>WireGI — agentic build assistant</h1>
++      <p style={{ color: 'var(--muted)' }}>
++        Describe something buildable. The agent decomposes it, researches each part (web + model), and streams
++        every decision and finding back to you.
++      </p>
++      <textarea
++        rows={3}
++        placeholder='e.g. "make me a drone"'
++        value={goal}
++        onChange={(e) => setGoal(e.target.value)}
++      />
++      <div className="btn-row">
++        <button onClick={run} disabled={running || !goal.trim()}>
++          {running ? 'Running…' : 'Build it'}
++        </button>
++      </div>
++      {log.length > 0 && (
++        <div className="panel" style={{ marginTop: 14 }}>
++          <h3>Live run</h3>
++          <div className="event-log">{log.join('\n')}</div>
++        </div>
++      )}
++      {projects.length > 0 && (
++        <div className="panel" style={{ marginTop: 14 }}>
++          <h3>Past projects</h3>
++          <ul className="tight">
++            {projects.map((p: any) => (
++              <li key={p.id}>
++                <a onClick={() => onOpen(p.id)} style={{ cursor: 'pointer' }}>
++                  {p.goal}
++                </a>{' '}
++                <span className="badge">{p.status}</span>
++              </li>
++            ))}
++          </ul>
++        </div>
++      )}
++      <div style={{ marginTop: 18 }}>
++        <HowItWorks />
++      </div>
++    </div>
++  );
++}
+diff --git a/WireGI/client/src/pages/ProjectPage.tsx b/WireGI/client/src/pages/ProjectPage.tsx
+new file mode 100644
+index 0000000..1df8567
+--- /dev/null
++++ b/WireGI/client/src/pages/ProjectPage.tsx
+@@ -0,0 +1,156 @@
++import { useEffect, useState } from 'react';
++import { getProject, sendMessage, research } from '../api';
++import type { Project, StreamEvent } from '../types';
++import ChatView from '../components/ChatView';
++import PartCard from '../components/PartCard';
++import DecisionLog from '../components/DecisionLog';
++import ResearchLog from '../components/ResearchLog';
++import ProviderStrip from '../components/ProviderStrip';
++import HowItWorks from '../components/HowItWorks';
++
++export default function ProjectPage({ projectId, onHome }: { projectId: string; onHome: () => void }) {
++  const [project, setProject] = useState<Project | null>(null);
++  const [events, setEvents] = useState<string[]>([]);
++  const [draft, setDraft] = useState('');
++  const [busy, setBusy] = useState(false);
++  const [researchQ, setResearchQ] = useState('');
++  const [researchOut, setResearchOut] = useState<any>(null);
++
++  const refresh = async () => {
++    try {
++      setProject(await getProject(projectId));
++    } catch {
++      /* ignore */
++    }
++  };
++  useEffect(() => {
++    refresh();
++  }, [projectId]);
++
++  const feed = (e: StreamEvent) => {
++    const msg =
++      e.type === 'decision'
++        ? `DECISION ${e.label}`
++        : e.type === 'research'
++          ? `RESEARCH ${e.part}: ${e.message}`
++          : e.type === 'part'
++            ? `PART ${e.part} → ${e.stage}`
++            : e.type === 'done'
++              ? `DONE ${e.status}`
++              : e.type === 'error'
++                ? `ERROR ${e.error}`
++                : '';
++    if (msg) setEvents((l) => [...l, msg]);
++  };
++
++  const act = async (fn: (onEvent: (e: StreamEvent) => void) => Promise<Project>) => {
++    if (busy) return;
++    setBusy(true);
++    try {
++      setProject(await fn(feed));
++    } catch (err: any) {
++      setEvents((l) => [...l, 'ERROR ' + (err?.message || 'failed')]);
++    } finally {
++      setBusy(false);
++      refresh();
++    }
++  };
++
++  const onSend = () => {
++    const t = draft.trim();
++    if (!t) return;
++    setDraft('');
++    act((onEvent) => sendMessage(projectId, t, onEvent));
++  };
++  const doResearch = async () => {
++    const q = researchQ.trim();
++    if (!q) return;
++    try {
++      setResearchOut(await research(q));
++    } catch (e: any) {
++      setResearchOut({ error: e.message });
++    }
++  };
++
++  return (
++    <div className="app">
++      <div className="topbar">
++        <h1>WireGI</h1>
++        <span className="status-pill">{project?.status || '…'}</span>
++        <div className="spacer" />
++        <ProviderStrip />
++        <button className="ghost" onClick={onHome}>
++          ← Home
++        </button>
++      </div>
++      <div className="three-col">
++        {/* Left: chat + live event stream */}
++        <div className="col">
++          <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
++            <h3>Communication</h3>
++            <div style={{ flex: 1, overflowY: 'auto' }}>{project && <ChatView project={project} />}</div>
++            <div className="btn-row">
++              <textarea
++                rows={2}
++                placeholder='Approve, add a constraint, or ask…'
++                value={draft}
++                onChange={(e) => setDraft(e.target.value)}
++              />
++            </div>
++            <button onClick={onSend} disabled={busy || !draft.trim()}>
++              {busy ? 'Working…' : 'Send'}
++            </button>
++          </div>
++          <div className="panel">
++            <h3>Live event stream</h3>
++            <div className="event-log">{events.join('\n') || '—'}</div>
++          </div>
++        </div>
++
++        {/* Middle: parts (IDEA → CURRENT → VERIFIED) */}
++        <div className="col">
++          <div className="panel">
++            <h3>Project: {project?.goal}</h3>
++            <div className="kv">
++              <b>Classification:</b> {project?.state.idea.classification} · <b>Domains:</b>{' '}
++              {(project?.state.idea.domains || []).join(', ')}
++            </div>
++          </div>
++          {(project?.state.parts || []).map((p) => (
++            <PartCard key={p.id} part={p} />
++          ))}
++        </div>
++
++        {/* Right: decisions + research log + research tool */}
++        <div className="col">
++          <DecisionLog decisions={project?.state.decisions || []} />
++          <ResearchLog log={project?.state.researchLog || []} />
++          <div className="panel">
++            <h3>Research tool</h3>
++            <div className="research-input">
++              <input
++                type="text"
++                placeholder='web search query'
++                value={researchQ}
++                onChange={(e) => setResearchQ(e.target.value)}
++              />
++              <button onClick={doResearch}>Search</button>
++            </div>
++            {researchOut && (
++              <div style={{ marginTop: 8 }}>
++                <div className="kv">
++                  <b>Engine:</b>{' '}
++                  {researchOut.web ? `${researchOut.web.engine} (${researchOut.web.count})` : 'model knowledge'}
++                </div>
++                <pre className="code">{researchOut.summary}</pre>
++              </div>
++            )}
++          </div>
++          <div className="panel">
++            <HowItWorks />
++          </div>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/WireGI/client/src/types.ts b/WireGI/client/src/types.ts
+new file mode 100644
+index 0000000..17cd7e9
+--- /dev/null
++++ b/WireGI/client/src/types.ts
+@@ -0,0 +1,58 @@
++export interface Part {
++  id: string;
++  name: string;
++  domain: string;
++  status: string;
++  idea?: any;
++  current?: any;
++  verified?: boolean;
++  humanCheckpoint?: boolean;
++  research?: string[];
++  gathered?: Array<{ field: string; value: string; source: string }>;
++  data?: { bomRow?: string; wiring?: string; config?: string; checklist?: string[] } | null;
++  checklist?: string[];
++  openQuestions?: string[];
++  updatedAt?: string;
++}
++
++export interface Decision {
++  label: string;
++  at: string;
++  source?: string;
++  model?: string;
++  answers?: any;
++}
++
++export interface ChatMsg {
++  role: 'system' | 'user' | 'agent';
++  content: string;
++  ts?: string;
++}
++
++export interface Project {
++  id: string;
++  createdAt: string;
++  updatedAt: string;
++  goal: string;
++  constraints: any;
++  status: string;
++  state: {
++    idea: any;
++    current: any;
++    verified: any;
++    parts: Part[];
++    decisions: Decision[];
++    researchLog: Array<{ part: string; web: { engine: string; count: number }; ts: string }>;
++    chat: ChatMsg[];
++  };
++}
++
++export type StreamEvent =
++  | { type: 'decision'; label: string; answers: any; source?: string }
++  | { type: 'research'; stage: string; part: string; message: string; results?: any[] }
++  | { type: 'project'; stage: string; projectId: string; parts: any[] }
++  | { type: 'part'; stage: string; partId: string; part: string; data?: any; humanCheckpoint?: boolean }
++  | { type: 'chat'; role: string; content: string }
++  | { type: 'done'; projectId: string; status: string; summary: string }
++  | { type: 'result'; result: Project }
++  | { type: 'error'; error: string };
+diff --git a/WireGI/client/tsconfig.json b/WireGI/client/tsconfig.json
+new file mode 100644
+index 0000000..6915eb9
+--- /dev/null
++++ b/WireGI/client/tsconfig.json
+@@ -0,0 +1,20 @@
++{
++  "compilerOptions": {
++    "target": "ES2020",
++    "useDefineForClassFields": true,
++    "lib": ["ES2020", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "skipLibCheck": true,
++    "moduleResolution": "bundler",
++    "allowImportingTsExtensions": true,
++    "resolveJsonModule": true,
++    "isolatedModules": true,
++    "noEmit": true,
++    "jsx": "react-jsx",
++    "strict": false,
++    "noUnusedLocals": false,
++    "noUnusedParameters": false
++  },
++  "include": ["src"],
++  "references": [{ "path": "./tsconfig.node.json" }]
++}
+diff --git a/WireGI/client/tsconfig.node.json b/WireGI/client/tsconfig.node.json
+new file mode 100644
+index 0000000..42872c5
+--- /dev/null
++++ b/WireGI/client/tsconfig.node.json
+@@ -0,0 +1,10 @@
++{
++  "compilerOptions": {
++    "composite": true,
++    "skipLibCheck": true,
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "allowSyntheticDefaultImports": true
++  },
++  "include": ["vite.config.ts"]
++}
+diff --git a/WireGI/client/vite.config.ts b/WireGI/client/vite.config.ts
+new file mode 100644
+index 0000000..d1d0007
+--- /dev/null
++++ b/WireGI/client/vite.config.ts
+@@ -0,0 +1,14 @@
++import { defineConfig } from 'vite';
++import react from '@vitejs/plugin-react';
++
++// Dev proxy: forward /api to the WireGI server (default port 4322).
++export default defineConfig({
++  plugins: [react()],
++  server: {
++    host: '0.0.0.0',
++    port: 5173,
++    proxy: {
++      '/api': 'http://localhost:4322',
++    },
++  },
++});
+diff --git a/WireGI/server/package.json b/WireGI/server/package.json
+new file mode 100644
+index 0000000..b7dec70
+--- /dev/null
++++ b/WireGI/server/package.json
+@@ -0,0 +1,15 @@
++{
++  "name": "wiregi-server",
++  "version": "0.1.0",
++  "type": "module",
++  "private": true,
++  "description": "WireGI server — agentic build assistant. Reuses Forge's provider/Jev plumbing from ../forge/server/src and reads ../forge/server/.env.",
++  "scripts": {
++    "start": "node src/index.js",
++    "dev": "node --watch src/index.js"
++  },
++  "dependencies": {
++    "cors": "^2.8.5",
++    "express": "^4.19.2"
++  }
++}
+diff --git a/WireGI/server/src/config.js b/WireGI/server/src/config.js
+new file mode 100644
+index 0000000..1137c3f
+--- /dev/null
++++ b/WireGI/server/src/config.js
+@@ -0,0 +1,21 @@
++// WireGI server config.
++//
++// Deliberately does NOT create a new .env. Provider keys (LLM_API_KEY,
++// TYPESAFE_API_KEY, TAVILY_API_KEY, etc.) are loaded from Forge's own
++// forge/server/.env by Forge's config loader (which we import below). WireGI
++// only overrides its own runtime paths/ports so it never clobbers Forge data.
++
++import { loadConfig as forgeLoadConfig } from '../../../forge/server/src/config.js';
++
++export function loadConfig(env = process.env) {
++  const cfg = forgeLoadConfig(env);
++
++  // WireGI-specific runtime paths (separate from Forge's so we never overwrite).
++  cfg.port = Number(env.PORT || 4322);
++  cfg.corsOrigin = env.CORS_ORIGIN || 'http://localhost:5173';
++  cfg.db.dataFile = env.DATA_FILE || './data/wiregi-projects.json';
++  cfg.providers.dataFile = env.PROVIDERS_FILE || './data/wiregi-providers.json';
++  cfg.globalRules.dataFile = env.GLOBAL_RULES_FILE || './data/wiregi-rules.json';
++  cfg.label = 'wiregi-server';
++  return cfg;
++}
+diff --git a/WireGI/server/src/controllers/decisionController.js b/WireGI/server/src/controllers/decisionController.js
+new file mode 100644
+index 0000000..ed01ffe
+--- /dev/null
++++ b/WireGI/server/src/controllers/decisionController.js
+@@ -0,0 +1,5 @@
++export function createDecisionController({ jev, registry }) {
++  return {
++    decide: ({ state, questions }) => jev.decide({ state: state || {}, questions }, { registry }),
++  };
++}
+diff --git a/WireGI/server/src/controllers/projectController.js b/WireGI/server/src/controllers/projectController.js
+new file mode 100644
+index 0000000..478e92b
+--- /dev/null
++++ b/WireGI/server/src/controllers/projectController.js
+@@ -0,0 +1,10 @@
++import { createAgent } from '../services/agent.js';
++
++export function createProjectController({ cfg, registry, jev, store, indexer }) {
++  const agent = createAgent({ cfg, registry, jev, store, indexer });
++  return {
++    start: ({ goal, constraints, prefer, emit }) => agent.runProject(goal, constraints || {}, { emit, prefer }),
++    message: ({ projectId, text, prefer, emit }) =>
++      agent.continueProject(projectId, text, { emit, prefer }),
++  };
++}
+diff --git a/WireGI/server/src/controllers/researchController.js b/WireGI/server/src/controllers/researchController.js
+new file mode 100644
+index 0000000..f15db08
+--- /dev/null
++++ b/WireGI/server/src/controllers/researchController.js
+@@ -0,0 +1,31 @@
++import { webSearch } from '../services/research.js';
++import { generate } from '../services/llm.js';
++
++export function createResearchController({ registry, indexer }) {
++  return {
++    search: async ({ query }) => {
++      const web = await webSearch(query);
++      let summary = '';
++      if (web && web.items.length) {
++        const src = web.items.map((i) => `- ${i.title} (${i.url}): ${i.snippet}`).join('\n');
++        summary = await generate({
++          registry,
++          system: 'Summarize these web results into 5 concise, build-relevant bullet points. Cite source URLs.',
++          user: `QUERY: ${query}\n\n${src}`,
++        });
++      } else {
++        summary = await generate({
++          registry,
++          system: 'Answer the query from your knowledge, concisely, with bullets. State this is model knowledge, not live web.',
++          user: `QUERY: ${query}`,
++        });
++      }
++      indexer?.add({ topic: query, summary, sources: web ? web.items.map((i) => i.url) : [], partName: '(manual)' });
++      return {
++        query,
++        web: web ? { engine: web.engine, count: web.items.length, items: web.items } : null,
++        summary,
++      };
++    },
++  };
++}
+diff --git a/WireGI/server/src/index.js b/WireGI/server/src/index.js
+new file mode 100644
+index 0000000..83b9eef
+--- /dev/null
++++ b/WireGI/server/src/index.js
+@@ -0,0 +1,50 @@
++// WireGI server entry. Express app + Forge provider/Jev wiring + optional static
++// serving of the built client (production mode: client/dist).
++import express from 'express';
++import cors from 'cors';
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++import { loadConfig } from './config.js';
++import { createStore } from './store.js';
++import { createProviderRegistry } from '../../../forge/server/src/providers/registry.js';
++import { createJev } from './services/jevClient.js';
++import { createIndexer } from './services/indexer.js';
++import { createRouter } from './routes.js';
++
++const cfg = loadConfig();
++const store = await createStore(cfg);
++await store.init();
++const registry = await createProviderRegistry(cfg);
++const indexer = createIndexer();
++const jev = createJev(cfg);
++
++const deps = { cfg, store, registry, jev, indexer };
++const app = express();
++app.use(cfg.corsOrigin ? cors({ origin: cfg.corsOrigin }) : cors());
++app.use(express.json({ limit: '2mb' }));
++app.use(createRouter(deps));
++
++// Serve the built client when present (same-origin deployment).
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const distDir = path.resolve(__dirname, '../../client/dist');
++if (fs.existsSync(distDir)) {
++  app.use(express.static(distDir));
++  app.get(/^(?!\/api\/).*/, (req, res) => res.sendFile(path.join(distDir, 'index.html')));
++}
++
++app.use((err, req, res, next) => {
++  if (res.headersSent) return next(err);
++  console.error('[wiregi] error:', err.message);
++  res.status(err.status || 500).json({ error: err.message });
++});
++
++app.listen(cfg.port, '0.0.0.0', () => {
++  const active = registry.get(registry.activeId);
++  console.log(`WireGI server → http://localhost:${cfg.port}`);
++  console.log(`  JEV:      ${jev.available ? 'typesafe (live)' : 'unconfigured — LLM fallback active'}`);
++  console.log(`  PROVIDERS: ${registry.entries().length} key(s); active: ${active ? active.provider : 'none'}`);
++  console.log(`  STORE:    ${cfg.db.dataFile}`);
++  console.log(`  NOTE:     provider keys reused from forge/server/.env (no new .env created)`);
++});
+diff --git a/WireGI/server/src/models/project.js b/WireGI/server/src/models/project.js
+new file mode 100644
+index 0000000..7995205
+--- /dev/null
++++ b/WireGI/server/src/models/project.js
+@@ -0,0 +1,47 @@
++// Project + part domain models. Embodies the 3-state model:
++//   IDEA (what the human wants) -> CURRENT (gathered/understood) -> VERIFIED.
++import crypto from 'node:crypto';
++
++export function newId(prefix = 'prj') {
++  return `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
++}
++
++export function makeProject({ goal, constraints = {} }) {
++  const now = new Date().toISOString();
++  return {
++    id: newId('prj'),
++    createdAt: now,
++    updatedAt: now,
++    goal,
++    constraints,
++    status: 'init', // init | researching | awaiting_human | complete
++    state: {
++      idea: { goal, constraints, parts: [] },
++      current: { parts: [] },
++      verified: { parts: [] },
++      parts: [],
++      decisions: [],
++      researchLog: [],
++      chat: [{ role: 'system', content: `Project created: ${goal}`, ts: now }],
++    },
++  };
++}
++
++export function makePart({ name, domain, idea = {} }) {
++  return {
++    id: newId('part'),
++    name,
++    domain,
++    status: 'pending', // pending|researching|data_ready|awaiting_human|verified
++    idea, // IDEA
++    current: null, // CURRENT: gathered/understood/data
++    verified: false, // VERIFIED
++    humanCheckpoint: false,
++    research: [],
++    gathered: [],
++    data: null,
++    checklist: [],
++    openQuestions: [],
++    updatedAt: new Date().toISOString(),
++  };
++}
+diff --git a/WireGI/server/src/routes.js b/WireGI/server/src/routes.js
+new file mode 100644
+index 0000000..9890d71
+--- /dev/null
++++ b/WireGI/server/src/routes.js
+@@ -0,0 +1,24 @@
++import { Router } from 'express';
++import { createProjectRouter } from './projectRoutes.js';
++import { createResearchRouter } from './researchRoutes.js';
++import { createDecisionRouter } from './decisionRoutes.js';
++// Reuse Forge's provider management backend (reads the same .env keys).
++import { createProviderRouter } from '../../../forge/server/src/providerRoutes.js';
++
++export function createRouter(deps) {
++  const r = Router();
++  if (deps.registry) r.use(createProviderRouter(deps));
++  r.use('/api/projects', createProjectRouter(deps));
++  r.use('/api/research', createResearchRouter(deps));
++  r.use('/api/decisions', createDecisionRouter(deps));
++  r.get('/api/health', (req, res) =>
++    res.json({
++      ok: true,
++      service: 'wiregi-server',
++      jev: deps.jev?.available ? 'typesafe' : 'unconfigured (llm fallback)',
++      providers: deps.registry?.candidates().length || 0,
++      time: new Date().toISOString(),
++    }),
++  );
++  return r;
++}
+diff --git a/WireGI/server/src/routes/decisionRoutes.js b/WireGI/server/src/routes/decisionRoutes.js
+new file mode 100644
+index 0000000..cb536b5
+--- /dev/null
++++ b/WireGI/server/src/routes/decisionRoutes.js
+@@ -0,0 +1,20 @@
++import { Router } from 'express';
++import { createDecisionController } from '../controllers/decisionController.js';
++
++export function createDecisionRouter(deps) {
++  const ctrl = createDecisionController(deps);
++  const r = Router();
++
++  // Run a Jev (or fallback) decision directly — used by the UI's decision panel.
++  r.post('/', async (req, res, next) => {
++    try {
++      const { state, questions } = req.body || {};
++      if (!questions || typeof questions !== 'object') return res.status(400).json({ error: 'questions required' });
++      res.json(await ctrl.decide({ state, questions }));
++    } catch (e) {
++      next(e);
++    }
++  });
++
++  return r;
++}
+diff --git a/WireGI/server/src/routes/projectRoutes.js b/WireGI/server/src/routes/projectRoutes.js
+new file mode 100644
+index 0000000..b5fbb11
+--- /dev/null
++++ b/WireGI/server/src/routes/projectRoutes.js
+@@ -0,0 +1,95 @@
++import { Router } from 'express';
++import { createProjectController } from '../controllers/projectController.js';
++
++export function createProjectRouter(deps) {
++  const ctrl = createProjectController(deps);
++  const r = Router();
++
++  // Stream ndjson progress events if the client asks for it; else return JSON.
++  const stream = (res, req, status, work) => {
++    const streamed = (req.get('accept') || '').includes('application/x-ndjson');
++    if (streamed) {
++      res.status(status).set({
++        'Content-Type': 'application/x-ndjson',
++        'Cache-Control': 'no-cache, no-transform',
++        'X-Accel-Buffering': 'no',
++      });
++      res.flushHeaders();
++    }
++    const write = (p) => {
++      if (!res.destroyed) res.write(JSON.stringify(p) + '\n');
++    };
++    const emit = (p) => {
++      if (streamed) write(p);
++    };
++    return Promise.resolve(work(emit))
++      .then((result) => {
++        if (streamed) {
++          write({ type: 'result', result });
++          res.end();
++        } else {
++          res.status(status).json(result);
++        }
++      })
++      .catch((err) => {
++        if (streamed) {
++          write({ type: 'error', error: err.message || 'failed' });
++          res.end();
++        } else {
++          const e = Object.assign(err, { status: err.status || 500 });
++          throw e;
++        }
++      });
++  };
++
++  r.post('/', (req, res, next) => {
++    const goal = String(req.body?.goal || '').trim();
++    if (!goal) return res.status(400).json({ error: 'goal is required' });
++    return stream(
++      res,
++      req,
++      201,
++      (emit) => ctrl.start({ goal, constraints: req.body?.constraints || {}, prefer: req.body?.provider, emit }),
++    ).catch(next);
++  });
++
++  r.get('/', async (req, res, next) => {
++    try {
++      res.json(await deps.store.list());
++    } catch (e) {
++      next(e);
++    }
++  });
++
++  r.get('/:id', async (req, res, next) => {
++    try {
++      const p = await deps.store.get(req.params.id);
++      if (!p) return res.status(404).json({ error: 'not found' });
++      res.json(p);
++    } catch (e) {
++      next(e);
++    }
++  });
++
++  r.delete('/:id', async (req, res, next) => {
++    try {
++      await deps.store.remove(req.params.id);
++      res.json({ ok: true });
++    } catch (e) {
++      next(e);
++    }
++  });
++
++  r.post('/:id/messages', (req, res, next) => {
++    const text = String(req.body?.text || '').trim();
++    if (!text) return res.status(400).json({ error: 'text is required' });
++    return stream(
++      res,
++      req,
++      200,
++      (emit) => ctrl.message({ projectId: req.params.id, text, prefer: req.body?.provider, emit }),
++    ).catch(next);
++  });
++
++  return r;
++}
+diff --git a/WireGI/server/src/routes/researchRoutes.js b/WireGI/server/src/routes/researchRoutes.js
+new file mode 100644
+index 0000000..0a42ed2
+--- /dev/null
++++ b/WireGI/server/src/routes/researchRoutes.js
+@@ -0,0 +1,21 @@
++import { Router } from 'express';
++import { createResearchController } from '../controllers/researchController.js';
++
++export function createResearchRouter(deps) {
++  const ctrl = createResearchController(deps);
++  const r = Router();
++
++  r.post('/', async (req, res, next) => {
++    try {
++      const q = String(req.body?.query || '').trim();
++      if (!q) return res.status(400).json({ error: 'query required' });
++      res.json(await ctrl.search({ query: q }));
++    } catch (e) {
++      next(e);
++    }
++  });
++
++  r.get('/index', (req, res) => res.json(deps.indexer?.all() || {}));
++
++  return r;
++}
+diff --git a/WireGI/server/src/services/agent.js b/WireGI/server/src/services/agent.js
+new file mode 100644
+index 0000000..a9379a1
+--- /dev/null
++++ b/WireGI/server/src/services/agent.js
+@@ -0,0 +1,386 @@
++// The WireGI agent: prompt -> Jev decisions -> parallel research per part ->
++// merge into durable IDEA/CURRENT/VERIFIED state -> streamed communication.
++import { generateJSON, generate } from './llm.js';
++import { makeProject, makePart } from '../models/project.js';
++import { researchPart } from './research.js';
++import { triagePart, decomposePlan, affectedParts, isSufficient, SAFETY_CRITICAL } from './gate.js';
++
++const SYS_DECOMPOSE = `You decompose a build request into the concrete PARTS needed to actually make it.
++Return JSON ONLY: { "classification": string, "domains": [string], "parts": [ { "name": string, "domain": string, "idea": string } ] }.
++Cover hardware, firmware/software, tools, and verification. For a drone include: frame, motors, ESC (electronic speed controller), flight controller, propellers, receiver/radio, video system, battery, firmware.`;
++
++function num(v) {
++  const n = Number(v);
++  return Number.isFinite(n) ? n : null;
++}
++function answerValue(a) {
++  if (a == null) return null;
++  if (typeof a !== 'object') return a;
++  if ('value' in a) return a.value;
++  if ('probability' in a) return a.probability;
++  if ('score' in a) return a.score;
++  if ('choice' in a) return a.choice;
++  return a;
++}
++function answerConfidence(a) {
++  return a && typeof a === 'object' ? num(a.confidence ?? a.probability ?? a.score) : null;
++}
++function noulTrue(a) {
++  const v = answerValue(a);
++  if (typeof v === 'boolean') return v;
++  const n = num(v);
++  return n != null ? n >= 0.5 : false;
++}
++
++export function createAgent({ cfg, registry, jev, store, indexer }) {
++  function logDecision(project, label, res) {
++    project.state.decisions.push({
++      label,
++      at: new Date().toISOString(),
++      source: res?.source,
++      model: res?.model,
++      answers: res?.answers ?? res,
++    });
++  }
++
++  function applyResearch(part, project, result) {
++    part.status = result.humanCheckpoint ? 'awaiting_human' : 'data_ready';
++    part.current = { gathered: result.gathered, understand: result.understand, data: result.data };
++    part.research = result.research;
++    part.humanCheckpoint = result.humanCheckpoint;
++    part.checklist = result.data?.checklist || [];
++    part.openQuestions = result.understand?.openQuestions || [];
++    part.updatedAt = new Date().toISOString();
++    const existing = project.state.current.parts.find((p) => p.id === part.id);
++    const entry = {
++      id: part.id,
++      name: part.name,
++      domain: part.domain,
++      data: result.data,
++      humanCheckpoint: result.humanCheckpoint,
++      web: result.web,
++    };
++    if (existing) Object.assign(existing, entry);
++    else project.state.current.parts.push(entry);
++    project.state.researchLog.push({ part: part.name, web: result.web, ts: part.updatedAt });
++  }
++
++  async function researchOne(part, project, emit) {
++    emit({ type: 'part', stage: 'start', partId: part.id, part: part.name });
++
++    // Jev gate (Gap 1): decide the cheapest safe research path. Fails safe to LLM.
++    const triage = await triagePart({ part, project, indexer, jev, registry });
++    emit({
++      type: 'research',
++      stage: 'gate',
++      partId: part.id,
++      part: part.name,
++      message: `Gate (${triage.usedJev ? 'Jev' : 'LLM-fallback'}): ${triage.action} — ${triage.reason}`,
++    });
++
++    // dup → copy a sibling's data (0 LLM call).
++    if (triage.action === 'dup') {
++      const src = project.state.parts.find(
++        (p) => p.id !== part.id && p.current?.data && (!triage.source || p.name === triage.source),
++      );
++      if (src) {
++        const result = {
++          research: src.research || [],
++          gathered: src.gathered || [],
++          understand: src.current?.understand || { validation: [], openQuestions: [], conflicts: [] },
++          data: src.data,
++          humanCheckpoint: Boolean(src.humanCheckpoint),
++          web: { engine: 'reuse', count: 0 },
++        };
++        applyResearch(part, project, result);
++        emit({
++          type: 'part',
++          stage: 'done',
++          partId: part.id,
++          part: part.name,
++          data: result.data,
++          humanCheckpoint: result.humanCheckpoint,
++          note: 'reused from ' + src.name,
++        });
++        return result;
++      }
++      // fall through to a full pass if no source was found
++    }
++
++    // skip → offload trivial part to the human (0 LLM call).
++    if (triage.action === 'skip') {
++      const result = {
++        research: [],
++        gathered: [],
++        understand: {
++          validation: [],
++          openQuestions: ['Part marked trivial by gate — please provide specifics.'],
++          conflicts: [],
++        },
++        data: { bomRow: '— provide —', wiring: '— provide —', config: '— provide —', checklist: ['Define this part'] },
++        humanCheckpoint: true,
++        web: { engine: 'skip', count: 0 },
++      };
++      applyResearch(part, project, result);
++      emit({
++        type: 'part',
++        stage: 'done',
++        partId: part.id,
++        part: part.name,
++        data: result.data,
++        humanCheckpoint: true,
++        note: 'skipped (trivial) — needs your input',
++      });
++      return result;
++    }
++
++    // light → cheaper model; full → full model.
++    const prefer = triage.action === 'light' ? triage.prefer : undefined;
++    const result = await researchPart({ part, project, registry, emit, indexer, prefer });
++    applyResearch(part, project, result);
++
++    // T4 sufficiency → push to human instead of an auto-repair LLM call.
++    if (!(await isSufficient({ part, project, jev, registry }))) {
++      part.humanCheckpoint = true;
++      if (part.status === 'data_ready') part.status = 'awaiting_human';
++      part.openQuestions = [
++        ...(part.openQuestions || []),
++        'Jev flagged gathered data as insufficient — please verify/refine.',
++      ];
++    }
++    emit({
++      type: 'part',
++      stage: 'done',
++      partId: part.id,
++      part: part.name,
++      data: result.data,
++      humanCheckpoint: part.humanCheckpoint,
++    });
++    return result;
++  }
++
++  function buildSummary(project) {
++    const lines = [
++      `# ${project.goal}`,
++      '',
++      `Status: **${project.status}**`,
++      `Classification: ${project.state.idea.classification || '?'} · Domains: ${(project.state.idea.domains || []).join(', ')}`,
++      '',
++      '## Parts',
++      '',
++    ];
++    for (const p of project.state.parts) {
++      lines.push(`- **${p.name}** (${p.domain}) — ${p.status}${p.humanCheckpoint ? ' · ⚠ needs your eyes' : ''}`);
++      if (p.current?.data?.bomRow) lines.push(`    - BOM: ${p.current.data.bomRow}`);
++      if (p.current?.data?.wiring) lines.push(`    - Wiring: ${p.current.data.wiring}`);
++      if ((p.checklist || []).length) lines.push(`    - Checklist: ${p.checklist.join('; ')}`);
++      if ((p.openQuestions || []).length) lines.push(`    - Open: ${p.openQuestions.join('; ')}`);
++    }
++    return lines.join('\n');
++  }
++
++  async function runProject(goal, constraints, { emit = () => {}, prefer } = {}) {
++    const project = makeProject({ goal, constraints });
++
++    // D1 — Jev classifies the build and its domains.
++    const d1 = await jev.decide(
++      {
++        state: { operation: 'classify', goal, constraints },
++        questions: {
++          classification: {
++            type: 'choice',
++            instructions: 'What kind of build is this?',
++            criteria: ['electronics', 'mechanical', 'embedded/MCU', 'software', 'robotics', 'mixed'],
++          },
++          domains: {
++            type: 'choice',
++            instructions: 'Which domains does it span? (pick primary)',
++            criteria: ['hardware', 'firmware', 'web', 'mechanical', 'robotics', 'mixed'],
++          },
++        },
++      },
++      { registry },
++    );
++    logDecision(project, 'D1 classify', d1);
++    emit({ type: 'decision', label: 'D1 classify', answers: d1.answers, source: d1.source });
++
++    // D2/D3 — Jev steers breadth + risk bias; the LLM still writes the parts.
++    const plan = await decomposePlan({ goal, constraints, jev, registry });
++    emit({
++      type: 'decision',
++      label: 'D2/D3 decompose-plan',
++      answers: plan.usedJev ? { breadth: plan.breadthHint, risk: plan.riskBias } : {},
++      source: plan.usedJev ? 'jev' : 'llm-fallback',
++    });
++    const decomp = await generateJSON({
++      registry,
++      system: SYS_DECOMPOSE + (plan.breadthHint ? ` Aim for about ${plan.breadthHint} parts.` : '') + plan.riskBias,
++      user: `GOAL: ${goal}\nCONSTRAINTS: ${JSON.stringify(constraints)}`,
++      temperature: 0.3,
++      emit,
++      prefer,
++    });
++    const parts = (decomp.parts || []).map((p) =>
++      makePart({ name: p.name, domain: p.domain, idea: { summary: p.idea } }),
++    );
++    project.state.parts = parts;
++    project.state.idea = {
++      goal,
++      constraints,
++      classification: decomp.classification,
++      domains: decomp.domains,
++      parts: parts.map((p) => ({ name: p.name, domain: p.domain })),
++    };
++    project.state.current.parts = [];
++    await store.create(project);
++    emit({
++      type: 'project',
++      stage: 'decomposed',
++      projectId: project.id,
++      parts: parts.map((p) => ({ id: p.id, name: p.name, domain: p.domain })),
++    });
++
++    // Parallel research -> gather -> understand -> data for each part.
++    await Promise.all(parts.map((p) => researchOne(p, project, emit)));
++    await store.save(project);
++
++    // D4/D5/D6 — completion gate, human-eyes gate, stop condition.
++    const dCheck = await jev.decide(
++      {
++        state: {
++          operation: 'verify',
++          goal,
++          parts: project.state.current.parts.map((p) => ({
++            name: p.name,
++            hasData: !!p.data,
++            humanCheckpoint: p.humanCheckpoint,
++          })),
++        },
++        questions: {
++          complete: {
++            type: 'noul',
++            instructions: "Is every part's gathered data complete and conflict-free enough to start building?",
++          },
++          needsHuman: {
++            type: 'noul',
++            instructions: 'Does any part REQUIRE human eyes (soldering/eyeball confirmation) before it is verified?',
++          },
++          done: {
++            type: 'noul',
++            instructions: 'Is CURRENT state effectively equal to IDEA state for all verified parts? This is the stop condition.',
++          },
++        },
++      },
++      { registry },
++    );
++    logDecision(project, 'D4-D6 verify', dCheck);
++    emit({ type: 'decision', label: 'D4-D6 verify', answers: dCheck.answers, source: dCheck.source });
++
++    project.status = project.state.current.parts.some((p) => p.humanCheckpoint) ? 'awaiting_human' : 'complete';
++    if (noulTrue(dCheck.answers?.done)) project.status = 'complete';
++    project.state.chat.push({ role: 'agent', content: buildSummary(project), ts: new Date().toISOString() });
++    await store.save(project);
++    emit({ type: 'done', projectId: project.id, status: project.status, summary: buildSummary(project) });
++    return project;
++  }
++
++  async function continueProject(projectId, text, { emit = () => {}, prefer } = {}) {
++    const project = await store.get(projectId);
++    if (!project) throw Object.assign(new Error('project not found'), { status: 404 });
++    project.state.chat.push({ role: 'user', content: text, ts: new Date().toISOString() });
++    emit({ type: 'chat', role: 'user', content: text });
++
++    const partNames = project.state.parts.map((p) => p.name);
++    const dMsg = await jev.decide(
++      {
++        state: {
++          operation: 'message',
++          goal: project.goal,
++          text,
++          parts: project.state.parts.map((p) => ({ name: p.name, status: p.status })),
++        },
++        questions: {
++          intent: {
++            type: 'choice',
++            instructions: 'What is the user doing with this message?',
++            criteria: ['approve', 'add_constraint', 'revise_part', 'ask', 'other'],
++          },
++          target: {
++            type: 'choice',
++            instructions: 'Which part is the message about (if any)?',
++            criteria: ['all', 'none', ...partNames],
++          },
++        },
++      },
++      { registry },
++    );
++    logDecision(project, 'message', dMsg);
++    emit({ type: 'decision', label: 'message', answers: dMsg.answers, source: dMsg.source });
++
++    const intent = answerValue(dMsg.answers?.intent);
++    const target = answerValue(dMsg.answers?.target);
++
++    if (intent === 'approve') {
++      const targets =
++        target && target !== 'none' && target !== 'all'
++          ? project.state.parts.filter((p) => p.name.toLowerCase().includes(String(target).toLowerCase()))
++          : project.state.parts;
++      for (const p of targets) {
++        if (p.current?.data) {
++          p.verified = true;
++          p.status = 'verified';
++          if (!project.state.verified.parts.find((x) => x.id === p.id)) {
++            project.state.verified.parts.push({ id: p.id, name: p.name });
++          }
++        }
++      }
++      project.status = project.state.parts.every((p) => p.verified) ? 'complete' : 'awaiting_human';
++      project.state.chat.push({
++        role: 'agent',
++        content: `Marked ${targets.filter((p) => p.verified).length} part(s) as verified. Status: ${project.status}.`,
++        ts: new Date().toISOString(),
++      });
++    } else if (intent === 'add_constraint' || intent === 'revise_part') {
++      const extracted = await generateJSON({
++        registry,
++        system:
++          'Extract updated constraints from the user message. Return JSON: { "constraints": { <key>: <value> } }. Only include keys the user actually changed or added.',
++        user: `GOAL: ${project.goal}\nCURRENT CONSTRAINTS: ${JSON.stringify(project.constraints)}\nUSER MESSAGE: ${text}`,
++        emit,
++        prefer,
++      });
++      project.constraints = { ...project.constraints, ...(extracted.constraints || {}) };
++      // T5 — only re-research parts the change actually touches (+ always safety-critical).
++      const affected = await affectedParts({ project, text, jev, registry });
++      const safetyIds = project.state.parts
++        .filter((p) => SAFETY_CRITICAL.test(p.name) || SAFETY_CRITICAL.test(p.domain || ''))
++        .map((p) => p.id);
++      const ids = [...new Set([...affected, ...safetyIds])];
++      for (const p of project.state.parts) if (ids.includes(p.id)) await researchOne(p, project, emit);
++      project.status = project.state.current.parts.some((p) => p.humanCheckpoint) ? 'awaiting_human' : 'complete';
++      project.state.chat.push({
++        role: 'agent',
++        content: 'Updated constraints and re-ran research for all parts. Status: ' + project.status + '.',
++        ts: new Date().toISOString(),
++      });
++    } else {
++      const reply = await generate({
++        registry,
++        system:
++          'You are WireGI, an agentic build assistant. Answer the user using the project state. Be concise. Ask clarifying questions if needed.',
++        user: `GOAL: ${project.goal}\nCONSTRAINTS: ${JSON.stringify(project.constraints)}\nPARTS:\n${project.state.parts
++          .map((p) => `- ${p.name} (${p.status}): ${p.current?.data?.bomRow || ''}`)
++          .join('\n')}\nUSER: ${text}`,
++        emit,
++        prefer,
++      });
++      project.state.chat.push({ role: 'agent', content: reply, ts: new Date().toISOString() });
++    }
++
++    await store.save(project);
++    emit({ type: 'done', projectId: project.id, status: project.status, summary: buildSummary(project) });
++    return project;
++  }
++
++  return { runProject, continueProject, buildSummary };
++}
+diff --git a/WireGI/server/src/services/gate.js b/WireGI/server/src/services/gate.js
+new file mode 100644
+index 0000000..11d65a4
+--- /dev/null
++++ b/WireGI/server/src/services/gate.js
+@@ -0,0 +1,243 @@
++// Gate — Jev-gated pre-LLM decisions (Gap 1 / optimization A).
++//
++// Core pattern (OpenRouter/Jev reference): "Route with Jev, compute in code,
++// write with an LLM." Every part research used to be an unconditional LLM call.
++// Now a single cheap Jev call (only when real Jev is configured) decides the
++// cheapest safe path: reuse a sibling, skip (offload to human), use a cheap
++// model, or do a full LLM pass.
++//
++// FAIL-SAFE RULE (user requirement): if Jev is unavailable, slow, or returns a
++// bad decision, we route straight to the LLM. A missing/late decision never
++// blocks the build — we use LLM knowledge.
++
++const JEV_TIMEOUT_MS = 5000;
++
++// Parts where wrong math is dangerous: ALWAYS a full LLM pass, never gated.
++export const SAFETY_CRITICAL =
++  /battery|esc|electronic speed|motor|\bkv\b|propulsion|propeller|flight controller|\bfc\b|firmware|power|current|voltage/i;
++
++// Confidence policy — tune on your own traffic (OpenRouter guidance: start 0.8).
++const REUSE_CONF = 0.75; // needed=no  → skip LLM
++const DUP_CONF = 0.70; // dup=yes    → copy sibling
++const SKIP_CONF = 0.70; // tier=skip  → offload to human
++const ACT_CONF = 0.8; // general floor for acting on a typed answer
++
++// Cheapest-capable model preference for the "light" tier.
++const CHEAP_PREFERENCE = ['ollama', 'groq', 'openrouter', 'gemini', 'llm', 'bedrock'];
++
++function num(v) {
++  const n = Number(v);
++  return Number.isFinite(n) ? n : null;
++}
++function answerValue(a) {
++  if (a == null) return null;
++  if (typeof a !== 'object') return a;
++  if ('value' in a) return a.value;
++  if ('noul' in a) return a.noul;
++  if ('probability' in a) return a.probability;
++  if ('score' in a) return a.score;
++  if ('choice' in a) return a.choice;
++  return a;
++}
++function answerConfidence(a) {
++  return a && typeof a === 'object' ? num(a.confidence ?? a.probability ?? a.score) : null;
++}
++function noulTrue(a) {
++  const v = answerValue(a);
++  if (typeof v === 'boolean') return v;
++  const n = num(v);
++  return n != null ? n >= 0.5 : false;
++}
++
++// Race a promise against a timeout; on timeout/throw, return null (→ fail safe).
++async function withTimeout(promise, ms) {
++  let t;
++  const guard = new Promise((_, rej) => {
++    t = setTimeout(() => rej(new Error('jev-timeout')), ms);
++  });
++  try {
++    const r = await Promise.race([promise, guard]);
++    clearTimeout(t);
++    return r;
++  } catch {
++    clearTimeout(t);
++    return null;
++  }
++}
++
++function cheapestPrefer(registry) {
++  const cands = (registry && registry.candidates && registry.candidates()) || [];
++  for (const p of CHEAP_PREFERENCE) {
++    const hit = cands.find((c) => c.provider === p);
++    if (hit) return hit.provider;
++  }
++  return undefined;
++}
++
++// Decide how to research ONE part.
++// Returns { action:'dup'|'skip'|'light'|'full', source?, prefer?, reason, confidence, usedJev }.
++export async function triagePart({ part, project, indexer, jev, registry }) {
++  // Safety-critical → always full LLM, no gate.
++  if (SAFETY_CRITICAL.test(part.name) || SAFETY_CRITICAL.test(part.domain || '')) {
++    return { action: 'full', reason: 'safety-critical part — forced full LLM research', confidence: 1, usedJev: false };
++  }
++  // No real Jev → skip the gate, default LLM path.
++  if (!jev || !jev.available) {
++    return { action: 'full', reason: 'no Jev configured — default LLM path', confidence: 1, usedJev: false };
++  }
++
++  const indexed = (indexer && indexer.all ? Object.values(indexer.all()) : [])
++    .slice(0, 12)
++    .map((e) => ({ topic: e.topic, summary: e.summary }));
++  const siblings = project.state.parts
++    .filter((p) => p.id !== part.id)
++    .map((p) => ({ name: p.name, hasData: !!p.current?.data }));
++
++  const questions = {
++    needed: {
++      type: 'noul',
++      instructions:
++        'Given the indexed prior findings, is a fresh LLM research call actually needed for this part, or do we already have enough? Answer LOW only if existing findings already adequately cover it.',
++    },
++    tier: {
++      type: 'choice',
++      instructions: 'Complexity/risk tier that should do the work for this part.',
++      criteria: ['skip', 'light', 'full'],
++    },
++    risk: {
++      type: 'score',
++      instructions: 'How safety/performance-critical is this part (1 trivial … 5 critical; power/propulsion math is high).',
++      criteria: ['trivial', 'low', 'medium', 'high', 'critical'],
++    },
++    dup: {
++      type: 'noul',
++      instructions: 'Does this part duplicate another already-researched part in this project?',
++    },
++  };
++  const state = {
++    operation: 'triage',
++    part: part.name,
++    domain: part.domain,
++    idea: part.idea,
++    indexed,
++    siblings,
++  };
++
++  const res = await withTimeout(jev.decide({ state, questions }, { registry }), JEV_TIMEOUT_MS);
++  if (!res || !res.answers) {
++    return { action: 'full', reason: 'Jev decision unavailable/slow — routed to LLM', confidence: 1, usedJev: false };
++  }
++  const a = res.answers;
++  const conf = (id) => answerConfidence(a[id]);
++  const val = (id) => answerValue(a[id]);
++
++  // Duplicate → copy sibling data (0 LLM).
++  if (noulTrue(a.dup) && (conf('dup') ?? 0) >= DUP_CONF) {
++    const src = siblings.find((s) => s.hasData);
++    return {
++      action: 'dup',
++      source: src?.name,
++      reason: 'duplicate of an already-researched part',
++      confidence: conf('dup'),
++      usedJev: true,
++    };
++  }
++  // Not needed → skip LLM (offload trivial to human).
++  if (!noulTrue(a.needed) && (conf('needed') ?? 0) >= REUSE_CONF) {
++    return { action: 'skip', reason: 'prior findings sufficient — offloaded to human input', confidence: conf('needed'), usedJev: true };
++  }
++  const risk = num(val('risk')) ?? 1;
++  const tier = String(val('tier') || 'full').toLowerCase();
++  // High risk → force full.
++  if (risk >= 4) return { action: 'full', reason: `high risk (${risk}) — full LLM`, confidence: conf('risk'), usedJev: true };
++  if (tier === 'full') return { action: 'full', reason: 'Jev tier=full', confidence: conf('tier'), usedJev: true };
++  if (tier === 'skip' && risk <= 2)
++    return { action: 'skip', reason: 'trivial part — offloaded to human', confidence: conf('tier'), usedJev: true };
++  if (tier === 'light')
++    return {
++      action: 'light',
++      prefer: cheapestPrefer(registry),
++      reason: 'Jev tier=light (cheaper model)',
++      confidence: conf('tier'),
++      usedJev: true,
++    };
++  // Below confidence floors → fail safe to full LLM.
++  return {
++    action: 'full',
++    reason: 'below confidence floor — default LLM',
++    confidence: Math.max(conf('tier') ?? 0, conf('needed') ?? 0),
++    usedJev: true,
++  };
++}
++
++// D2/D3: breadth + risk bias for decomposition. The LLM still writes the parts;
++// Jev only steers how many and how carefully.
++export async function decomposePlan({ goal, constraints, jev, registry }) {
++  if (!jev || !jev.available) return { breadthHint: 0, riskBias: '', usedJev: false };
++  const questions = {
++    breadth: {
++      type: 'choice',
++      instructions: 'How many distinct parts should this build be decomposed into?',
++      criteria: ['minimal (~4)', 'standard (~8)', 'detailed (~12)'],
++    },
++    risk: {
++      type: 'score',
++      instructions: 'Overall build risk if done wrong (1 low … 5 high).',
++      criteria: ['low', 'moderate', 'elevated', 'high', 'critical'],
++    },
++  };
++  const res = await withTimeout(
++    jev.decide({ state: { operation: 'decompose', goal, constraints }, questions }, { registry }),
++    JEV_TIMEOUT_MS,
++  );
++  if (!res || !res.answers) return { breadthHint: 0, riskBias: '', usedJev: false };
++  const breadth = String(answerValue(res.answers.breadth) || '').toLowerCase();
++  const hint = breadth.includes('minimal') ? 5 : breadth.includes('detailed') ? 12 : 8;
++  const risk = num(answerValue(res.answers.risk)) ?? 2;
++  return {
++    breadthHint: hint,
++    riskBias:
++      risk >= 4 ? ' Pay special attention to safety-critical parts (power, propulsion, firmware).' : '',
++    usedJev: true,
++  };
++}
++
++// T5: which parts a constraint change actually touches.
++export async function affectedParts({ project, text, jev, registry }) {
++  const parts = project.state.parts;
++  if (!jev || !jev.available || parts.length === 0) return parts.map((p) => p.id); // fail safe: all
++  const questions = {};
++  for (const p of parts) {
++    questions[`aff_${p.id}`] = {
++      type: 'noul',
++      instructions: `Does the user's latest message require re-researching the "${p.name}" part specifically? "${text}"`,
++    };
++  }
++  const res = await withTimeout(
++    jev.decide({ state: { operation: 'affected', goal: project.goal, message: text }, questions }, { registry }),
++    JEV_TIMEOUT_MS,
++  );
++  if (!res || !res.answers) return parts.map((p) => p.id);
++  const ids = parts.filter((p) => noulTrue(res.answers[`aff_${p.id}`])).map((p) => p.id);
++  return ids.length ? ids : parts.map((p) => p.id); // if Jev says none, still re-run all (safe)
++}
++
++// T4: is gathered data sufficient? If not, push to human rather than auto-repair.
++export async function isSufficient({ part, project, jev, registry }) {
++  if (!jev || !jev.available) return true;
++  const questions = {
++    sufficient: {
++      type: 'noul',
++      instructions: 'Is the gathered data for this part complete enough to build from, with no blocking unknowns?',
++    },
++  };
++  const res = await withTimeout(
++    jev.decide(
++      { state: { operation: 'sufficiency', part: part.name, data: part.current?.data, openQuestions: part.openQuestions || [] }, questions },
++      { registry },
++    ),
++    JEV_TIMEOUT_MS,
++  );
++  if (!res || !res.answers) return true;
++  return noulTrue(res.answers.sufficient);
++}
+diff --git a/WireGI/server/src/services/indexer.js b/WireGI/server/src/services/indexer.js
+new file mode 100644
+index 0000000..75484f1
+--- /dev/null
++++ b/WireGI/server/src/services/indexer.js
+@@ -0,0 +1,52 @@
++// Lightweight research index for speed-up: avoids re-searching similar topics.
++// Persisted to data/wiregi-index.json so findings survive restarts.
++import fs from 'node:fs';
++import path from 'node:path';
++
++export function createIndexer() {
++  const file = path.resolve('./data/wiregi-index.json');
++  let store = {};
++  try {
++    store = JSON.parse(fs.readFileSync(file, 'utf8'));
++  } catch {
++    store = {};
++  }
++
++  function tokens(s) {
++    return new Set(
++      String(s)
++        .toLowerCase()
++        .split(/[^a-z0-9]+/)
++        .filter((w) => w.length > 3),
++    );
++  }
++
++  function add(entry) {
++    store[entry.topic.toLowerCase()] = { ...entry, ts: new Date().toISOString() };
++    try {
++      fs.mkdirSync(path.dirname(file), { recursive: true });
++      fs.writeFileSync(file, JSON.stringify(store, null, 2));
++    } catch {
++      /* best-effort persistence */
++    }
++  }
++
++  // Returns the best prior finding when keyword overlap is high.
++  function find(query, minOverlap = 2) {
++    const qt = tokens(query);
++    let best = null;
++    let bestScore = 0;
++    for (const key of Object.keys(store)) {
++      const ot = tokens(key + ' ' + (store[key].summary || ''));
++      let overlap = 0;
++      for (const w of qt) if (ot.has(w)) overlap += 1;
++      if (overlap > bestScore) {
++        bestScore = overlap;
++        best = store[key];
++      }
++    }
++    return bestScore >= minOverlap ? { ...best, overlap: bestScore } : null;
++  }
++
++  return { add, find, all: () => store };
++}
+diff --git a/WireGI/server/src/services/jevClient.js b/WireGI/server/src/services/jevClient.js
+new file mode 100644
+index 0000000..55ce2d8
+--- /dev/null
++++ b/WireGI/server/src/services/jevClient.js
+@@ -0,0 +1,44 @@
++// Jev decision client. Primary: Forge's real TypeSafe Jev provider.
++// Fallback: if no TYPESAFE_API_KEY is configured, the LLM acts as a typed
++// decision model so the flow still runs (decisions "work properly" either way).
++import { createJevProvider } from '../../../forge/server/src/providers/jev.js';
++import { generateJSON } from './llm.js';
++
++export function createJev(cfg) {
++  let live = null;
++  try {
++    live = createJevProvider(cfg);
++  } catch {
++    live = null;
++  }
++
++  return {
++    available: Boolean(live),
++
++    // questions: { id: { type:'choice'|'score'|'noul', instructions, criteria? } }
++    async decide({ state, questions }, { registry } = {}) {
++      if (live) {
++        const res = await live({ state, questions });
++        return { source: 'jev', answers: res.answers || res, model: res.model, provider: res.provider };
++      }
++
++      const qText = Object.entries(questions)
++        .map(([id, q]) => {
++          const crit = q.criteria ? `\n  options: ${JSON.stringify(q.criteria)}` : '';
++          return `- id: ${id}\n  type: ${q.type}\n  question: ${q.instructions}${crit}`;
++        })
++        .join('\n');
++
++      const sys = `You are a typed decision model (System One). Given STATE and TYPED QUESTIONS, return JSON only:
++{ "answers": { "<id>": <answer object> } }
++Answer shapes:
++  choice -> { "type":"choice", "value": <one of criteria or null>, "confidence": 0..1 }
++  score  -> { "type":"score", "value": <number>, "confidence": 0..1 }
++  noul   -> { "type":"noul", "value": <true|false>, "probability": 0..1, "confidence": 0..1 }
++No prose. Be decisive.`;
++      const user = `STATE:\n${JSON.stringify(state, null, 2)}\n\nQUESTIONS:\n${qText}`;
++      const out = await generateJSON({ registry, system: sys, user, temperature: 0 });
++      return { source: 'llm-fallback', answers: out.answers || {}, model: 'llm-fallback' };
++    },
++  };
++}
+diff --git a/WireGI/server/src/services/llm.js b/WireGI/server/src/services/llm.js
+new file mode 100644
+index 0000000..12ead02
+--- /dev/null
++++ b/WireGI/server/src/services/llm.js
+@@ -0,0 +1,33 @@
++// Generic LLM generation through Forge's failover loop (reuses Forge providers).
++import { runWithFailover, callProviderEntry } from '../../../forge/server/src/providers/failover.js';
++
++// Plain text generation. `registry` is Forge's ProviderRegistry.
++export async function generate({
++  registry, system, user, temperature = 0.2, maxTokens = 4096, emit, prefer, operation = 'generate',
++}) {
++  const { result } = await runWithFailover({
++    registry,
++    emit,
++    prefer,
++    operation,
++    work: (entry) => callProviderEntry(entry, { system, user, temperature, maxTokens }),
++  });
++  return String(result);
++}
++
++// Generate and coerce to JSON (tolerates code fences and surrounding prose).
++export async function generateJSON(opts) {
++  const text = await generate(opts);
++  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
++  try {
++    return JSON.parse(cleaned);
++  } catch {
++    /* fall through to brace extraction */
++  }
++  const start = cleaned.indexOf('{');
++  const end = cleaned.lastIndexOf('}');
++  if (start >= 0 && end > start) {
++    return JSON.parse(cleaned.slice(start, end + 1));
++  }
++  throw new Error('LLM did not return valid JSON: ' + text.slice(0, 200));
++}
+diff --git a/WireGI/server/src/services/research.js b/WireGI/server/src/services/research.js
+new file mode 100644
+index 0000000..cbc263d
+--- /dev/null
++++ b/WireGI/server/src/services/research.js
+@@ -0,0 +1,119 @@
++// Research pipeline: research -> gather -> understand -> data, per part.
++// Includes live web search (Tavily/Brave if a key is in the Forge .env) and an
++// indexer speed-up that reuses prior findings for similar topics.
++import { generate, generateJSON } from './llm.js';
++
++// Live web search. Uses TAVILY_API_KEY or BRAVE_API_KEY when present (read from
++// the Forge environment). Returns null when no key is configured — never mocks.
++export async function webSearch(query, { maxResults = 5 } = {}) {
++  const tavily = process.env.TAVILY_API_KEY;
++  const brave = process.env.BRAVE_API_KEY;
++  try {
++    if (tavily) {
++      const r = await fetch('https://api.tavily.com/search', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ api_key: tavily, query, max_results: maxResults, search_depth: 'advanced' }),
++      });
++      if (r.ok) {
++        const d = await r.json();
++        const items = (d.results || []).map((x) => ({ title: x.title, url: x.url, snippet: x.content }));
++        return { engine: 'tavily', query, items };
++      }
++    }
++    if (brave) {
++      const r = await fetch(
++        `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}`,
++        { headers: { Accept: 'application/json', 'X-Subscription-Token': brave } },
++      );
++      if (r.ok) {
++        const d = await r.json();
++        const items = (d.web?.results || []).map((x) => ({ title: x.title, url: x.url, snippet: x.description }));
++        return { engine: 'brave', query, items };
++      }
++    }
++  } catch {
++    /* network issues -> treat as no web */
++  }
++  return null;
++}
++
++const SYS_RESEARCH = `You are the research lead for a physical/software build project.
++For the given PART, run a research -> gather -> understand -> data pass.
++Return JSON ONLY:
++{
++  "research": [ "short note with source URL where known" ],
++  "gathered": [ { "field": string, "value": string, "source": string } ],
++  "understand": { "validation": [string], "openQuestions": [string], "conflicts": [string] },
++  "data": { "bomRow": string, "wiring": string, "config": string, "checklist": [string] },
++  "humanCheckpoint": boolean
++}
++Be concrete and buildable. Cite real part numbers, specs, and prices when known.
++If anything is uncertain, put it in openQuestions and set humanCheckpoint true.`;
++
++export async function researchPart({ part, project, registry, emit, indexer, prefer }) {
++  const topic = `${project.goal} — ${part.name} (${part.domain})`;
++  emit?.({ type: 'research', stage: 'research', partId: part.id, part: part.name, message: `Researching ${part.name}…` });
++
++  // Indexing speed-up: reuse prior findings for similar topics.
++  const cached = indexer?.find(topic);
++  let web = null;
++  if (cached) {
++    emit?.({
++      type: 'research',
++      stage: 'index',
++      partId: part.id,
++      part: part.name,
++      message: `Index hit — reusing prior research on "${cached.topic}".`,
++    });
++  } else {
++    web = await webSearch(topic);
++    if (web && web.items.length) {
++      emit?.({
++        type: 'research',
++        stage: 'web',
++        partId: part.id,
++        part: part.name,
++        message: `Web search (${web.engine}): ${web.items.length} results.`,
++        results: web.items,
++      });
++      indexer?.add({
++        topic,
++        summary: web.items.map((i) => i.title).join('; '),
++        sources: web.items.map((i) => i.url),
++        partName: part.name,
++      });
++    } else {
++      emit?.({
++        type: 'research',
++        stage: 'web',
++        partId: part.id,
++        part: part.name,
++        message: 'No web-search key configured — using model knowledge.',
++      });
++    }
++  }
++
++  const sources = web?.items?.length
++    ? web.items.map((i) => `- ${i.title} (${i.url}): ${i.snippet}`).join('\n')
++    : '(no live web results — relying on model knowledge)';
++  const constraints = JSON.stringify(project.constraints || {});
++
++  const user = `PROJECT GOAL: ${project.goal}
++CONSTRAINTS: ${constraints}
++PART: ${part.name} (domain: ${part.domain})
++IDEA for this part: ${JSON.stringify(part.idea || {})}
++LIVE WEB RESULTS:
++${sources}`;
++
++  const out = await generateJSON({ registry, system: SYS_RESEARCH, user, temperature: 0.2, maxTokens: 4096, emit, prefer });
++
++  return {
++    research: out.research || [],
++    gathered: out.gathered || [],
++    understand: out.understand || { validation: [], openQuestions: [], conflicts: [] },
++    data: out.data || null,
++    humanCheckpoint: Boolean(out.humanCheckpoint) || (out.understand?.openQuestions || []).length > 0,
++    web: web ? { engine: web.engine, count: web.items.length } : { engine: 'none', count: 0 },
++  };
++}
+diff --git a/WireGI/server/src/store.js b/WireGI/server/src/store.js
+new file mode 100644
+index 0000000..1d314bf
+--- /dev/null
++++ b/WireGI/server/src/store.js
+@@ -0,0 +1,41 @@
++// Minimal zero-dependency JSON file store for projects.
++import fs from 'node:fs';
++import path from 'node:path';
++
++export function createStore(cfg) {
++  const file = path.resolve(cfg.db.dataFile);
++  let cache = new Map();
++
++  async function load() {
++    try {
++      const raw = JSON.parse(await fs.promises.readFile(file, 'utf8'));
++      cache = new Map(raw.map((p) => [p.id, p]));
++    } catch (e) {
++      if (e.code !== 'ENOENT') throw e;
++      cache = new Map();
++    }
++  }
++
++  async function commit() {
++    await fs.promises.mkdir(path.dirname(file), { recursive: true });
++    const tmp = file + '.tmp';
++    await fs.promises.writeFile(tmp, JSON.stringify([...cache.values()], null, 2));
++    await fs.promises.rename(tmp, file);
++  }
++
++  return {
++    async init() { await load(); return this; },
++    async list() {
++      return [...cache.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
++    },
++    async get(id) { return cache.get(id) || null; },
++    async create(project) { cache.set(project.id, project); await commit(); return project; },
++    async save(project) {
++      project.updatedAt = new Date().toISOString();
++      cache.set(project.id, project);
++      await commit();
++      return project;
++    },
++    async remove(id) { cache.delete(id); await commit(); return { ok: true }; },
++  };
++}
+diff --git a/docs/wireup-drone-mock.md b/docs/wireup-drone-mock.md
+new file mode 100644
+index 0000000..466bc0b
+--- /dev/null
++++ b/docs/wireup-drone-mock.md
+@@ -0,0 +1,279 @@
++# Wireup — Drone Mock Project & Site Mechanics
++
++> **What this doc is:** a working mock of how the *Wireup* site behaves on a real request —
++> *"I want to build a 5-inch FPV drone"* — plus the actual, buildable output you can take and
++> assemble today. Simulator (Velxio) is **intentionally out of scope here** (Phase 2); this is the
++> `research → gather → understand → data` pipeline only, end to end.
++
++Two things happen at once in this doc:
++1. **The site mechanics** — how a prompt becomes data through Jev decisions + parallel part-agents.
++2. **The drone** — a real Bill of Materials, wiring, and firmware so you can *physically build it*.
++
++---
++
++## 0. TL;DR of the flow
++
++```
++PROMPT ─▶ JEV (initial runs / decision-maker) ─▶ DECOMPOSE into PARTS
++                                                       │
++                          ┌────────────────────────────┴───────────────────────────┐
++                          │  each PART runs the pipeline IN PARALLEL                │
++                          │  research → gather → understand → data                  │
++                          └────────────────────────────┬───────────────────────────┘
++                                                       ▼
++                                          MERGE into PROJECT STATE
++                                  (IDEA ⇄ CURRENT ⇄ VERIFIED per part)
++                                                       ▼
++                              HUMAN CHECKPOINTS (eyes/approval) ─▶ BUILD
++```
++
++---
++
++## 1. Jev = the decision-maker (your point 4, fully resolved)
++
++### What Jev actually is (from research)
++
++**Jev** is TypeSafe AI's *System One Model* — a non-autoregressive, typed **decision model**, not a chatbot
++[1](https://www.producthunt.com/products/jev-2) [2](https://kie.ai/blog/what-is-jev) [3](https://www.datacamp.com/blog/system-one-models-jev).
++
++| Property | Value |
++| --- | --- |
++| Input | Unstructured **state** + **typed questions** |
++| Output | **Choice** (≤255 options), **Score** (rubric), **Noul** (calibrated yes/no) — each with confidence |
++| Latency | 70–500 ms per decision |
++| Cost | $0.042 / 1M input tokens, **output free** (~20–200× faster, 40–400× cheaper than LLM workflows) |
++| Hallucination | **Structurally impossible** — valid outputs are defined by the schema up front |
++| Role | A **decision layer**, not an orchestrator. You drop it into software you already run [2](https://www.datacamp.com/blog/system-one-models-jev) [cobusgreyling](https://cobusgreyling.substack.com/p/jev-by-typesafe-ai-611) |
++| Launched | Sept 15, 2026; already integrated into Vercel AI Gateway, Cloudflare, LangChain [forbes](https://www.forbes.com/sites/josipamajic/2026/09/19/jev-cuts-ai-decision-costs-100x-and-vercel-cloudflare-rushed-to-add-it/) |
++| Wild detail | TypeSafe's own launch demos include a **simulated drone navigating an obstacle course** [mindstudio](https://www.mindstudio.ai/blog/jev-system-one-model-launch) — the decision layer literally flies. |
++
++**The mental model:** the LLM (System 2) does the *open-ended research, writing, and reasoning*.
++Jev (System 1) makes the *bounded decisions*: classify, route, gate, verify, escalate, stop.
++
++### Why Jev answers your point 4 ("decision-maker for the initial runs")
++
++Your point 4 worried about the loop never ending and burning tokens. That is **exactly** the problem Jev solves:
++
++- **The "initial runs" = Jev, not the LLM.** The first thing that happens to a prompt is a batch of
++  typed Jev questions — *what domain is this? how many parts? which part is highest risk? is the
++  gathered data complete?* — answered in one ~200 ms call for near-zero cost. The expensive LLM only
++  wakes up to *do* the research for parts that need it.
++- **The "satisfaction checkpoint" / stop condition = a Jev Noul.** Instead of "the agent works until
++  the user is satisfied" being an unbounded LLM loop, it becomes a typed question:
++  *"Does CURRENT state == IDEA state for all VERIFIED parts?"* → Noul with confidence. Above threshold →
++  stop and surface to human. Below → spawn the next agent run.
++- **Cost ceiling is enforceable.** Jev scores confidence; low-confidence decisions escalate to a human or
++  to the LLM, while high-confidence ones auto-execute. You cap LLM spend by routing most loop decisions
++  through Jev.
++- **Tiered verification = stacked Noul/Score calls.** sim-pass < test-pass < human-visual-confirm become
++  explicit decision gates (sim tier added in Phase 2 on top of Velxio).
++
++### The Jev decision set for the drone request
++
++| # | Question type | Question (asked of project state) | Example answer |
++| --- | --- | --- | --- |
++| D1 | **Choice** | What project class is this? | `fpv-quadcopter` → routes to `embedded + mechanical` domains |
++| D2 | **Choice** | Decompose into how many parts? | 9 parts (frame, motors, ESC, FC, props, RX, video, battery, firmware) |
++| D3 | **Score** | Risk/priority of each part (1–5)? | firmware=5, FC=4, battery=3 … |
++| D4 | **Noul** | Is each part's gathered data *complete & conflict-free*? | FC: 0.94 yes → proceed; battery: 0.61 no → gather more |
++| D5 | **Noul** | Does any part **require human eyes** (solder/eyeball)? | yes → insert human checkpoint |
++| D6 | **Noul** | Is CURRENT == IDEA for all VERIFIED parts? (stop gate) | 0.12 → keep running |
++
++This is the whole "agent works until satisfied" mechanism, made cheap and bounded.
++
++---
++
++## 2. Site mechanics: the `research → gather → understand → data` pipeline
++
++Every **part** is a unit of work that flows through four stages. The LLM does the creative labor;
++Jev (D4/D6) decides when a stage's output is good enough to advance.
++
++| Stage | What happens | Output |
++| --- | --- | --- |
++| **RESEARCH** | Web + LLM pull datasheets, guides, community builds, compat matrices | Raw sourced notes + citations |
++| **GATHER** | Extract structured fields: part #, spec, price, source, constraints | Typed records per part |
++| **UNDERSTAND** | Reconcile against project constraints (battery V vs motor KV, ESC A vs motor draw, mount patterns); resolve conflicts; flag unknowns | Validated spec + open questions |
++| **DATA** | Emit the buildable artifact: BOM row, wiring, config snippet, verification checklist | Merge-ready project data |
++
++**Project state (the 3-state model from earlier research):**
++
++```
++IDEA      = what the human wants (the prompt + clarifications)
++CURRENT   = what has actually been built/gathered
++VERIFIED  = what has been confirmed (sim / test / human eyes)
++```
++
++Each part carries its own `IDEA⇄CURRENT⇄VERIFIED` flags. The agent's only job is to push every part
++from IDEA toward VERIFIED, and it can resume that job days later because the state is durable.
++
++---
++
++## 3. LINEAR walkthrough — one part, fully traced
++
++**Part: Flight Controller + Firmware** (the part the user flagged as "fragmentation we solve").
++
++**RESEARCH** — sources pulled:
++- Firmware guide (Betaflight / iNav / ArduPilot) [blackbastion](https://www.blackbastionsystems.com/articles/best-flight-controllers) [oscarliang](https://oscarliang.com/fc-firmware/)
++- MCU breakdown (STM32 F4/F7/H7 dominate; ESP32-S for video-to-phone) [ampheo](https://www.ampheo.com/blog/which-microcontrollers-are-used-in-drones)
++- Component compatibility (mount 30.5×30.5, gyro ICM-42688-P) [thedroneflight](https://thedroneflight.com/blogs/news/fpv-drone-component-compatibility-guide-motors-escs-flight-controllers-more)
++
++**GATHER** — typed records:
++```
++fc.processor      = STM32F745 (F7)        source: ampheo
++fc.gyro           = ICM-42688-P           source: blackbastion
++fc.mount          = 30.5 x 30.5 mm        source: thedroneflight
++fc.firmware       = Betaflight 2025.12.2  source: blackbastion
++fc.voltage_in     = 2–6S (covers our 4S)  source: thedroneflight
++fc.price          = ~$55 (F7 AIO stack)   source: dronesgator
++```
++
++**UNDERSTAND** — reconciliation:
++- Frame is 5″ with 30.5 mount → FC mount **matches** ✅
++- Battery is 4S (14.8V) → within FC `2–6S` range ✅
++- F7 recommended for 2026 builds (headroom over F4) ✅
++- Open question: do we want GPS/RTH later? If yes, iNav/ArduPilot; for freestyle Betaflight wins → **ask human** (Jev D5 = yes, human checkpoint)
++- Fragmentation insight: *firmware is its own part* — the FC hardware and the firmware flashed on it are
++  decoupled decisions. We keep them as separate parts so the human can swap Betaflight↔ArduPilot without
++  re-researching the board.
++
++**DATA** — buildable artifact emitted to project state:
++```
++BOM row : FC  = Holybro Kakute F7 / Matek F405-STD, 30.5 mount, ICM-42688-P, ~$55
++Flash   : Betaflight Configurator → flash target → calibrate accelerometer + gyro
++Verify  : [ ] USB connects  [ ] gyro live  [ ] motors spin in correct order in Betaflight
++Human   : solder stack to ESC + confirm no short with multimeter before power
++```
++
++That is one part, fully closed. Now multiply it.
++
++---
++
++## 4. PARALLEL walkthrough — all parts fan out
++
++Jev D2 decomposed the request into **9 parts**. The site spawns 9 part-agents that each run the
++pipeline **concurrently**, then merge into one project state.
++
++```
++                         JEV D1/D2 (classify + decompose)
++                                    │
++        ┌──────────────┬────────────┬────────────┬────────────┬────────────┐
++        ▼              ▼            ▼            ▼            ▼            ▼
++   [Frame]        [Motors]      [ESC]       [FC+FW]      [Props]      [RX/Radio]
++        ▼              ▼            ▼            ▼            ▼            ▼
++   [Video]        [Battery]    [Firmware]   (all run research→gather→understand→data)
++        └──────────────┴────────────┴────────────┴────────────┴────────────┘
++                                    │
++                                    ▼
++                       MERGE → PROJECT STATE (IDEA/CURRENT/VERIFIED)
++                                    │
++                         JEV D4 (complete?) → D5 (human eyes?) → D6 (done?)
++```
++
++| Part | Key gathered data | Human-eyes? |
++| --- | --- | --- |
++| Frame | 5″ carbon, 210–230 mm, 30.5 stack mount, <80 g, ~$15–60 [dronesgator](https://dronesgator.com/how-to-build-a-drone) | No |
++| Motors ×4 | 2207 size; **KV matched to battery**: 4S→2400–2700 kV, 6S→1700–2200 kV [dronesgator](https://dronesgator.com/how-to-build-a-drone) | No |
++| ESC (4-in-1) | 35–55 A per motor, BLHeli_32/S, amp-rating > motor draw +20% [thedroneflight](https://thedroneflight.com/blogs/news/fpv-drone-component-compatibility-guide-motors-escs-flight-controllers-more) | Solder |
++| FC + FW | F7, ICM-42688-P, Betaflight (see §3) | Solder + USB |
++| Props | 5″ (5040–5149), 3-blade; pitch = speed [thedroneflight](https://thedroneflight.com/blogs/news/fpv-drone-component-compatibility-guide-motors-escs-flight-controllers-more) | No |
++| RX / Radio | ExpressLRS 2.4 GHz (matches Radiomaster TX) [dronesgator](https://dronesgator.com/how-to-build-a-drone) | Bind |
++| Video | Analog: Foxeer/Caddx cam + 200–400 mW VTX; Digital: DJI O3/O4 [dronesgator](https://dronesgator.com/how-to-build-a-drone) | Solder |
++| Battery | 4S 1300–1800 mAh LiPo, ≥75C, XT60 [dronesgator](https://dronesgator.com/how-to-build-a-drone) | Handle (LiPo safety) |
++| Firmware | **Betaflight** freestyle/racing · **iNav** GPS nav · **ArduPilot** autonomy [oscarliang](https://oscarliang.com/fc-firmware/) · **ESP32 custom** MCU angle ↓ | Flash + tune |
++
++The "fragmentation" problem is solved by this very structure: a single drone idea is **one project
++state**, but it's composed of **9 independently researchable, gatherable, understandable, verifiable
++parts** — each can be revised, swapped, or human-approved without disturbing the others.
++
++---
++
++## 5. THE DRONE — buildable deliverable
++
++### 5.1 Bill of Materials (5″ freestyle quad, 4S)
++
++| # | Component | Spec | ≈ Price | Source |
++| --- | --- | --- | --- | --- |
++| 1 | Frame | 5″ carbon, 30.5×30.5 stack, ~210 mm | $19–60 | [dronesgator](https://dronesgator.com/how-to-build-a-drone) |
++| 2 | Motors ×4 | 2207, **2500 kV** (4S) | ~$40–80/set | [dronesgator](https://dronesgator.com/how-to-build-a-drone) |
++| 3 | 4-in-1 ESC | 45 A, BLHeli_32, F4/F7 | $50–120 | [thedroneflight](https://thedroneflight.com/blogs/news/fpv-drone-component-compatibility-guide-motors-escs-flight-controllers-more) |
++| 4 | Flight Controller | F7 (STM32F745), ICM-42688-P, 30.5 | ~$55 | [blackbastion](https://www.blackbastionsystems.com/articles/best-flight-controllers) |
++| 5 | Props | 5″ 3-blade (5040–5149) | $5–15/pack | [thedroneflight](https://thedroneflight.com/blogs/news/fpv-drone-component-compatibility-guide-motors-escs-flight-controllers-more) |
++| 6 | Receiver | ExpressLRS 2.4 GHz (EP1/EP2) | $15–30 | [dronesgator](https://dronesgator.com/how-to-build-a-drone) |
++| 7 | FPV Camera | Foxeer/Caddx analog, 2.8 mm | $20–40 | [dronesgator](https://dronesgator.com/how-to-build-a-drone) |
++| 8 | VTX | 200–400 mW analog | $20–40 | [dronesgator](https://dronesgator.com/how-to-build-a-drone) |
++| 9 | Battery ×2 | **4S 1500 mAh LiPo, 100C, XT60** | ~$22–40 ea | [dronesgator](https://dronesgator.com/how-to-build-a-drone) |
++| 10 | Charger | ToolkitRC / ISDT balance charger | $20–60 | [dronesgator](https://dronesgator.com/how-to-build-a-drone) |
++| — | Firmware | **Betaflight 2025.12.2** | free | [blackbastion](https://www.blackbastionsystems.com/articles/best-flight-controllers) |
++
++> Prices are indicative from the cited 2026 build guides; verify live before ordering.
++
++### 5.2 Tools
++Solder (63/37 rosin-core, 0.8 mm), M2/M3 hex drivers, wire cutters/strippers, **multimeter** (continuity
+++ short check before power), zip ties. [dronesgator](https://dronesgator.com/how-to-build-a-drone)
++
++### 5.3 Assembly sequence (linear)
++1. Frame: standoffs + arms + top plate; don't over-torque carbon.
++2. Motors: mount ×4, route wires through arms; note rotation direction.
++3. ESC: solder motor wires (order fixable in software) + battery lead to ESC power pads.
++4. FC: mount on anti-vibration standoffs; connect to ESC via ribbon/direct solder.
++5. RX: wire to FC UART; route antenna clear of motor noise.
++6. Camera + VTX: mount cam at 30–45°, solder VTX to power rail.
++7. **Multimeter: confirm no short between battery pads before first plug-in.** [uavdroneacademy](https://www.uavdroneacademy.com/en/blog/fpv-drone-anatomy-understanding-every-component)
++
++### 5.4 Firmware (the part you called out)
++- **Betaflight** = freestyle/racing standard, largest community, widest HW support, lowest latency
++  [oscarliang](https://oscarliang.com/fc-firmware/). Flash via Betaflight Configurator → select target →
++  calibrate accel/gyro → set motor order → tune filters.
++- **iNav** = GPS position-hold / RTH in an accessible package; **ArduPilot 4.6.3** = full autonomy/VTOL
++  (overkill for freestyle) [blackbastion](https://www.blackbastionsystems.com/articles/best-flight-controllers).
++- **ESP32 custom angle (why this matters for *us*):** the repo (Velxio) emulates ESP32. A custom
++  ESP32-S/ESP32-C3 firmware lets a builder skip Betaflight and run their *own* stabilization loop —
++  exactly the "fragmentation solved" win: the FC board is one part, the firmware running on it is
++  another, and the human can swap them independently. ESP32-S is already used in FPV video-to-phone
++  links [ampheo](https://www.ampheo.com/blog/which-microcontrollers-are-used-in-drones).
++
++Minimal ESP32 stabilization sketch (Arduino/C++, illustrative):
++```cpp
++// ESP32 custom flight loop — reads gyro, mixes to 4 motors (pseudo-code)
++void loop() {
++  Imu::read(ax, ay, az, gx, gy, gz);          // ICM-42688 over I2C/SPI
++  pid_roll.update(gx); pid_pitch.update(gy);  // simple PIDs
++  mix(throttle, pid_roll.out, pid_pitch.out, pid_yaw.out, m1..m4);
++  esc.set(m1, m2, m3, m4);                    // BLHeli_32 via DSHOT
++  delay(2);                                   // ~500 Hz loop
++}
++```
++This is the *alternative firmware path* the site would research/gather/understand/verify as its own part.
++
++---
++
++## 6. Fragmentation, solved
++
++The site's core value is the **glue**, not any single answer:
++
++```
++ONE IDEA ("build a drone")
++   │  Jev decomposes
++   ▼
++N PARTS (frame, motors, ESC, FC, firmware, …)   ← each independently:
++   research → gather → understand → data
++   │
++   ├─ can be revised without breaking siblings
++   ├─ carries its own IDEA/CURRENT/VERIFIED flags
++   ├─ inserts a human checkpoint only where eyes are required
++   ▼
++MERGED PROJECT STATE  →  you walk away with a BOM + wiring + firmware you can build
++```
++
++That is the "mock AGI" in practice: not one model that knows everything, but a **durable orchestration**
++where a cheap decision layer (Jev) keeps a persistent, resumable project state honest while specialist
++agents (LLMs) do the deep work — across days, with human eyes at exactly the right gates.
++
++---
++
++## 7. What's next (proposed)
++- **A)** Promote this into `docs/wireup/architecture.md` with the Jev API contract (state schema + question types).
++- **B)** Prototype the **Project State service** (3-state model) + a Jev decision client (the D1–D6 calls).
++- **C)** Wire the **Velxio simulator** in as verification tier 1 (Phase 2) so firmware parts get a sim-pass Noul.
++
++Pick a letter and I'll build it.
