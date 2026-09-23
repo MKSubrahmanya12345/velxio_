@@ -42,6 +42,7 @@ const deps = {
   store,
   registry,
   jev,
+  globalRules,
   planner: createPlanner(cfg, { registry }),
   // Per-request provider overrides (`provider` in the chat body). They choose
   // where the failover loop starts; the rest of the keys stay as fallbacks.
@@ -79,4 +80,5 @@ app.listen(cfg.port, '0.0.0.0', () => {
   console.log(`  FAILOVER: ${registry.failover.enabled ? `on — loops every provider/key, max ${registry.failover.maxRounds} rounds` : 'off — selected key only'}`);
   console.log(`  STORE:   ${cfg.db.kind}${cfg.db.kind === 'mongo' ? ' (mongodb)' : ` (${cfg.db.dataFile})`}`);
   console.log(`  KEYS:    ${registry.file}`);
+  console.log(`  RULES:   ${globalRules.enabledCount()} global rule${globalRules.enabledCount() === 1 ? '' : 's'} enabled (${globalRules.file}) — JEV pre-turn gate active`);
 });

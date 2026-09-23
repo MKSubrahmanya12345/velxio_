@@ -351,3 +351,35 @@ export interface ProjectMemory {
   notes: MemoryNote[];
   events: MemoryEvent[];
 }
+
+// ── Global rules (cross-project, user-authored) ─────────────────────────────
+// Hand-managed rule set that feeds the JEV pre-turn gate. No LLM writes here.
+export type GlobalRuleKind = 'rule' | 'preference' | 'goal' | 'fact';
+
+export interface GlobalRule {
+  id: string;
+  text: string;
+  kind: GlobalRuleKind;
+  note: string;
+  enabled: boolean;
+  origin: string;
+  createdAt: string;
+  updatedAt: string;
+  disabledAt: string | null;
+  disabledBy: string | null;
+}
+
+export interface GlobalRulesState {
+  rules: GlobalRule[];
+  file: string;
+}
+
+// The pre-turn gate's compiled decision, surfaced on gate events.
+export interface TurnDirective {
+  applicableRules: { id: string; text: string; kind: string; source: 'global' | 'chat'; value: number | null; unresolved: boolean }[];
+  mode: 'answer' | 'clarify_first' | 'rule_change' | 'out_of_scope';
+  modeTrusted: boolean;
+  ruleChange: { op: 'add' | 'modify' | 'remove'; targetId: string | null; authorized: boolean; authorizedValue: number | null; autonomous?: boolean } | null;
+  gateSummary: string;
+  raw?: unknown;
+}

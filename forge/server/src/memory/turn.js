@@ -68,8 +68,42 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}, reque
   const knowledge = () => ({ revision: memory.revision, notes: memory.notes.filter(n => !['superseded', 'rejected'].includes(n.status)) });
   // All active notes are supplied even when the transcript exceeds this window.
   const history = conversation.messages.slice(-20).map(({ role, content }) => ({ role, content }));
+
+  // ── JEV pre-turn gate ──────────────────────────────────────────────────────
+  // Runs BEFORE any generation: what this turn is allowed to be is decided in
+  // code, before tokens are spent (memory/preturn.js). One JEV call compiles
+  // into a TURN DIRECTIVE that steers every prompt below. With no rules in
+  // force there is nothing to decide and no JEV call is made.
+  const globalRules = deps.globalRules ? deps.globalRules.enabled() : [];
+  const candidates = gateCandidates(globalRules, activeNotes(memory));
+  event('gate', 'running', candidates.length
+    ? `JEV pre-turn gate: deciding under ${candidates.length} candidate rule${candidates.length === 1 ? '' : 's'} — no tokens spent yet`
+    : 'JEV pre-turn gate: no rules in force, nothing to decide');
+  const directive = candidates.length
+    ? await runPreTurnGate({ ask, message, candidates })
+    : { applicableRules: [], mode: 'answer', modeTrusted: true, ruleChange: null, gateSummary: 'no rules in force', raw: null };
+  event('gate', 'complete', `Directive: ${directive.gateSummary}`, {
+    directive: {
+      applicableRules: directive.applicableRules,
+      mode: directive.mode,
+      modeTrusted: directive.modeTrusted,
+      ruleChange: directive.ruleChange,
+      gateSummary: directive.gateSummary,
+    },
+    raw: directive.raw,
+  });
+  decisions.push({
+    id: 'PRE_TURN_GATE',
+    name: 'JEV pre-turn gate',
+    kind: 'pre_turn_gate',
+    summary: directive.gateSummary,
+    confidence: directive.modeTrusted ? 0.9 : 0.6,
+    detail: { mode: directive.mode, applicableRules: directive.applicableRules, ruleChange: directive.ruleChange, raw: directive.raw },
+  });
+  const directiveText = directivePrompt(directive);
+
   event('extract', 'running', 'Generator is proposing project notes');
-  const proposals = normalizeProposals(await generator.propose({ message, memory: knowledge(), history }), message, memory);
+  const proposals = normalizeProposals(await generator.propose({ message, memory: knowledge(), history, directive: directiveText }), message, memory);
   if (memory.notes.length + proposals.length > 500) throw new Error('These updates exceed the project memory limit. No notes were discarded or saved.');
   event('extract', 'complete', `${proposals.length} candidate notes formed`, { proposals });
   event('review', 'running', 'JEV is evaluating origin, conflicts, and change authority');
@@ -100,7 +134,13 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}, reque
   const validateDraft = () => {
     if (typeof draft?.content !== 'string' || !draft.content.trim() || draft.content.length > 24000) throw new Error('Generator returned an invalid response. Nothing was saved.');
   };
-  const notes = activeNotes(memory).filter(n => COMMIT_KINDS.includes(n.kind));
+  // The check covers exactly the rules the gate marked in force (global +
+  // chat), plus the conversation's own active commitments — deduped by ID,
+  // so the safety net verifies the steering decisions instead of blindly
+  // re-checking every note every turn.
+  const seenIds = new Set();
+  const notes = [...directiveCheckNotes(directive), ...activeNotes(memory).filter(n => COMMIT_KINDS.includes(n.kind))]
+    .filter(n => (seenIds.has(n.id) ? false : (seenIds.add(n.id), true)));
   let verdict;
   for (let attempt = 0; attempt < 2; attempt++) {
     validateDraft();
@@ -117,6 +157,18 @@ export async function runMemoryTurn(deps, original, text, emit = () => {}, reque
     draft = await generator.respond({ ...context, projectState: conversation.projectState, repair: { draft: draft.content, checks: verdict.checks, disposition: verdict.disposition, blocking: verdict.blocking } });
     event('repair', 'complete', 'Generator revision received');
   }
+  // The gate's ONE autonomous mutation, applied only after the turn passed
+  // every check: a user-authorized removal of a named global rule. Everything
+  // else the gate decided stays advisory/directive (preturn.js).
+  if (verdict.passed && directive.ruleChange?.autonomous && directive.ruleChange.targetId && deps.globalRules?.disable) {
+    try {
+      await deps.globalRules.disable(directive.ruleChange.targetId, 'Removed by the JEV pre-turn gate: your message explicitly authorized it.');
+      event('gate', 'complete', `Global rule ${directive.ruleChange.targetId} disabled by your authorized change`);
+    } catch (error) {
+      event('gate', 'blocked', `Global rule change not applied: ${error.message}`);
+    }
+  }
+
   const content = verdict.passed ? draft.content : withheldNotice(verdict);
   const response = makeMessage('assistant', content, { decisions, meta: { turnId, memoryRevision: memory.revision, providers, guarded: true, withheld: !verdict.passed } });
   if (legacyResult && verdict.passed) {

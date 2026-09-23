@@ -106,5 +106,10 @@ export function loadConfig(env = process.env) {
     envDefaults: { planner, bedrock },
   };
 
-  return { port, db, jev, planner, bedrock, generators, providers, corsOrigin: env.CORS_ORIGIN || '' };
+  // The user-authored, cross-project rule set behind the JEV pre-turn gate.
+  const globalRules = {
+    dataFile: env.GLOBAL_RULES_FILE || './data/global-rules.json',
+  };
+
+  return { port, db, jev, planner, bedrock, generators, providers, globalRules, corsOrigin: env.CORS_ORIGIN || '' };
 }
