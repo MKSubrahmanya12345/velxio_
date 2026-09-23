@@ -207,8 +207,10 @@ describe('PhysicsWorld', () => {
     for (const id of ['t1', 't2', 't3', 't4']) w.setActuatorInput(id, 1);
     stepUntil(w, 500); // let the motor lag settle (τ = 15 ms)
     const b = w.getBodyState('craft')!;
-    expect(Math.abs(b.velocity.y)).toBeLessThan(0.1);
-    expect(b.position.y).toBeGreaterThan(1.7); // barely dropped while spooling up
+    // Spool-up leaves a sink rate of about g·τ ≈ 0.15 m/s. Nothing cancels it
+    // once thrust equals weight, because this scene has no drag.
+    expect(Math.abs(b.velocity.y)).toBeLessThan(0.2);
+    expect(b.position.y).toBeGreaterThan(0.85);
     const a = w.telemetry().actuators[0];
     expect(a.state).toBeGreaterThan(0.99);
   });
@@ -283,6 +285,86 @@ describe('PhysicsWorld', () => {
     const b = make();
     expect(a.bodies[0].position).toEqual(b.bodies[0].position);
     expect(a.bodies[0].orientation).toEqual(b.bodies[0].orientation);
+  });
+
+  it('thrust at an offset produces r × F, and a centred pair cancels', () => {
+    const { scene, errors } = parsePhysicsScene({
+      version: 1,
+      environment: { floorY: null, gravity: { x: 0, y: 0, z: 0 } },
+      bodies: [{ id: 'craft', mass: 1, inertia: { ix: 0.01, iy: 0.01, iz: 0.01 } }],
+      actuators: [{
+        id: 't', bodyId: 'craft', kind: 'thrust',
+        axis: { x: 0, y: 1, z: 0 }, maxForce: 10,
+        offset: { x: 0.1, y: 0, z: 0 },
+        timeConstantMs: 0.1,
+      }],
+    });
+    expect(errors).toEqual([]);
+    expect(scene!.actuators[0].offset.x).toBeCloseTo(0.1);
+    const w = new PhysicsWorld(scene!);
+    w.setActuatorInput('t', 1);
+    stepUntil(w, 200);
+    // τz = rx · F = 1 N·m, Izz = 0.01 → 100 rad/s² → ~20 rad/s after 0.2 s
+    const spun = w.getBodyState('craft')!;
+    expect(spun.angularVelocity.z).toBeGreaterThan(15);
+    expect(Math.abs(spun.angularVelocity.x)).toBeLessThan(0.5);
+
+    const balanced = parsePhysicsScene({
+      version: 1,
+      environment: { floorY: null, gravity: { x: 0, y: 0, z: 0 } },
+      bodies: [{ id: 'craft', mass: 1, inertia: { ix: 0.01, iy: 0.01, iz: 0.01 } }],
+      actuators: [
+        { id: 'a', bodyId: 'craft', kind: 'thrust', axis: { x: 0, y: 1, z: 0 }, maxForce: 10, offset: { x: 0.1, y: 0, z: 0 }, timeConstantMs: 0.1 },
+        { id: 'b', bodyId: 'craft', kind: 'thrust', axis: { x: 0, y: 1, z: 0 }, maxForce: 10, offset: { x: -0.1, y: 0, z: 0 }, timeConstantMs: 0.1 },
+      ],
+    });
+    const wb = new PhysicsWorld(balanced.scene!);
+    wb.setActuatorInput('a', 1);
+    wb.setActuatorInput('b', 1);
+    stepUntil(wb, 200);
+    expect(Math.abs(wb.getBodyState('craft')!.angularVelocity.z)).toBeLessThan(0.2);
+  });
+
+  it('reaction torque yaws, signed torque reverses, quadratic drag matches 1/v', () => {
+    const yaw = parsePhysicsScene({
+      version: 1,
+      environment: { floorY: null, gravity: { x: 0, y: 0, z: 0 } },
+      bodies: [{ id: 'craft', mass: 1, inertia: { ix: 0.01, iy: 0.01, iz: 0.01 } }],
+      actuators: [{
+        id: 't', bodyId: 'craft', kind: 'thrust', maxForce: 10,
+        axis: { x: 0, y: 1, z: 0 }, reactionNmPerN: 0.05, timeConstantMs: 0.1,
+      }],
+    });
+    const w = new PhysicsWorld(yaw.scene!);
+    w.setActuatorInput('t', 1);
+    stepUntil(w, 200);
+    // τy = 0.05 * 10 = 0.5, Iyy = 0.01 → 50 rad/s² → ~10 rad/s
+    expect(w.getBodyState('craft')!.angularVelocity.y).toBeGreaterThan(8);
+
+    const signed = parsePhysicsScene({
+      version: 1,
+      environment: { floorY: null, gravity: { x: 0, y: 0, z: 0 } },
+      bodies: [{ id: 'craft', mass: 1, inertia: { ix: 0.01, iy: 0.01, iz: 0.01 } }],
+      actuators: [{ id: 's', bodyId: 'craft', kind: 'torque', signed: true, maxTorque: 0.05, axis: { x: 0, y: 1, z: 0 }, timeConstantMs: 0.1 }],
+    });
+    const ws = new PhysicsWorld(signed.scene!);
+    expect(ws.setActuatorInput('s', -1)).toBe(true);
+    expect(ws.telemetry().actuators[0].input).toBe(-1);
+    stepUntil(ws, 200);
+    expect(ws.getBodyState('craft')!.angularVelocity.y).toBeLessThan(-0.5);
+    // unsigned thrust still clamps below 0
+    expect(w.setActuatorInput('t', -1)).toBe(true);
+    expect(w.telemetry().actuators[0].input).toBe(0);
+
+    const drag = parsePhysicsScene({
+      version: 1,
+      environment: { gravity: { x: 0, y: 0, z: 0 }, floorY: null, quadraticDrag: 0.5 },
+      bodies: [{ id: 'p', mass: 1, velocity: { x: 10, y: 0, z: 0 } }],
+    });
+    const wd = new PhysicsWorld(drag.scene!);
+    stepUntil(wd, 1000);
+    // 1/v = 1/v0 + k t → v = 1 / 0.6
+    expect(wd.getBodyState('p')!.velocity.x).toBeCloseTo(1 / 0.6, 1);
   });
 
   it('clamps a huge step to 50 ms', () => {

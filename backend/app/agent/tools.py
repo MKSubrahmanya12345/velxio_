@@ -394,10 +394,12 @@ PHYSICS_CAPABILITIES: dict[str, Any] = {
         "environment": {
             "gravity": "{x,y,z} m/s² — default {0,-9.81,0}; {0,0,0} for space",
             "wind": "{x,y,z} m/s constant — default 0",
-            "linearDrag": "N·s/m — default 0",
+            "linearDrag": "N·s/m — F = -k·(v−wind). Default 0",
+            "quadraticDrag": "N·s²/m² — F = -k·|v−wind|·(v−wind), the ½ρCdA term. Default 0",
             "angularDrag": "N·m·s — default 0",
             "floorY": "ground plane at world Y (default 0) or null for an open world",
             "restitution": "bounce 0..1 — default 0.1",
+            "groundDamping": "contact stick while touching the floor, 1/s. Default 8 (a dropped body rests). A driven vehicle sets this near 0 or the floor eats its speed",
         },
         "bodies": [{
             "id": "string",
@@ -416,10 +418,13 @@ PHYSICS_CAPABILITIES: dict[str, Any] = {
             "bodyId": "body it is mounted on",
             "kind": "thrust (force along axis) | torque (body-frame torque about axis)",
             "axis": "body-local direction, default {0,1,0}",
-            "maxForce": "N at input 1 (thrust)",
+            "maxForce": "N at input 1 (thrust). Output = maxForce × lagged input — linear, not rpm²",
             "maxTorque": "N·m at input 1 (torque)",
             "timeConstantMs": "first-order motor lag, default 15",
-            "inputDefault": "commanded input 0..1, default 0",
+            "inputDefault": "0..1, or −1..1 when signed",
+            "signed": "true lets the command be −1..1 (a wheel or a torque that must reverse). Thrust stays unipolar unless you set this",
+            "offset": "{x,y,z} m, body frame, from the centre of mass. Non-zero thrust there applies τ = r × F. Default {0,0,0} is the historical CoM thrust",
+            "reactionNmPerN": "prop-drag torque along the thrust axis, N·m per N, already signed. Default 0",
             "inputPin": "{componentId,pin} — optional live circuit PWM binding (browser only)",
         }],
         "sensorLinks": [{
@@ -434,7 +439,9 @@ PHYSICS_CAPABILITIES: dict[str, Any] = {
     "limits": "8 bodies, 16 actuators, 8 sensor links per scene",
     "integrator": (
         "deterministic fixed 1 ms substep; semi-implicit Euler; first-order actuator lag; "
-        "ground plane with restitution + contact damping. step() clamps to 50 ms per call."
+        "offset moment and reaction torque; linear and quadratic drag; "
+        "ground plane with restitution + contact damping (groundDamping, default 8/s). "
+        "step() clamps to 50 ms per call. Signed actuator commands are −1..1; unsigned stay 0..1."
     ),
     "verify": (
         "physics_simulate runs a scene headlessly and returns telemetry samples plus "

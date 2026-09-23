@@ -15,9 +15,9 @@ rover or a zero-gravity test article.
 | Concept | What it is |
 |---------|-----------|
 | **Body** | Rigid body: position/quaternion/velocity/angular velocity, mass, principal-axis inertia, optional collision shape (`point`, `sphere`, `box`) |
-| **Actuator** | Mounted on a body along a body-local axis. `thrust` adds a force, `torque` adds a body-frame torque. Each has a first-order lag (`timeConstantMs`, default 15 ms) toward its commanded input `0..1` |
+| **Actuator** | Mounted on a body along a body-local axis. `thrust` adds a force, `torque` adds a body-frame torque. Each has a first-order lag (`timeConstantMs`, default 15 ms) toward its commanded input `0..1`, or `−1..1` when `signed` is set. A non-zero `offset` applies τ = r × F. `reactionNmPerN` is prop-drag torque along the thrust axis. Output is `max × lagged input` — linear, not rpm² |
 | **Sensor link** | Feeds one body's state into an existing *virtual sensor* component (IMU → `mpu6050`, position → `gps-neo6m`) through the standard `dispatchSensorUpdate` injection API — firmware written for the real part works unchanged |
-| **Environment** | Gravity, constant wind, linear/angular drag, optional ground plane (`floorY`, `null` = open world) with restitution + contact damping |
+| **Environment** | Gravity, constant wind, linear and quadratic drag, angular drag, optional ground plane (`floorY`, `null` = open world) with restitution + contact damping (`groundDamping`, default 8/s; driven vehicles set it near 0) |
 
 Conventions: SI units; **X = east, Y = up, Z = north**; quaternions
 `{x, y, z, w}` (w scalar); angular velocity and inertia are body-frame;
@@ -33,10 +33,12 @@ integrator is deterministic semi-implicit Euler on a fixed 1 ms substep
   "environment": {
     "gravity": { "x": 0, "y": -9.81, "z": 0 },   // m/s²
     "wind": { "x": 0, "y": 0, "z": 0 },          // m/s
-    "linearDrag": 0,                              // N·s/m
+    "linearDrag": 0,                              // N·s/m, F = -k·(v−wind)
+    "quadraticDrag": 0,                           // N·s²/m², F = -k·|v|·v
     "angularDrag": 0,                             // N·m·s
     "floorY": 0,                                  // number or null (open world)
-    "restitution": 0.1                            // 0..1
+    "restitution": 0.1,                           // 0..1
+    "groundDamping": 8                            // 1/s while touching the floor
   },
   "bodies": [{
     "id": "craft",
@@ -51,7 +53,8 @@ integrator is deterministic semi-implicit Euler on a fixed 1 ms substep
   }],
   "actuators": [
     { "id": "t1", "name": "front-left",  "bodyId": "craft", "kind": "thrust",
-      "axis": { "x": 0, "y": 1, "z": 0 }, "maxForce": 6.0, "timeConstantMs": 15 },
+      "axis": { "x": 0, "y": 1, "z": 0 }, "maxForce": 6.0, "timeConstantMs": 15,
+      "offset": { "x": 0.12, "y": 0, "z": 0.12 }, "reactionNmPerN": -0.016 },
     { "id": "t2", "bodyId": "craft", "kind": "thrust", "maxForce": 6.0 },
     { "id": "t3", "bodyId": "craft", "kind": "thrust", "maxForce": 6.0 },
     { "id": "t4", "bodyId": "craft", "kind": "thrust", "maxForce": 6.0,
@@ -158,7 +161,10 @@ physics_simulate({
 - No contacts beyond the single ground plane (no body–body collision yet).
 - Box contact uses the max half-extent as the support radius (coarse,
   vehicle-scale only).
-- Drag is linear in relative velocity (no turbulence, no vortex model).
+- Drag is a linear term plus an optional quadratic term (`quadraticDrag`, the ½ρCdA contribution). No turbulence, no vortex model.
+- Thrust and torque are linear in the lagged command. A real propeller is closer to rpm²; the integrator does not hide a second map.
+- A thrust actuator may set `offset` (force applied away from the centre of mass, so τ = r × F) and `reactionNmPerN` (signed prop-drag torque along the thrust axis). Omit both and the force acts at the centre of mass, which is what the hover check below assumes.
+- `signed: true` accepts a command in −1..1. Unsigned actuators stay in 0..1.
 - Deterministic single-threaded integration — no chaos tolerance, no parallel
   scenes.
 

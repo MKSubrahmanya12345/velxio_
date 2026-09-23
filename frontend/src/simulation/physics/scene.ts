@@ -39,12 +39,23 @@ export interface PhysicsEnvironment {
   wind: Vec3;
   /** Linear drag: F = -k · (v − wind), units N·s/m. Default 0. */
   linearDrag: number;
+  /**
+   * Quadratic drag: F = -k · |v − wind| · (v − wind), units N·s²/m².
+   * Default 0. This is the ½ρCdA term, not a turbulence model.
+   */
+  quadraticDrag: number;
   /** Angular drag: τ = -k · ω, units N·m·s. Default 0. */
   angularDrag: number;
   /** Ground plane at world Y = floorY, or null for an open world (space). */
   floorY: number | null;
   /** Bounce on the floor, 0..1. Default 0.1. */
   restitution: number;
+  /**
+   * Contact stick while touching the floor, 1/s. Default 8 (the historical
+   * behaviour — a dropped body comes to rest). Driven vehicles set this near
+   * 0 and model rolling resistance with drag, or the floor eats their speed.
+   */
+  groundDamping: number;
 }
 
 export type PhysicsBodyShape =
@@ -81,8 +92,27 @@ export interface PhysicsActuatorSpec {
   maxTorque: number;
   /** First-order lag toward the commanded input, ms. Default 15. */
   timeConstantMs: number;
-  /** Commanded input 0..1 before any script overrides it. */
+  /**
+   * Commanded input before any script overrides it.
+   * 0..1 normally; −1..1 when `signed` is set (torque that must reverse).
+   */
   inputDefault: number;
+  /**
+   * When true, commanded input is −1..1 and output may be negative.
+   * Thrust stays unipolar — a prop does not push the other way.
+   */
+  signed: boolean;
+  /**
+   * Body-frame point the actuator acts at, metres from the centre of mass.
+   * Thrust there produces τ = r × F. Zero (the default) means the force
+   * goes through the CoM and cannot tilt the body by itself.
+   */
+  offset: Vec3;
+  /**
+   * Reaction torque along the thrust axis, N·m per N of thrust, already
+   * signed (prop drag torque on the body). Zero for torque actuators.
+   */
+  reactionNmPerN: number;
   /**
    * Optional circuit binding: when the browser simulator is running, the
    * actuator is driven by the PWM duty (0..1) present on this component pin
@@ -118,9 +148,11 @@ export const DEFAULT_ENVIRONMENT: PhysicsEnvironment = {
   gravity: { x: 0, y: -9.81, z: 0 },
   wind: { x: 0, y: 0, z: 0 },
   linearDrag: 0,
+  quadraticDrag: 0,
   angularDrag: 0,
   floorY: 0,
   restitution: 0.1,
+  groundDamping: 8,
 };
 
 const ID_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -206,6 +238,7 @@ export function parsePhysicsScene(raw: unknown, version: number = PHYSICS_SCENE_
     gravity: vec3Of(envRaw.gravity, 'environment.gravity', errors, DEFAULT_ENVIRONMENT.gravity, 1000),
     wind: vec3Of(envRaw.wind, 'environment.wind', errors, DEFAULT_ENVIRONMENT.wind, 1000),
     linearDrag: num(envRaw.linearDrag, 'environment.linearDrag', errors, 0, 0, 1e6),
+    quadraticDrag: num(envRaw.quadraticDrag, 'environment.quadraticDrag', errors, 0, 0, 1e6),
     angularDrag: num(envRaw.angularDrag, 'environment.angularDrag', errors, 0, 0, 1e6),
     floorY: envRaw.floorY === undefined
       ? DEFAULT_ENVIRONMENT.floorY
@@ -215,6 +248,7 @@ export function parsePhysicsScene(raw: unknown, version: number = PHYSICS_SCENE_
           ? Math.min(L.maxExtent, Math.max(-L.maxExtent, envRaw.floorY))
           : (errors.push('environment.floorY must be a number or null'), DEFAULT_ENVIRONMENT.floorY)),
     restitution: num(envRaw.restitution, 'environment.restitution', errors, 0.1, 0, 1),
+    groundDamping: num(envRaw.groundDamping, 'environment.groundDamping', errors, 8, 0, 1e4),
   };
 
   // ── bodies ───────────────────────────────────────────────────────────────
@@ -305,6 +339,10 @@ export function parsePhysicsScene(raw: unknown, version: number = PHYSICS_SCENE_
     const pinRaw = (typeof a.inputPin === 'object' && a.inputPin !== null
       ? a.inputPin
       : null) as Record<string, unknown> | null;
+    const signed = a.signed === true;
+    if (a.signed !== undefined && a.signed !== true && a.signed !== false) {
+      errors.push(`actuators[${i}].signed must be a boolean`);
+    }
     actuators.push({
       id,
       name: typeof a.name === 'string' ? a.name.slice(0, L.maxLabelChars) : undefined,
@@ -314,7 +352,10 @@ export function parsePhysicsScene(raw: unknown, version: number = PHYSICS_SCENE_
       maxForce: num(a.maxForce, `actuators[${i}].maxForce`, errors, 10, 0, L.maxForce),
       maxTorque: num(a.maxTorque, `actuators[${i}].maxTorque`, errors, 1, 0, L.maxTorque),
       timeConstantMs: num(a.timeConstantMs, `actuators[${i}].timeConstantMs`, errors, 15, 0, 5000),
-      inputDefault: num(a.inputDefault, `actuators[${i}].inputDefault`, errors, 0, 0, 1),
+      inputDefault: num(a.inputDefault, `actuators[${i}].inputDefault`, errors, 0, signed ? -1 : 0, 1),
+      signed,
+      offset: vec3Of(a.offset, `actuators[${i}].offset`, errors, { x: 0, y: 0, z: 0 }, L.maxExtent),
+      reactionNmPerN: num(a.reactionNmPerN, `actuators[${i}].reactionNmPerN`, errors, 0, -100, 100),
       inputPin: pinRaw
         ? {
             componentId: typeof pinRaw.componentId === 'string' ? pinRaw.componentId.slice(0, 64) : '',

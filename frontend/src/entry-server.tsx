@@ -43,9 +43,21 @@ const EditorSeoSummary: React.FC = () => (
   </main>
 );
 
+const BuildSeoSummary: React.FC = () => (
+  <main>
+    <h1>Build lab — research a machine, then simulate it</h1>
+    <p>
+      Describe what you want to build. Velxio researches the class, hands you the
+      numbers to confirm or replace, and simulates that configuration in the
+      browser. One project at a time.
+    </p>
+  </main>
+);
+
 const OSS_ROUTE_COMPONENTS: Record<string, React.FC> = {
   '/editor': EditorSeoSummary,
   '/examples': ExamplesPage,
+  '/build': BuildSeoSummary,
 };
 
 let routeComponents: Record<string, React.FC> = OSS_ROUTE_COMPONENTS;

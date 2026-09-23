@@ -714,7 +714,8 @@ async def physics_simulate(
     sample_every_ms: Annotated[int, "Telemetry sampling interval. 10..10000, default 100."] = 100,
     inputs: Annotated[
         list[dict[str, Any]] | None,
-        "Actuator input timeline. Each item: {at_ms, actuator, value 0..1}. "
+        "Actuator input timeline. Each item: {at_ms, actuator, value}. "
+        "value is 0..1, or −1..1 when that actuator is signed. "
         "Example: [{'at_ms': 0, 'actuator': 't1', 'value': 1}].",
     ] = None,
     checks: Annotated[
