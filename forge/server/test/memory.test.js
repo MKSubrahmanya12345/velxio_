@@ -189,6 +189,7 @@ test('a re-stated pending declaration is confirmed in place, not duplicated', ()
 test('raw JEV answers are recorded so exact failing values are visible', async () => {
   const m = emptyMemory(); accept(m);
   const deps = { ...dependencies(), reasoner: { propose: async () => ({ notes: [] }), respond: async () => ({ content: 'A checked response.' }) }, jev: async ({ state }) => {
+    if (state.operation === 'pre_turn_gate') return { answers: {} };
     assert.equal(state.operation, 'output_review');
     return { model: 'raw-model', provider: 'typesafe', answers: { disposition: choice('deliver', .4), respect_0: noul(.99) }, usage: { input_tokens: 1, output_tokens: 2 } };
   } };
@@ -197,8 +198,9 @@ test('raw JEV answers are recorded so exact failing values are visible', async (
   const check = result.conversation.memory.events.find(e => e.stage === 'check' && e.status !== 'running');
   assert.equal(check.raw.model, 'raw-model');
   assert.deepEqual(check.raw.answers.disposition, choice('deliver', .4));
-  assert.deepEqual(result.decisions[0].detail.answers.disposition, choice('deliver', .4));
-  assert.match(result.decisions[0].summary, /Passed · 1\/1 active notes passed · disposition deliver/);
+  const guard = result.decisions.find(d => d.id === 'MEMORY_CHECK');
+  assert.deepEqual(guard.detail.answers.disposition, choice('deliver', .4));
+  assert.match(guard.summary, /Passed · 1\/1 active notes passed · disposition deliver/);
 });
 
 test('same reasoner gets active memory and JEV failures, repairs once, and rechecks', async () => {
@@ -210,6 +212,7 @@ test('same reasoner gets active memory and JEV failures, repairs once, and reche
     propose: async input => { seen.push(input); return { notes: [] }; },
     respond: async input => { seen.push(input); return { content: attempts === 0 ? 'Ask a friend to hold the camera.' : 'Use a fixed, self-operated camera.' }; },
   }, jev: async ({ state }) => {
+    if (state.operation === 'pre_turn_gate') return { answers: {} };
     assert.equal(state.notes[0].id, 'note_1');
     attempts++;
     return { answers: { disposition: choice(attempts === 1 ? 'revise' : 'deliver'), respect_0: noul(attempts === 1 ? .01 : .99) } };

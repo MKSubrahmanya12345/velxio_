@@ -138,4 +138,14 @@ export const api = {
     restoreEnv: () => http<{ ok: boolean; state: ProvidersState }>('/providers/restore-env', { method: 'POST', body: JSON.stringify({}) }),
     log: () => http<{ log: ProvidersState['log']; failover: FailoverSettings; order: string[] }>('/providers/log'),
   },
+  // Global rules — user-authored, cross-project; they feed the JEV pre-turn gate.
+  globalRules: {
+    list: () => http<GlobalRulesState>('/rules/global'),
+    add: (input: { text: string; kind?: GlobalRuleKind; note?: string; enabled?: boolean }) =>
+      http<{ ok: boolean; rule: GlobalRule } & GlobalRulesState>('/rules/global', { method: 'POST', body: JSON.stringify(input) }),
+    update: (id: string, patch: Partial<Pick<GlobalRule, 'text' | 'kind' | 'note' | 'enabled'>>) =>
+      http<{ ok: boolean; rule: GlobalRule } & GlobalRulesState>(`/rules/global/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    remove: (id: string) =>
+      http<{ ok: boolean } & GlobalRulesState>(`/rules/global/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  },
 };

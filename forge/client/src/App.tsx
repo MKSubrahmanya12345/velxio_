@@ -4,6 +4,7 @@ import { MemoryPanel } from './components/MemoryPanel';
 import type { MemoryEvent, Conversation, Health, GeneratorInfo, ProvidersState } from './types';
 import { ProviderStrip } from './components/ProviderStrip';
 import { ProvidersView } from './components/ProvidersView';
+import { GlobalRulesPanel } from './components/GlobalRulesPanel';
 import { ChatView } from './components/ChatView';
 import { ConversationList } from './components/ConversationList';
 
@@ -183,6 +184,14 @@ export default function App() {
             >
               Providers
             </button>
+            <button
+              className={`fg-btn ${view === 'rules' ? 'fg-btn-primary' : 'fg-btn-secondary'}`}
+              aria-current={view === 'rules' ? 'page' : undefined}
+              title="Global JEV rules — apply to every chat, checked before any generation"
+              onClick={() => setView(v => (v === 'rules' ? 'chat' : 'rules'))}
+            >
+              Global rules
+            </button>
             <ProviderStrip
               health={health}
               offline={offline}
@@ -296,18 +305,6 @@ export default function App() {
                         <div className="fg-hip-desc">The same LLM uses that memory. JEV checks the draft, sending conflicts back for revision before you see it.</div>
                       </div>
                     </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </section>
-        </div>
-      </main>
-      )}
-    </div>
-  );
-}
-       </div>
                   </div>
                 </div>
               </div>

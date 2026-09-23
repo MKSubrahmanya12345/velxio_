@@ -19,12 +19,15 @@ import { createJevProvider } from './providers/jev.js';
 import { createPlanner } from './providers/planner.js';
 import { createReasoner } from './memory/reasoner.js';
 import { createProviderRegistry } from './providers/registry.js';
+import { createGlobalRuleStore } from './memory/globalRules.js';
 import { createRouter } from './routes.js';
 import { createCreativeRouter } from './creative/routes.js';
 
 const cfg = loadConfig();
 const store = await createStore(cfg);
 const registry = await createProviderRegistry(cfg);
+// User-authored, cross-project rules that feed the JEV pre-turn gate.
+const globalRules = createGlobalRuleStore(cfg);
 const counters = { jevCalls: 0, escalations: 0 };
 
 // JEV stays a live-only provider. Without credentials the factory throws; keep

@@ -117,13 +117,10 @@ export function applyPreTurn(answers, candidates) {
   // Only an explicit, named, authorized removal is autonomous. Adds/modifies
   // become directives; the user's own words stay the source of truth.
   const ruleChange = op !== 'none' && (op === 'add' || targetId)
-    ? {
-        op,
-        targetId: op === 'add' ? null : targetId,
-        authorized: op === 'add' ? true : authorizedClear,
-        authorizedValue: authorized,
-        autonomous: op === 'remove' && targetId !== null && authorizedClear,
-      }
+    ? (op === 'add'
+        // An add names no existing rule, so autonomy does not apply at all.
+        ? { op, targetId: null, authorized: true, authorizedValue: authorized }
+        : { op, targetId, authorized: authorizedClear, authorizedValue: authorized, autonomous: op === 'remove' && authorizedClear })
     : null;
 
   const parts = [`${applicableRules.length} rule${applicableRules.length === 1 ? '' : 's'} in force`, `mode ${mode}`];

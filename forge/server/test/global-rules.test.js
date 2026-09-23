@@ -99,7 +99,7 @@ test('gateCandidates: enabled globals first, active chat rules second, capped', 
 // ── questions ───────────────────────────────────────────────────────────────
 
 test('preTurnQuestions: typed questions per candidate plus mode/op/target/authorize', () => {
-  const candidates = [globalRule('g1', 'Stay under ₹500.'), chatRule('c1', 'Only vanilla JS.')];
+  const candidates = gateCandidates([globalRule('g1', 'Stay under ₹500.')], [chatRule('c1', 'Only vanilla JS.')]);
   const q = preTurnQuestions(candidates, 'Build me a site for ₹100');
   assert.equal(q.applies_0.type, 'noul');
   assert.equal(q.applies_1.type, 'noul');
