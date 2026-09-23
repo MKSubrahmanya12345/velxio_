@@ -21,10 +21,14 @@ import { createReasoner } from './memory/reasoner.js';
 import { createProviderRegistry } from './providers/registry.js';
 import { createRouter } from './routes.js';
 import { createCreativeRouter } from './creative/routes.js';
+import { createGlobalRuleStore } from './memory/globalRules.js';
+
 
 const cfg = loadConfig();
 const store = await createStore(cfg);
 const registry = await createProviderRegistry(cfg);
+const globalRules = createGlobalRuleStore(cfg); // loads eagerly: a corrupt file must stop startup
+globalRules.list();
 const counters = { jevCalls: 0, escalations: 0 };
 
 // JEV stays a live-only provider. Without credentials the factory throws; keep
