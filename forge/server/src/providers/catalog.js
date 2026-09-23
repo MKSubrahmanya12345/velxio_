@@ -168,6 +168,31 @@ export function bedrockModelPath(model) {
   return String(model || '').split('/').map(part => encodeURIComponent(part).replace(/%3A/gi, ':')).join('/');
 }
 
+// Bedrock Mantle — Bedrock's OpenAI-compatible gateway. Some models are served
+// ONLY there: native Converse answers HTTP 400 "Operation not allowed" for
+// Moonshot/Kimi ids (e.g. moonshotai.kimi-k2.5). Every kimi/moonshot variant is
+// routed to Mantle, not one exact string, so a suffixed or re-cased id cannot
+// fall back into Converse and reproduce that error. Same AWS credentials,
+// signed for the `bedrock-mantle` SigV4 service (IAM action
+// bedrock-mantle:CreateInference).
+export function isMantleModel(model) {
+  const m = String(model || '').toLowerCase();
+  return m.includes('kimi') || m.includes('moonshot');
+}
+
+// A bedrock-runtime endpoint override does not apply to the Mantle gateway;
+// only an explicit bedrock-mantle base replaces the regional default.
+function mantleBase(entry, base) {
+  return /bedrock-mantle/i.test(base) ? base : `https://bedrock-mantle.${entry.region}.api.aws/v1`;
+}
+
+// OpenAI-style message text. Reasoning models may prefix a <think> block.
+function chatCompletionText(data) {
+  const content = data?.choices?.[0]?.message?.content;
+  const text = Array.isArray(content) ? content.map(p => p?.text ?? '').join('') : String(content ?? '');
+  return text.replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, '');
+}
+
 // Validate + normalize one credential set. Every failure is a 400 that names the
 // exact missing field, so the UI can point at it instead of guessing.
 export function validateCredentials(provider, input = {}) {
@@ -245,6 +270,33 @@ export function buildRequest(entry, { system, user, temperature = 0.2, maxTokens
     };
   }
 
+  if (def.kind === 'bedrock' && isMantleModel(model)) {
+    const url = `${mantleBase(entry, base)}/chat/completions`;
+    const body = JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      temperature,
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+    });
+    return {
+      url,
+      method: 'POST',
+      headers: signV4({
+        method: 'POST',
+        url,
+        region: entry.region,
+        service: 'bedrock-mantle',
+        accessKeyId: entry.apiKey,
+        secretAccessKey: entry.secret,
+        sessionToken: entry.sessionToken || undefined,
+        payload: body,
+        headers: { 'content-type': 'application/json' },
+      }),
+      body,
+      timeoutMs: def.timeoutMs,
+    };
+  }
+
   if (def.kind === 'bedrock') {
     const url = `${base || `https://bedrock-runtime.${entry.region}.amazonaws.com`}/model/${bedrockModelPath(model)}/converse`;
     const body = JSON.stringify({
@@ -307,6 +359,12 @@ export function extractText(entry, data) {
     return text;
   }
 
+  if (def.kind === 'bedrock' && isMantleModel(trim(entry.model) || def.defaultModel)) {
+    const text = chatCompletionText(data);
+    if (!text.trim()) throw new Error(`${label} (Mantle) returned no text${data?.error?.message ? `: ${data.error.message}` : ''}.`);
+    return text;
+  }
+
   if (def.kind === 'bedrock') {
     const content = data?.output?.message?.content;
     const text = Array.isArray(content) ? content.filter(c => c?.text).map(c => c.text).join('\n') : '';
@@ -323,6 +381,13 @@ export function extractText(entry, data) {
 // The failover loop can stop re-paying for these while it keeps looping the rest.
 export function isPermanentStatus(status) {
   return status === 401 || status === 403 || status === 404;
+}
+
+// Bedrock refuses a model/account it will not serve with HTTP 400 "Operation
+// not allowed". Ten more rounds cannot change that, so it counts as rejected.
+export function isPermanentFailure(entry, status, detail = '') {
+  if (isPermanentStatus(status)) return true;
+  return resolveProviderId(entry?.provider) === 'bedrock' && status === 400 && /operation not allowed/i.test(String(detail));
 }
 
 // ── .env entries ──────────────────────────────────────────────────────────────
