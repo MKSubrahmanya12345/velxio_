@@ -9,12 +9,14 @@
 // FAIL-SAFE RULE (user requirement): if Jev is unavailable, slow, or returns a
 // bad decision, we route straight to the LLM. A missing/late decision never
 // blocks the build — we use LLM knowledge.
+import { choice, score, noul, num, answerValue, answerCertainty, noulTrue } from './jevQuestions.js';
+import { getProfile, isSafetyCritical, DEFAULT_PROFILE } from './profiles.js';
 
 const JEV_TIMEOUT_MS = 5000;
 
-// Parts where wrong math is dangerous: ALWAYS a full LLM pass, never gated.
-export const SAFETY_CRITICAL =
-  /battery|esc|electronic speed|motor|\bkv\b|propulsion|propeller|flight controller|\bfc\b|firmware|power|current|voltage/i;
+// NOTE: what counts as "safety-critical" is now PROFILE-DEFINED, not a single
+// global regex — battery/ESC/KV for robotics, secrets/migrations for software,
+// load/torque for mechanical. See profiles.js.
 
 // Confidence policy — tune on your own traffic (OpenRouter guidance: start 0.8).
 const REUSE_CONF = 0.75; // needed=no  → skip LLM
@@ -25,32 +27,9 @@ const ACT_CONF = 0.8; // general floor for acting on a typed answer
 // Cheapest-capable model preference for the "light" tier.
 const CHEAP_PREFERENCE = ['ollama', 'groq', 'openrouter', 'gemini', 'llm', 'bedrock'];
 
-function num(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-function answerValue(a) {
-  if (a == null) return null;
-  if (typeof a !== 'object') return a;
-  if ('value' in a) return a.value;
-  if ('noul' in a) return a.noul;
-  if ('probability' in a) return a.probability;
-  if ('score' in a) return a.score;
-  if ('choice' in a) return a.choice;
-  return a;
-}
-function answerConfidence(a) {
-  return a && typeof a === 'object' ? num(a.confidence ?? a.probability ?? a.score) : null;
-}
-function noulTrue(a) {
-  const v = answerValue(a);
-  if (typeof v === 'boolean') return v;
-  const n = num(v);
-  return n != null ? n >= 0.5 : false;
-}
-
 // Race a promise against a timeout; on timeout/throw, return null (→ fail safe).
-async function withTimeout(promise, ms) {
+// Exported so other services (reconcile) can apply the same rule.
+export async function withTimeout(promise, ms) {
   let t;
   const guard = new Promise((_, rej) => {
     t = setTimeout(() => rej(new Error('jev-timeout')), ms);
@@ -76,10 +55,19 @@ function cheapestPrefer(registry) {
 
 // Decide how to research ONE part.
 // Returns { action:'dup'|'skip'|'light'|'full', source?, prefer?, reason, confidence, usedJev }.
-export async function triagePart({ part, project, indexer, jev, registry }) {
-  // Safety-critical → always full LLM, no gate.
-  if (SAFETY_CRITICAL.test(part.name) || SAFETY_CRITICAL.test(part.domain || '')) {
-    return { action: 'full', reason: 'safety-critical part — forced full LLM research', confidence: 1, usedJev: false };
+export async function triagePart({ part, project, indexer, jev, registry, profile }) {
+  const prof = profile || getProfile(project?.profileId) || DEFAULT_PROFILE;
+
+  // Safety-critical FOR THIS DOMAIN → always full LLM, no gate. What counts as
+  // dangerous is profile-defined: battery/ESC/KV for robotics, secrets/migrations
+  // for software, load/torque for mechanical.
+  if (isSafetyCritical(part.name, part.domain || '', prof)) {
+    return {
+      action: 'full',
+      reason: `safety-critical in ${prof.label} — forced full LLM research`,
+      confidence: 1,
+      usedJev: false,
+    };
   }
   // No real Jev → skip the gate, default LLM path.
   if (!jev || !jev.available) {
@@ -94,25 +82,19 @@ export async function triagePart({ part, project, indexer, jev, registry }) {
     .map((p) => ({ name: p.name, hasData: !!p.current?.data }));
 
   const questions = {
-    needed: {
-      type: 'noul',
-      instructions:
-        'Given the indexed prior findings, is a fresh LLM research call actually needed for this part, or do we already have enough? Answer LOW only if existing findings already adequately cover it.',
-    },
-    tier: {
-      type: 'choice',
-      instructions: 'Complexity/risk tier that should do the work for this part.',
-      criteria: ['skip', 'light', 'full'],
-    },
-    risk: {
-      type: 'score',
-      instructions: 'How safety/performance-critical is this part (1 trivial … 5 critical; power/propulsion math is high).',
-      criteria: ['trivial', 'low', 'medium', 'high', 'critical'],
-    },
-    dup: {
-      type: 'noul',
-      instructions: 'Does this part duplicate another already-researched part in this project?',
-    },
+    needed: noul(
+      'Given the indexed prior findings, is a fresh LLM research call actually needed for this part, or do we already have enough? Answer LOW only if existing findings already adequately cover it.',
+    ),
+    tier: choice('Complexity/risk tier that should do the work for this part.', {
+      skip: 'Trivial/boilerplate — no research needed, the human can fill this in',
+      light: 'Simple, well-known — a cheap model can handle it',
+      full: 'Complex or uncertain — needs the full research pass',
+    }),
+    risk: score(
+      'How safety/performance-critical is this part? Wrong math on power, propulsion or firmware can destroy hardware.',
+      ['trivial', 'low', 'medium', 'high', 'critical'],
+    ),
+    dup: noul('Does this part duplicate another already-researched part in this project?'),
   };
   const state = {
     operation: 'triage',
@@ -128,7 +110,7 @@ export async function triagePart({ part, project, indexer, jev, registry }) {
     return { action: 'full', reason: 'Jev decision unavailable/slow — routed to LLM', confidence: 1, usedJev: false };
   }
   const a = res.answers;
-  const conf = (id) => answerConfidence(a[id]);
+  const conf = (id) => answerCertainty(a[id]);
   const val = (id) => answerValue(a[id]);
 
   // Duplicate → copy sibling data (0 LLM).
@@ -175,16 +157,18 @@ export async function triagePart({ part, project, indexer, jev, registry }) {
 export async function decomposePlan({ goal, constraints, jev, registry }) {
   if (!jev || !jev.available) return { breadthHint: 0, riskBias: '', usedJev: false };
   const questions = {
-    breadth: {
-      type: 'choice',
-      instructions: 'How many distinct parts should this build be decomposed into?',
-      criteria: ['minimal (~4)', 'standard (~8)', 'detailed (~12)'],
-    },
-    risk: {
-      type: 'score',
-      instructions: 'Overall build risk if done wrong (1 low … 5 high).',
-      criteria: ['low', 'moderate', 'elevated', 'high', 'critical'],
-    },
+    breadth: choice('How many distinct parts should this build be decomposed into?', {
+      'minimal (~4)': 'Only the essential parts — a quick, cheap build',
+      'standard (~8)': 'The normal set of parts for a working build',
+      'detailed (~12)': 'Every part, including tools and verification steps',
+    }),
+    risk: score('Overall build risk if done wrong.', [
+      'low',
+      'moderate',
+      'elevated',
+      'high',
+      'critical',
+    ]),
   };
   const res = await withTimeout(
     jev.decide({ state: { operation: 'decompose', goal, constraints }, questions }, { registry }),
@@ -208,10 +192,9 @@ export async function affectedParts({ project, text, jev, registry }) {
   if (!jev || !jev.available || parts.length === 0) return parts.map((p) => p.id); // fail safe: all
   const questions = {};
   for (const p of parts) {
-    questions[`aff_${p.id}`] = {
-      type: 'noul',
-      instructions: `Does the user's latest message require re-researching the "${p.name}" part specifically? "${text}"`,
-    };
+    questions[`aff_${p.id}`] = noul(
+      `Does the user's latest message require re-researching the "${p.name}" part specifically? "${text}"`,
+    );
   }
   const res = await withTimeout(
     jev.decide({ state: { operation: 'affected', goal: project.goal, message: text }, questions }, { registry }),
@@ -226,10 +209,9 @@ export async function affectedParts({ project, text, jev, registry }) {
 export async function isSufficient({ part, project, jev, registry }) {
   if (!jev || !jev.available) return true;
   const questions = {
-    sufficient: {
-      type: 'noul',
-      instructions: 'Is the gathered data for this part complete enough to build from, with no blocking unknowns?',
-    },
+    sufficient: noul(
+      'Is the gathered data for this part complete enough to build from, with no blocking unknowns?',
+    ),
   };
   const res = await withTimeout(
     jev.decide(

@@ -80,6 +80,13 @@ export function createProjectRouter(deps) {
     }
   });
 
+  // Gap B: resume a stalled/partial run. Idempotent — no-op when nothing is left.
+  r.post('/:id/resume', (req, res, next) => {
+    return stream(res, req, 200, (emit) =>
+      ctrl.resume({ projectId: req.params.id, emit }),
+    ).catch(next);
+  });
+
   r.post('/:id/messages', (req, res, next) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });

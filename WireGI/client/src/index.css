@@ -76,7 +76,11 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
 .badge.data_ready { color: var(--good); border-color: var(--good); }
 .badge.awaiting_human { color: var(--warn); border-color: var(--warn); }
 .badge.verified { color: var(--good); border-color: var(--good); background: #0f2e18; }
-.badge.human { color: var(--warn); }
+.badge.failed { color: var(--bad); border-color: var(--bad); background: #2a0f12; }
+.badge.pending { color: var(--muted); }
+.badge.researching { color: var(--accent); border-color: var(--accent); }
+.part-error { font-size: 12px; font-family: var(--mono); color: var(--bad); margin-top: 6px; }
+.resume-bar { display: flex; align-items: center; gap: 10px; }
 .part-body { margin-top: 8px; font-size: 13px; }
 .kv { margin: 2px 0; }
 .kv b { color: var(--muted); font-weight: 500; }

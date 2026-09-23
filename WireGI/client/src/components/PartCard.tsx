@@ -11,9 +11,15 @@ export default function PartCard({ part }: { part: Part }) {
         <span className="badge">{part.domain}</span>
         <span className={`badge ${part.status}`}>{part.status}</span>
         {part.humanCheckpoint && <span className="badge human">⚠ eyes</span>}
+        {part.attempts && part.attempts > 1 ? <span className="badge">try {part.attempts}</span> : null}
         <span style={{ flex: 1 }} />
         <span className="badge">{open ? '▾' : '▸'}</span>
       </div>
+      {part.status === 'failed' && part.error ? (
+        <div className="part-error">
+          ✖ {part.error} <span style={{ color: 'var(--muted)' }}>— siblings continued; use Resume to retry</span>
+        </div>
+      ) : null}
       {open && (
         <div className="part-body">
           {part.current?.gathered?.length ? (
@@ -55,6 +61,20 @@ export default function PartCard({ part }: { part: Part }) {
               <ul className="tight">
                 {part.openQuestions.map((q: string, i: number) => (
                   <li key={i}>{q}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {/* Verification ladder — WHY this is believed, not just that it is. */}
+          {part.evidence?.length ? (
+            <div>
+              <b style={{ color: 'var(--muted)' }}>Evidence:</b>
+              <ul className="tight">
+                {part.evidence.map((e, i) => (
+                  <li key={i}>
+                    <code>{e.rung}</code> {e.by ? `by ${e.by} ` : ''}
+                    {e.detail ? <span style={{ color: 'var(--muted)' }}>— {e.detail}</span> : null}
+                  </li>
                 ))}
               </ul>
             </div>

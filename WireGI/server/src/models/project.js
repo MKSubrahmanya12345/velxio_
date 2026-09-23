@@ -14,14 +14,17 @@ export function makeProject({ goal, constraints = {} }) {
     updatedAt: now,
     goal,
     constraints,
-    status: 'init', // init | researching | awaiting_human | complete
+    status: 'init', // init | researching | awaiting_human | partial | complete
+    profileId: null, // domain profile — resolved in runProject (Jev D1 + goal)
+    profileLabel: null,
     state: {
-      idea: { goal, constraints, parts: [] },
+      idea: { goal, constraints, parts: [], revisions: [] }, // the living document
       current: { parts: [] },
       verified: { parts: [] },
       parts: [],
       decisions: [],
       researchLog: [],
+      reconciliations: [], // cross-part integration passes
       chat: [{ role: 'system', content: `Project created: ${goal}`, ts: now }],
     },
   };
@@ -32,11 +35,17 @@ export function makePart({ name, domain, idea = {} }) {
     id: newId('part'),
     name,
     domain,
-    status: 'pending', // pending|researching|data_ready|awaiting_human|verified
+    // pending | researching | data_ready | awaiting_human | verified | failed
+    status: 'pending',
     idea, // IDEA
     current: null, // CURRENT: gathered/understood/data
     verified: false, // VERIFIED
     humanCheckpoint: false,
+    attempts: 0, // how many research passes have run (Gap B resumability)
+    error: null, // last failure message when status === 'failed'
+    // Verification ladder evidence. VERIFIED is not a boolean — this is why it
+    // is believed, in order: research → sim/test → human-eyes.
+    evidence: [],
     research: [],
     gathered: [],
     data: null,

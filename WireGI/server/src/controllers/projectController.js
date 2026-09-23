@@ -6,5 +6,7 @@ export function createProjectController({ cfg, registry, jev, store, indexer }) 
     start: ({ goal, constraints, prefer, emit }) => agent.runProject(goal, constraints || {}, { emit, prefer }),
     message: ({ projectId, text, prefer, emit }) =>
       agent.continueProject(projectId, text, { emit, prefer }),
+    // Gap B: resume a stalled/partial run (pending, stale researching, failed).
+    resume: ({ projectId, emit }) => agent.resumeProject(projectId, { emit }),
   };
 }
