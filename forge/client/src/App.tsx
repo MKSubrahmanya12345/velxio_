@@ -30,6 +30,8 @@ export default function App() {
   // 'chat' is the workspace; 'providers' is the key/failover management page;
   // 'rules' is the cross-project global rule set behind the pre-turn gate.
   const [view, setView] = useState<'chat' | 'providers' | 'rules'>('chat');
+  // Enabled global-rule count for the header badge; null until known.
+  const [ruleCount, setRuleCount] = useState<number | null>(null);
   const activeId = useRef<string | null>(null);
   const navigation = useRef(0);
   const refreshVersion = useRef(0);
@@ -68,6 +70,10 @@ export default function App() {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    // Best-effort: the badge is informational, the page reports real errors.
+    api.globalRules?.list?.().then(s => setRuleCount(s.rules.filter(r => r.enabled).length)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!sidebarOpen) return;
@@ -190,7 +196,7 @@ export default function App() {
               title="Global JEV rules — apply to every chat, checked before any generation"
               onClick={() => setView(v => (v === 'rules' ? 'chat' : 'rules'))}
             >
-              Global rules
+              Global rules{ruleCount ? <span className="fg-rules-badge" aria-label={`${ruleCount} active`}>{ruleCount}</span> : null}
             </button>
             <ProviderStrip
               health={health}
@@ -209,8 +215,8 @@ export default function App() {
           <ProvidersView onBack={() => setView('chat')} onChanged={() => void refresh()} />
         </main>
       ) : view === 'rules' ? (
-        <main className="fg-main-chat">
-          <GlobalRulesPanel onBack={() => setView('chat')} />
+        <main className="fg-main-chat fg-rules-main">
+          <GlobalRulesPanel onBack={() => setView('chat')} onChanged={setRuleCount} />
         </main>
       ) : (
       <main className="fg-main-chat">
@@ -245,7 +251,7 @@ export default function App() {
             {loadingId ? (
               <div className="fg-empty" role="status">Opening your build…</div>
             ) : current ? (
-              <ChatView key={current.id} conversation={current} onUpdate={updateConversation} onBack={newChat} provider={selectedProvider} />
+              <ChatView key={current.id} conversation={current} onUpdate={updateConversation} onBack={newChat} provider={selectedProvider} onOpenGlobalRules={() => setView('rules')} />
             ) : (
               <div className="fg-empty">
                 <div className="fg-hero-chat">

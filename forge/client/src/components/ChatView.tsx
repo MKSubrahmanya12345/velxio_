@@ -101,11 +101,13 @@ export function ChatView({
   onUpdate,
   onBack,
   provider,
+  onOpenGlobalRules,
 }: {
   conversation: Conversation;
   onUpdate: (c: Conversation) => void;
   onBack: () => void;
   provider?: string;
+  onOpenGlobalRules?: () => void;
 }) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -280,7 +282,7 @@ export function ChatView({
     </div>
     <div className={`fg-memory-wrap${memoryOpen ? ' is-open' : ''}`}>
       <button className="fg-memory-close fg-btn fg-btn-secondary" onClick={() => setMemoryOpen(false)}>Close memory ×</button>
-      <MemoryPanel memory={conversation.memory} events={events} busy={busy} error={error} onChange={changeNote} />
+      <MemoryPanel memory={conversation.memory} events={events} busy={busy} error={error} onChange={changeNote} onOpenGlobalRules={onOpenGlobalRules} />
     </div>
     </div>
   );

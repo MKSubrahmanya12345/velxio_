@@ -312,7 +312,7 @@ export interface RuleCheck {
 export interface MemoryEvent {
   id: string;
   turnId: string;
-  stage: 'extract' | 'review' | 'context' | 'generate' | 'check' | 'repair' | 'ready' | 'provider';
+  stage: 'gate' | 'extract' | 'review' | 'context' | 'generate' | 'check' | 'repair' | 'ready' | 'provider';
   status: 'running' | 'complete' | 'blocked';
   label: string;
   at: string;
@@ -344,6 +344,7 @@ export interface MemoryEvent {
   };
   blocking?: { type: string; noteId?: string; text?: string; value?: number | null; detail?: string }[];
   soft?: RuleCheck[];
+  directive?: TurnDirective;
 }
 export interface ProjectMemory {
   version: number;

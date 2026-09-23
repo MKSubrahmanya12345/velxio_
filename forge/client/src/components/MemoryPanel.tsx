@@ -4,9 +4,12 @@ import type { MemoryEvent, MemoryNote, ProjectMemory } from '../types';
 const labels = { goal: 'Goal', rule: 'User rule', fact: 'Fact', preference: 'Preference', assumption: 'AI inference', suggestion: 'AI suggestion', question: 'Open question' };
 const domains: Record<string, string> = { production: 'Real-world production', fiction: 'Story world', creative: 'Creative direction', meta: 'Collaboration process', unknown: 'Scope not established' };
 const checkLabels: Record<string, string> = { pass: 'respected by response', conflict: 'contradiction found', uncertain: 'uncertain — not a confirmed conflict', unknown: 'no usable JEV value' };
-const stages = [ ['extract', 'Form'], ['review', 'JEV'], ['context', 'Context'], ['generate', 'Draft'], ['check', 'Check'] ] as const;
+const stages = [ ['gate', 'Gate'], ['extract', 'Form'], ['review', 'JEV'], ['context', 'Context'], ['generate', 'Draft'], ['check', 'Check'] ] as const;
 
-export function MemoryPanel({ memory, events = [], busy = false, error = '', onChange }: {
+const modeLabels: Record<string, string> = { answer: 'answer', clarify_first: 'ask first', rule_change: 'rule change', out_of_scope: 'out of scope' };
+
+export function MemoryPanel({ memory, events = [], busy = false, error = '', onChange, onOpenGlobalRules }: {
+  onOpenGlobalRules?: () => void;
   memory?: ProjectMemory;
   events?: MemoryEvent[];
   busy?: boolean;
@@ -38,6 +41,8 @@ export function MemoryPanel({ memory, events = [], busy = false, error = '', onC
   const checking = (busy || replaying) && last?.stage === 'check' && last.status === 'running';
   const liveIds = new Set(trace.find(e => e.stage === 'review' && e.status === 'complete')?.noteIds || []);
   const mock = last?.providers.jev === 'mock';
+  const directive = [...trace].reverse().find(e => e.stage === 'gate' && e.directive)?.directive;
+  const globalApplied = directive?.applicableRules.filter(r => r.source === 'global') || [];
 
   return (
     <aside className="fg-memory" aria-label="Project memory">
@@ -60,6 +65,14 @@ export function MemoryPanel({ memory, events = [], busy = false, error = '', onC
         {error ? 'Turn interrupted · working changes were not confirmed' : replaying ? `Replay · ${last?.label || 'Recorded events'}` : busy ? last?.label || 'Starting the memory loop…' : last ? 'Last turn · recorded decision trail' : 'Memory will form as you describe your project.'}
       </div>
       {!busy && recordedTurn.length > 0 && <button className="fg-memory-replay" onClick={() => setReplayStep(replaying ? null : 0)}>{replaying ? 'Stop replay ■' : 'Replay recorded turn ↻'}</button>}
+      {directive && <section className="fg-memory-gate" aria-label="Pre-turn gate">
+        <header><span>JEV pre-turn gate</span><small>mode · {modeLabels[directive.mode] || directive.mode}</small></header>
+        {directive.applicableRules.length > 0
+          ? <ul>{directive.applicableRules.map(r => <li key={r.id}><em className={`src-${r.source}`}>{r.source}</em><span>{r.text}{r.unresolved && <small> · no JEV value, kept in force</small>}</span></li>)}</ul>
+          : <p>No rules applied to this message.</p>}
+        {onOpenGlobalRules && <p>{globalApplied.length ? `${globalApplied.length} global rule${globalApplied.length === 1 ? '' : 's'} applied. ` : ''}<button onClick={onOpenGlobalRules}>Manage global rules →</button></p>}
+      </section>}
+      {!directive && onOpenGlobalRules && <p className="fg-memory-caveat" style={{ margin: '0 0 14px' }}>Global rules apply to every chat. <button className="fg-link-btn" onClick={onOpenGlobalRules}>Manage global rules →</button></p>}
       {busy && <p className="fg-memory-caveat">Working copy · saved only when this turn finishes.</p>}
       <div className="fg-memory-notes">
         {!notes.length && !candidates.length && <div className="fg-memory-empty"><span>＋</span><strong>Start with what matters.</strong><p>“Only one person.” “No paid tools.” “This must work offline.” Rules emerge from your words—not a fixed form.</p></div>}
