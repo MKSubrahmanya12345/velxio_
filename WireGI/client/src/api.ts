@@ -53,7 +53,8 @@ function streamRequest(path: string, body: any, onEvent: (e: StreamEvent) => voi
         const pump = () =>
           reader.read().then(({ done, value }) => {
             if (done) {
-              resolve(lastResult as Project);
+              if (lastResult) resolve(lastResult);
+              else reject(new Error('stream ended without a result'));
               return;
             }
             buf += decoder.decode(value, { stream: true });
@@ -85,4 +86,9 @@ export function createProject(goal: string, constraints: any, onEvent: (e: Strea
 
 export function sendMessage(id: string, text: string, onEvent: (e: StreamEvent) => void) {
   return streamRequest(`/projects/${id}/messages`, { text }, onEvent);
+}
+
+// Gap B: resume a stalled/partial run (pending, stale researching, failed).
+export function resumeProject(id: string, onEvent: (e: StreamEvent) => void) {
+  return streamRequest(`/projects/${id}/resume`, {}, onEvent);
 }

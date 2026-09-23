@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { createProjectRouter } from './projectRoutes.js';
-import { createResearchRouter } from './researchRoutes.js';
-import { createDecisionRouter } from './decisionRoutes.js';
+import { createProjectRouter } from './routes/projectRoutes.js';
+import { createResearchRouter } from './routes/researchRoutes.js';
+import { createDecisionRouter } from './routes/decisionRoutes.js';
 // Reuse Forge's provider management backend (reads the same .env keys).
 import { createProviderRouter } from '../../../forge/server/src/providerRoutes.js';
 

@@ -16,10 +16,15 @@ export default function DecisionLog({ decisions }: { decisions: Decision[] }) {
                 · {d.source || '?'} · {new Date(d.at).toLocaleTimeString()}
               </span>
             </div>
+            {d.note && <div className="q" style={{ color: 'var(--warn)' }}>↳ {d.note}</div>}
             {d.answers &&
               Object.entries(d.answers).map(([id, a]: any) => {
-                const val = a?.value ?? a?.probability ?? a?.score ?? a;
-                const conf = a?.confidence ?? a?.probability ?? null;
+                // Real Jev answers: {choice:'key'} | {noul:0..1} | {score:index};
+                // the LLM fallback also emits {value}. Show whichever exists.
+                const val = a?.choice ?? a?.noul ?? a?.score ?? a?.value ?? a;
+                const conf =
+                  a?.confidence ??
+                  (typeof a?.noul === 'number' ? Math.max(a.noul, 1 - a.noul) : null);
                 return (
                   <div className="q" key={id}>
                     <span className="id">{id}</span>: {JSON.stringify(val)}
