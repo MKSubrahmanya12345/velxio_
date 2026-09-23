@@ -1,5 +1,5 @@
 // Generic LLM generation through Forge's failover loop (reuses Forge providers).
-import { runWithFailover, callProviderEntry } from '../../../forge/server/src/providers/failover.js';
+import { runWithFailover, callProviderEntry } from '../../../../forge/server/src/providers/failover.js';
 
 // Plain text generation. `registry` is Forge's ProviderRegistry.
 export async function generate({

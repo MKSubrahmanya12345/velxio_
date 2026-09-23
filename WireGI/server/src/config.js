@@ -11,7 +11,7 @@ export function loadConfig(env = process.env) {
   const cfg = forgeLoadConfig(env);
 
   // WireGI-specific runtime paths (separate from Forge's so we never overwrite).
-  cfg.port = Number(env.PORT || 4322);
+  cfg.port = Number(4322);
   cfg.corsOrigin = env.CORS_ORIGIN || 'http://localhost:5173';
   cfg.db.dataFile = env.DATA_FILE || './data/wiregi-projects.json';
   cfg.providers.dataFile = env.PROVIDERS_FILE || './data/wiregi-providers.json';

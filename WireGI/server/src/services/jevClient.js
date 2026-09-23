@@ -1,7 +1,7 @@
 // Jev decision client. Primary: Forge's real TypeSafe Jev provider.
 // Fallback: if no TYPESAFE_API_KEY is configured, the LLM acts as a typed
 // decision model so the flow still runs (decisions "work properly" either way).
-import { createJevProvider } from '../../../forge/server/src/providers/jev.js';
+import { createJevProvider } from '../../../../forge/server/src/providers/jev.js';
 import { generateJSON } from './llm.js';
 
 export function createJev(cfg) {
