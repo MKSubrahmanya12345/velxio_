@@ -128,11 +128,35 @@ def list_files(project: Project, args: dict) -> dict:
 
 
 def board_pinout(project: Project, args: dict) -> dict:
-    from app.agent.models import BOARD_CAPABILITIES
-
-    return {"ok": True, "board": "arduino-uno", "pins": PINS.get("arduino-uno", []),
-            "capabilities": BOARD_CAPABILITIES.get("arduino-uno", {}),
-            "note": "Pin names must be used verbatim in wires. GPIO 0/1 double as serial."}
+    from app.agent import catalog as cat
+    # Support all boards - check args for board name, or use project board if available
+    board_id = str(args.get("board", ""))[:40] if args.get("board") else None
+    if not board_id:
+        # Try to infer from project
+        if project.board:
+            # Project board id is like 'uno', map to arduino-uno if needed
+            bid = project.board.id
+            if bid in cat.BOARDS:
+                board_id = bid
+            elif "uno" in bid.lower():
+                board_id = "arduino-uno"
+            else:
+                board_id = cat.DEFAULT_BOARD
+        else:
+            board_id = cat.DEFAULT_BOARD
+    
+    if board_id not in cat.BOARDS:
+        # Fuzzy match
+        board_id = cat.DEFAULT_BOARD
+    
+    board = cat.board(board_id)
+    pins = board.get("pins", [])
+    caps = {k: v for k, v in board.items() if k not in {"pins", "label", "fqbn", "kind"}}
+    
+    return {"ok": True, "board": board_id, "label": board.get("label", board_id),
+            "pins": pins, "capabilities": caps,
+            "all_boards": list(cat.BOARDS.keys()),
+            "note": f"Pin names must be used verbatim in wires. Board {board_id} has {len(pins)} pins. Use board param to query other boards: {list(cat.BOARDS.keys())[:5]}..."}
 
 
 def component_info(project: Project, args: dict) -> dict:

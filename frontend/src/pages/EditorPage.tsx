@@ -38,6 +38,7 @@ import { EditorMenuBar } from '../components/editor/EditorMenuBar';
 import type { CompilationLog } from '../utils/compilationLogger';
 import '../App.css';
 import { AgentPanel } from '../components/agent/AgentPanel';
+import { CursorCommandPalette } from '../components/editor/CursorCommandPalette';
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -804,6 +805,7 @@ export const EditorPage: React.FC = () => {
       </div>
 
       <AgentPanel />
+      <CursorCommandPalette />
       </div>
 
       {showStarBanner && (

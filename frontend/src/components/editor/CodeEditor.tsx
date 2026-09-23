@@ -1,5 +1,5 @@
 import Editor, { type Monaco } from '@monaco-editor/react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { editor as MonacoEditor } from 'monaco-editor';
 import { useEditorStore } from '../../store/useEditorStore';
@@ -15,6 +15,13 @@ import {
   registerCodeFormatters,
   setFormatterMessages,
 } from './codeFormatters';
+import {
+  registerCursorCompletions,
+  registerCursorKeybindings,
+  registerTabCompletion,
+  injectCursorStyles,
+  showInlineEdit,
+} from './cursorFeatures';
 
 function getLanguage(filename: string): string {
   const ext = filename.split('.').pop()?.toLowerCase() ?? '';
@@ -31,38 +38,57 @@ export const CodeEditor = () => {
   const { files, activeFileId, setFileContent, fontSize, manifestViewBoardId } =
     useEditorStore();
   const boards = useSimulatorStore((s) => s.boards);
-  // App-wide light/dark, not an editor-only setting: the editor sits flush
-  // against the canvas and the panels, so it follows the same switch.
   const theme = monacoThemeFor(useResolvedTheme());
   const activeFile = files.find((f) => f.id === activeFileId);
   const language = activeFile ? getLanguage(activeFile.name) : 'cpp';
   const { t } = useTranslation();
 
-  // The live editor instance, so the Edit menu's "Format document" can drive
-  // Monaco's own format action (the same one the right-click menu and
-  // Shift+Alt+F run). Re-set on every file switch: the editor is keyed by
-  // file id, so each file is a fresh instance and the old one is disposed.
   const [instance, setInstance] = useState<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const monacoRef = useRef<Monaco | null>(null);
+  
   useEffect(() => {
-    // The read-only libraries.json view swaps the editor out without going
-    // through onMount, so the last file's instance would otherwise linger.
     if (!instance || manifestViewBoardId || !hasDocumentFormatter(language)) return;
     return registerEditorCommand('edit.formatDocument', () => {
-      if (!instance.getModel()) return; // disposed mid-switch
+      if (!instance.getModel()) return;
       instance.focus();
       void instance.getAction('editor.action.formatDocument')?.run();
     });
   }, [instance, language, manifestViewBoardId]);
+  
   useEffect(() => {
     setFormatterMessages({
       failedTitle: () => t('editor.format.failed', 'Could not format the file'),
     });
   }, [t]);
 
-  // READ-ONLY libraries.json view (the file explorer's libraries.json entry).
-  // Shows the active board's declared library manifest as plain-text JSON, live.
-  // It is read-only on purpose: adding/removing libraries is done from the
-  // Library Manager modal, which edits board.libraries (this just reflects it).
+  // Cursor-style global key handlers
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd+K already handled by Monaco action, but also support global
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !e.shiftKey) {
+        // Let Monaco handle it if editor focused
+        const active = document.activeElement;
+        if (active?.closest('.monaco-editor')) return;
+        e.preventDefault();
+        if (instance) showInlineEdit(instance);
+      }
+      // Cmd+L focus agent
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'l' && !e.shiftKey) {
+        const active = document.activeElement;
+        if (active?.tagName === 'TEXTAREA' && active?.closest('.agent-panel')) return;
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('velxio-cursor-focus-chat', { detail: {} }));
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [instance]);
+
+  // Inject cursor styles once
+  useEffect(() => {
+    injectCursorStyles();
+  }, []);
+
   if (manifestViewBoardId) {
     const b = boards.find((x) => x.id === manifestViewBoardId);
     const content = JSON.stringify({ libraries: b?.libraries ?? [] }, null, 2);
@@ -90,38 +116,49 @@ export const CodeEditor = () => {
   }
 
   return (
-    <div style={{ height: '100%', width: '100%' }}>
+    <div style={{ height: '100%', width: '100%', position: 'relative' }}>
+      {/* Cursor-style status bar */}
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        right: 0,
+        zIndex: 10,
+        display: 'flex',
+        gap: '4px',
+        padding: '4px 8px',
+        fontSize: '10px',
+        color: '#888',
+        background: 'rgba(0,0,0,0.3)',
+        borderRadius: '0 0 0 6px',
+      }}>
+        <span title="Cmd+K Inline Edit">⌘K</span>
+        <span style={{ opacity: 0.3 }}>|</span>
+        <span title="Cmd+L Chat">⌘L</span>
+        <span style={{ opacity: 0.3 }}>|</span>
+        <span title="Cmd+I Composer">⌘I</span>
+        <span style={{ opacity: 0.3 }}>|</span>
+        <span title="Tab Complete">⇥</span>
+        <span style={{ marginLeft: '6px', color: '#007acc' }}>Velxio = Cursor</span>
+      </div>
+      
       <Editor
-        // key forces a fresh editor instance per file (preserves undo/redo per file)
         key={activeFileId}
         height="100%"
         language={language}
         theme={theme}
         value={activeFile?.content ?? ''}
-        // A model path (unique per group+file) lets Monaco's JSON language
-        // service match chip.json against the schema registered below. Only
-        // set for chip manifests — other files keep the default in-memory
-        // model so nothing else changes behaviour.
         {...(activeFile && activeFile.name.endsWith('chip.json')
           ? { path: `velxio-ws/${useEditorStore.getState().activeGroupId}/${activeFile.name}` }
           : {})}
         beforeMount={(monaco: Monaco) => {
-          // Both velxio themes have to exist before Monaco is asked to use
-          // one, or it silently falls back to stock vs-dark.
+          monacoRef.current = monaco;
           defineVelxioThemes(monaco);
-          // Register the 8080/Z80 assembly language once so Monaco knows how
-          // to tokenize .s / .asm files when they're opened.
           registerRetroAsm(monaco);
-          // "Format Document" for C/C++ and Python (idempotent per monaco
-          // instance). Monaco adds the context-menu row and Shift+Alt+F by
-          // itself once a provider exists.
           registerCodeFormatters(monaco);
-          // Hand the monaco instance to the intellisense seam. Inert in OSS;
-          // with the pro overlay loaded it registers the completion engine
-          // (idempotent per monaco instance, so per-file remounts are fine).
           attachIntellisenseMonaco(monaco);
-          // Validate chip.json manifests against the schema (idempotent per
-          // monaco instance).
+          // Cursor completions
+          registerCursorCompletions(monaco);
+          
           const g = monaco as unknown as { __velxioChipJsonSchema?: boolean };
           if (!g.__velxioChipJsonSchema && monaco.languages.json?.jsonDefaults) {
             g.__velxioChipJsonSchema = true;
@@ -137,7 +174,48 @@ export const CodeEditor = () => {
             });
           }
         }}
-        onMount={(ed) => setInstance(ed)}
+        onMount={(ed) => {
+          setInstance(ed);
+          if (monacoRef.current) {
+            registerCursorKeybindings(monacoRef.current, ed);
+            registerTabCompletion(monacoRef.current, ed);
+            
+            // Focus editor with Cmd+K hint on first mount
+            ed.addAction({
+              id: 'velxio.cursorHint',
+              label: 'Velxio: Show Cursor Hints',
+              keybindings: [],
+              run: () => {
+                // Show hint overlay
+                const hint = document.createElement('div');
+                hint.style.cssText = `
+                  position: absolute;
+                  bottom: 20px;
+                  left: 50%;
+                  transform: translateX(-50%);
+                  background: #1e1e1e;
+                  border: 1px solid #333;
+                  border-radius: 6px;
+                  padding: 8px 14px;
+                  color: #ccc;
+                  font-size: 12px;
+                  z-index: 100;
+                  display: flex;
+                  gap: 12px;
+                `;
+                hint.innerHTML = `
+                  <span><b>⌘K</b> Inline Edit</span>
+                  <span><b>⌘L</b> Add to Chat</span>
+                  <span><b>⌘I</b> Composer</span>
+                  <span><b>Tab</b> Accept</span>
+                  <span style="color:#007acc;">Velxio = Cursor</span>
+                `;
+                ed.getDomNode()?.appendChild(hint);
+                setTimeout(() => hint.remove(), 4000);
+              }
+            });
+          }
+        }}
         onChange={(value) => {
           if (activeFileId) setFileContent(activeFileId, value || '');
         }}
@@ -147,15 +225,26 @@ export const CodeEditor = () => {
           automaticLayout: true,
           scrollBeyondLastLine: false,
           wordWrap: 'on',
-          // Hover/suggest/signature widgets escape the editor's box as
-          // position:fixed overlays. Without this, a marker hover wider
-          // than the editor pane slides UNDER the simulator canvas next
-          // to it (sibling stacking context) and can't be read.
           fixedOverflowWidgets: true,
-          // Keep quick suggestions alive inside snippet placeholders:
-          // completing `#include <|>` or an if-condition placeholder must
-          // still offer suggestions while the snippet session is active.
           suggest: { snippetsPreventQuickSuggestions: false },
+          // Cursor-like settings
+          quickSuggestions: {
+            other: true,
+            comments: true,
+            strings: true,
+          },
+          suggestOnTriggerCharacters: true,
+          acceptSuggestionOnEnter: 'on',
+          tabCompletion: 'on',
+          wordBasedSuggestions: 'allDocuments',
+          // Smooth editing
+          cursorBlinking: 'smooth',
+          cursorSmoothCaretAnimation: 'on',
+          smoothScrolling: true,
+          // Inline suggest (ghost text) - Cursor Tab
+          inlineSuggest: {
+            enabled: true,
+          },
         }}
       />
     </div>

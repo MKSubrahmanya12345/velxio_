@@ -19,8 +19,6 @@ import {
 import { runExpectations } from './expectations';
 import { useAgentJournal } from './journal';
 
-/** Active run metadata, set by requestRun() so sendFeedback() can POST mid-run
- * notes without the caller having to thread run_id through the UI. */
 interface ActiveRun {
   runId: string;
 }
@@ -33,23 +31,17 @@ function _genSessionId(): string {
 function _sessionStorageKey(): string {
   try {
     const sk = scopeKey();
-    // scopeKey may contain path chars; keep key readable but unique
     return `velxio.forge.session.${sk}`;
   } catch {
     return 'velxio.forge.session';
   }
 }
 
-/** Stable id for this browser workspace's forge memory session. The backend
- * maps it to one Forge conversation, so notes persist across runs and reloads
- * while different projects/examples stay separate.
- * Now per-scope (project/example/path) and regeneratable per new chat. */
 export function forgeSession(): string {
   try {
     const key = _sessionStorageKey();
     let value = localStorage.getItem(key);
     if (!value || !/^[a-zA-Z0-9_-]{1,80}$/.test(value)) {
-      // Migrate old global session if present, otherwise fresh
       const legacy = localStorage.getItem('velxio.forge.session');
       if (legacy && /^[a-zA-Z0-9_-]{1,80}$/.test(legacy)) {
         value = legacy;
@@ -60,17 +52,15 @@ export function forgeSession(): string {
     }
     return value;
   } catch {
-    return 'ws-default'; // private mode: one shared session is the safe fallback
+    return 'ws-default';
   }
 }
 
-/** Force a brand new forge session for the current scope — called on New Chat. */
 export function newForgeSession(): string {
   try {
     const key = _sessionStorageKey();
     const value = _genSessionId();
     localStorage.setItem(key, value);
-    // also update legacy key so old code that still reads it gets the new one
     localStorage.setItem('velxio.forge.session', value);
     return value;
   } catch {
@@ -78,8 +68,6 @@ export function newForgeSession(): string {
   }
 }
 
-/** Send a mid-run clarification. Silently no-ops if no run is active or if the
- * run has already finished (the server returns 404). */
 export async function sendFeedback(note: string): Promise<boolean> {
   const active = _active;
   if (!active) return false;
@@ -110,10 +98,8 @@ function delay(ms: number, signal: AbortSignal) {
   });
 }
 
-/** One backend run ends in exactly one of these. */
 type TerminalEvent = Extract<AgentEvent, { type: 'answer' | 'result' }>;
 
-/** One backend run. Returns the terminal event ('answer' or 'result'). */
 async function requestRun(
   prompt: string,
   messages: ChatMessage[],
@@ -135,7 +121,7 @@ async function requestRun(
       prompt,
       project,
       provider: options.provider,
-      fast_mode: options.fastMode ?? true,
+      fast_mode: options.fastMode ?? false, // Default to real compile like Cursor
       forge_session: forgeSession(),
       messages: messages
         .slice(-12)
@@ -147,9 +133,7 @@ async function requestRun(
     try {
       const data = await response.json();
       if (typeof data.detail === 'string') message = data.detail;
-    } catch {
-      /* Non-JSON proxy error */
-    }
+    } catch {}
     throw new Error(message);
   }
   if (!response.body) throw new Error('Streaming responses are not available in this browser.');
@@ -160,28 +144,27 @@ async function requestRun(
       signal.throwIfAborted();
       if (event.type === 'run_started') {
         _active = { runId: event.run_id };
-        continue; // internal event, no user-visible handling
+        continue;
       }
       if (event.type === 'canvas_update') {
         try {
           const progressive = fromAgentProject(event.project, before);
           loadWorkspace(progressive);
           runEditorCommand('view.reset');
-        } catch {
-          /* best effort live progressive canvas render */
-        }
+        } catch {}
       }
       onEvent(event);
       if (event.type === 'error')
         throw new Error([event.message, event.diagnostics].filter(Boolean).join('\n\n'));
       if (event.type === 'compile') {
+        const boardLabel = before.boards[0]?.boardKind || 'board';
         useCompileLogsStore.getState().appendLogs([
           {
             timestamp: new Date(),
             type: event.success ? 'success' : 'error',
             message: event.success
-              ? 'Agent: firmware compiled for Arduino Uno.'
-              : 'Agent: compile failed; evaluating repair.',
+              ? `Agent: firmware compiled for ${boardLabel}.`
+              : `Agent: compile failed for ${boardLabel}; evaluating repair.`,
           },
           ...[event.stdout, event.stderr]
             .filter(Boolean)
@@ -211,8 +194,6 @@ export async function runAgent(options: {
   const expected = fingerprint(before);
   const project = toAgentProject(before);
 
-  // Behavioural verification can send ONE repair round back to the model with
-  // the failure report, mirroring how compile errors repair server-side.
   let runtimeRepairUsed = false;
   let conversation = options.messages;
   let prompt = options.prompt;
@@ -229,8 +210,6 @@ export async function runAgent(options: {
       message: 'Electrical pre-flight · checking candidate before applying',
     });
     const { snap, synthesizedPins } = buildPreflightSnapshot(after);
-    // Solve the candidate without replacing the live workspace. A solver
-    // failure is surfaced as a warning, never as "electrically verified".
     const verification = await Promise.race([
       verifyCircuit(buildInputFromStore(snap), { synthesizedPins }),
       delay(20000, signal).then(() => {
@@ -246,12 +225,15 @@ export async function runAgent(options: {
       );
     try {
       loadWorkspace(after);
-      useSimulatorStore.getState().compileBoardProgram(after.boards[0].id, event.hex);
+      // Cursor-like: support any board, not just first
+      const boardId = after.boards[0]?.id || after.activeBoardId;
+      if (boardId) {
+        useSimulatorStore.getState().compileBoardProgram(boardId, event.hex);
+      }
     } catch (error) {
       loadWorkspace(before);
       throw error;
     }
-    // Record before starting: runtime failures must still have an undo point.
     useAgentJournal
       .getState()
       .addRevision({
@@ -266,35 +248,38 @@ export async function runAgent(options: {
       stage: 'validating',
       message: 'Applied checkpoint · starting simulator',
     });
-    // Parts need to mount and register their pins before the first MCU edge.
     await delay(150, signal);
     const revision = useAgentJournal.getState().revisions.at(-1)!;
     assertFresh(fingerprint(revision.after), scope);
-    useSimulatorStore.getState().startBoard(after.boards[0].id);
+    
+    // Start appropriate board
+    const activeBoardId = after.boards[0]?.id || after.activeBoardId;
+    if (activeBoardId) {
+      useSimulatorStore.getState().startBoard(activeBoardId);
+    }
     runEditorCommand('view.reset');
 
     if (event.expectations) {
-      // --- live behavioural verification against the running firmware ------
       onEvent({
         type: 'stage',
         stage: 'verifying',
-        message: `Verifying behaviour for ${event.expectations.observe_ms} ms `
-          + `(${event.expectations.pins.length} pin check(s), ${event.expectations.interactions.length} interaction(s), ${event.expectations.serial.length} serial check(s))`,
+        message: `Verifying behaviour for ${event.expectations.observe_ms} ms ` +
+          `(${event.expectations.pins.length} pin check(s), ${event.expectations.interactions.length} interaction(s), ${event.expectations.serial.length} serial check(s))`,
       });
-      const run = await runExpectations(event.expectations, after.boards[0].id, signal);
+      const run = await runExpectations(event.expectations, activeBoardId, signal);
       if (scopeKey() !== scope)
         throw new Error('Workspace changed during observation. No further agent actions taken.');
       const lines = run.results.map((r) => `${r.passed ? '✓' : '✗'} ${r.label}: ${r.detail}`);
       if (run.passed) {
         const current = useSimulatorStore.getState();
         const serial = current.boards
-          .find((b) => b.id === after.boards[0].id)
+          .find((b) => b.id === activeBoardId)
           ?.serialOutput.slice(-1800);
         const warnings = verification.warnings.map((w) => w.message);
-        return `${event.summary}\n\n✓ Design validated · firmware compiled · behaviour verified against the live simulation.\n`
-          + lines.join('\n')
-          + `${warnings.length ? '\n\nPre-flight notes:\n' + warnings.join('\n') : ''}`
-          + `${serial ? '\n\nObserved serial output:\n' + serial : ''}`;
+        return `${event.summary}\n\n✓ Design validated · firmware compiled · behaviour verified against the live simulation.\n` +
+          lines.join('\n') +
+          `${warnings.length ? '\n\nPre-flight notes:\n' + warnings.join('\n') : ''}` +
+          `${serial ? '\n\nObserved serial output:\n' + serial : ''}`;
       }
       if (!runtimeRepairUsed) {
         runtimeRepairUsed = true;
@@ -303,8 +288,6 @@ export async function runAgent(options: {
           stage: 'repairing',
           message: 'Behaviour verification failed · asking the agent to repair',
         });
-        // Repair against the ORIGINAL project, like a compile repair: revert
-        // what was applied so the workspace never shows an unverified state.
         useSimulatorStore.getState().stopSimulation();
         loadWorkspace(before);
         conversation = [
@@ -324,21 +307,18 @@ export async function runAgent(options: {
         ].join('\n');
         continue;
       }
-      // Second failure: be honest instead of looping forever. The applied
-      // checkpoint stays, with undo available.
-      return `${event.summary}\n\n⚠ Behaviour verification FAILED after a repair attempt. The circuit is applied (undo available), but it does not do what was declared:\n`
-        + lines.join('\n');
+      return `${event.summary}\n\n⚠ Behaviour verification FAILED after a repair attempt. The circuit is applied (undo available), but it does not do what was declared:\n` +
+        lines.join('\n');
     }
 
-    // No expectations declared: keep the honest (weak) guarantee.
     try {
       await delay(1200, signal);
     } catch (error) {
-      if (scopeKey() === scope) useSimulatorStore.getState().stopBoard(after.boards[0].id);
+      if (scopeKey() === scope && activeBoardId) useSimulatorStore.getState().stopBoard(activeBoardId);
       throw error;
     }
     const current = useSimulatorStore.getState();
-    const running = current.boards.find((b) => b.id === after.boards[0].id)?.running;
+    const running = current.boards.find((b) => b.id === activeBoardId)?.running;
     if (scopeKey() !== scope)
       throw new Error('Workspace changed during observation. No further agent actions taken.');
     if (!running)
@@ -352,9 +332,9 @@ export async function runAgent(options: {
       );
     }
     const serial = current.boards
-      .find((b) => b.id === after.boards[0].id)
+      .find((b) => b.id === activeBoardId)
       ?.serialOutput.slice(-1800);
     const warnings = verification.warnings.map((w) => w.message);
-    return `${event.summary}\n\n✓ Design validated · firmware compiled · simulation running.\nBehaviour is not automatically verified — the proposal declared no expectations. Interact with the circuit to test it.${warnings.length ? '\n\nPre-flight notes:\n' + warnings.join('\n') : ''}${serial ? '\n\nObserved serial output:\n' + serial : '\n\nNo serial output observed during the 1.2-second startup check.'}`;
+    return `${event.summary}\n\n✓ Design validated · firmware compiled · simulation running (Velxio = Cursor for ${after.boards[0]?.boardKind || 'hardware'}).\nBehaviour is not automatically verified — the proposal declared no expectations. Interact with the circuit to test it.${warnings.length ? '\n\nPre-flight notes:\n' + warnings.join('\n') : ''}${serial ? '\n\nObserved serial output:\n' + serial : '\n\nNo serial output observed during the 1.2-second startup check.'}`;
   }
 }
