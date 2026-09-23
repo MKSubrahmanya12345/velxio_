@@ -1,0 +1,15 @@
+{
+  "name": "wiregi-server",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "WireGI server — agentic build assistant. Reuses Forge's provider/Jev plumbing from ../forge/server/src and reads ../forge/server/.env.",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
