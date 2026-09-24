@@ -277,3 +277,40 @@ agents (LLMs) do the deep work — across days, with human eyes at exactly the r
 - **C)** Wire the **Velxio simulator** in as verification tier 1 (Phase 2) so firmware parts get a sim-pass Noul.
 
 Pick a letter and I'll build it.
+
+---
+
+## 9. Two things the mock was missing (now built)
+
+### The debugger — the run explains itself
+
+The first version of this doc described the flow but not what happens when it breaks. A real run now
+emits, for every event: `seq`, `ts`, elapsed `t`, `runId`, `level`, `type`, `stage`, a guaranteed
+non-empty `message`, and any payload (part, provider, status, latency, phase timing). On top of that:
+
+- **provider attempts are attempts, not failures** — a 429 on one key is `provider.fail` with its status
+  and latency, and the run continues down the failover list. That single distinction is what removed
+  `ERROR undefined` from the UI for good.
+- a terminal failure is one `{ type:'error', fatal:true, error:{ name, message, where, status, provider,
+  stack, attempts[] } }` — and the UI renders the attempt table, so "which key failed, with what status,
+  in how long" is a table, not a hunt.
+- each project persists `state.runs` (one record per run: kind, status, ms, event count), `state.errors`
+  and `state.runLog` (a bounded copy of every event), readable in the UI's **Flow** and **Debug** tabs or
+  as one exported JSON file.
+- the project is saved **before** the first LLM call, so a run that dies inside decomposition is still
+  inspectable (this is exactly the failure the first live run produced: nothing was stored at all).
+- `POST /api/debug/llm-test` runs one real generation and reports every credential it tried; `/api/debug/env`
+  reports which `.env` files were loaded, which keys are present, and where each one came from.
+
+### The human checkpoint — `awaiting_human` is not a dead end
+
+`awaiting_human` is the *correct* terminal state (the ladder's top rung is human), but it had no chat
+interface: the project said “needs you”, and the only exit was a free-text message whose intent an LLM had
+to classify. That is slow, and it is broken exactly when it matters most — when no provider is reachable.
+
+`POST /api/projects/:id/human { partId?, decision, text }` with `decision ∈ {approve, provide, rerun,
+reject}` is **deterministic**: no Jev, no LLM, no tokens. `approve` appends a `human-eyes` rung to the
+part's evidence trail with who approved and what they said; `provide` stores the answer on the part;
+`rerun`/`reject` re-research that part with the human's words injected into the prompt as authoritative
+(`HUMAN INPUT … do not contradict it`). In the UI it is a card in the chat listing each waiting part, its
+open questions and the BOM/wiring it wants confirmed, with buttons for all four actions.

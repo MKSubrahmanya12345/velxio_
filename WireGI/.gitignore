@@ -1,0 +1,13 @@
+# Runtime data (project store, provider keys, research index) — never commit.
+data/
+server/data/
+
+# WireGI's own environment file (keys). Commit .env.example instead.
+.env
+.env.local
+
+# Build output / dependencies
+node_modules/
+dist/
+*.log
+*.tmp

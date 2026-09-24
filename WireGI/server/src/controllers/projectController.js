@@ -8,5 +8,9 @@ export function createProjectController({ cfg, registry, jev, store, indexer }) 
       agent.continueProject(projectId, text, { emit, prefer }),
     // Gap B: resume a stalled/partial run (pending, stale researching, failed).
     resume: ({ projectId, emit }) => agent.resumeProject(projectId, { emit }),
+    // The human checkpoint: approve / provide an answer / send a part back for
+    // re-research. Deterministic — works with no provider configured at all.
+    human: ({ projectId, partId, decision, text, emit }) =>
+      agent.respondHuman(projectId, { partId, decision, text }, { emit }),
   };
 }

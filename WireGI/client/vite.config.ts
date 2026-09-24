@@ -1,14 +1,24 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// Dev proxy: forward /api to the WireGI server (default port 4322).
+// WireGI dev server.
+//
+//   Velxio (repo root frontend) :5173 · Forge :5174 · WireGI :5175
+//
+// `/api` is proxied to the WireGI express server (4322). The host is bound to
+// 0.0.0.0 and any host header is accepted so the sandbox/preview proxy works.
 export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
-    port: 5173,
+    port: 5175,
+    strictPort: true,
+    allowedHosts: true,
     proxy: {
-      '/api': 'http://localhost:4322',
+      '/api': {
+        target: 'http://localhost:4322',
+        changeOrigin: true,
+      },
     },
   },
 });

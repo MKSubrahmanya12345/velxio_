@@ -57,6 +57,9 @@ for (const f of files) {
   const names = new Set();
   for (const m of src.matchAll(/export\s+(?:async\s+)?function\s+([A-Za-z0-9_$]+)/g)) names.add(m[1]);
   for (const m of src.matchAll(/export\s+(?:const|let|var|class)\s+([A-Za-z0-9_$]+)/g)) names.add(m[1]);
+  // TypeScript type-only exports (`export type X`, `export interface X`) — the
+  // client is .tsx, so an imported type must not read as a missing export.
+  for (const m of src.matchAll(/export\s+(?:type|interface|enum)\s+([A-Za-z0-9_$]+)/g)) names.add(m[1]);
   for (const m of src.matchAll(/export\s*\{([^}]+)\}/g)) {
     for (const part of m[1].split(',')) {
       const name = part.split(/\s+as\s+/).pop().trim();
@@ -97,7 +100,12 @@ for (const f of files) {
     const available = exportsByFile.get(target);
     if (!available) continue; // target outside the scanned roots
     for (const part of named.split(',')) {
-      const name = part.split(/\s+as\s+/)[0].trim();
+      // `import { type X, y }` — strip the inline type modifier before checking
+      const name = part
+        .trim()
+        .replace(/^type\s+/, '')
+        .split(/\s+as\s+/)[0]
+        .trim();
       if (!name) continue;
       if (!available.has(name)) {
         badExport += 1;

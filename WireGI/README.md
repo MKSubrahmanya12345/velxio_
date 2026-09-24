@@ -6,14 +6,29 @@ back to a communication UI. No simulation — text output only.
 
 It is built to mirror **Forge** (`../forge`): same backend/frontend split, `models / routes / controllers`
 layout, and — critically — it **reuses Forge's exact AI plumbing** (multi-provider LLM failover + the
-Jev typed-decision client) by importing it directly from `../forge/server/src`. It reads provider keys
-from **`../forge/server/.env`** and does **not** create a new `.env`.
+Jev typed-decision client) by importing it directly from `../forge/server/src`.
+
+**WireGI owns its configuration now**: `WireGI/server/.env` (copy `.env.example`) is loaded first and
+always wins; `forge/server/.env` is only an optional fallback, used for keys this file does not define
+(switch it off with `WIREGI_INHERIT_FORGE_ENV=false`).
+
+## Ports — the three apps side by side
+
+| App | UI | API |
+| --- | --- | --- |
+| **Velxio** (repo root, `frontend/`) | **5173** | 8000/8080 |
+| **Forge** (`forge/client`) | **5174** | 4321 |
+| **WireGI** (`WireGI/client`) | **5175** | 4322 |
+
+WireGI reads its own ports from `WIREGI_CLIENT_PORT` / `WIREGI_PORT`, so `PORT=4321` in a Forge `.env`
+can never drag it onto Forge's port.
 
 ```
 WireGI/
   server/                # Node (ESM), mirrors forge/server/src
     src/
-      config.js          # loads Forge's config (=> forge/server/.env), overrides only paths/port
+      env.js             # loads WireGI/server/.env FIRST, remembers where each key came from
+      config.js          # WireGI config (ports 4322/5175, paths, debug knobs) + Forge fallback
       store.js           # zero-dep JSON project store
       models/project.js  # Project + Part domain models (3-state: idea/current/verified)
       services/
@@ -27,19 +42,32 @@ WireGI/
         gate.js         # Jev pre-LLM gates: triage / tier / risk / dup / affected  (Gap A)
         queue.js        # semaphore + token bucket + worker-pool map              (Gap B)
         retry.js        # capped backoff + jitter, retry-safe error classes       (Gap B)
+        debug.js        # THE DEBUGGER: tracer, levels, timings, full error records
         agent.js        # the orchestration: classify → decompose → research → integrate
+                        #  + runs/runLog/errors per project, respondHuman() checkpoint
       controllers/       # project / research / decision controllers
       routes/            # express routers (ndjson streaming for live UI)
+        debugRoutes.js  # /api/debug/{env,health,llm-test,web-test,index}
+      ../scripts/
+        mock-llm.mjs    # DEV FIXTURE: fake OpenAI-compatible provider (not the product)
+        smoke.mjs       # end-to-end flow test over the real HTTP stream
       index.js          # express entry; mounts Forge's provider router too
   client/                # React + Vite (mirrors forge/client)
     src/
-      api.ts            # REST + ndjson streaming client
+      api.ts            # REST + ndjson streaming client (+ respondHuman, exportTrace)
+      lib/events.ts     # event → level/title/detail/error (never prints `undefined`)
+      lib/useProject.ts # the store: project + live trace + run state + human checkpoint
+      lib/markdown.tsx  # dependency-free markdown for agent replies
       pages/            # HomePage, ProjectPage
-      components/       # ChatView, PartCard, DecisionLog, ResearchLog, ProviderStrip,
-                        # HowItWorks, ConfidenceMeter, StepCard (Forge UI vocabulary)
+      components/       # ChatPanel (chat, left) · InspectorPanel (info, right) with
+                        # OverviewPanel, PartCard, FlowPanel (the debugger), DecisionLog,
+                        # ResearchLog, ReconcileLog, DebugPanel, HumanCheckpoint,
+                        # ProviderStrip, TopBar, HowItWorks, ConfidenceMeter, StepCard
 ```
 
 ## How a request flows
+
+Every run is traced end to end, so this diagram is also the Flow panel you debug with:
 
 ```
 PROMPT
@@ -60,7 +88,13 @@ PROMPT
         blocking conflicts escalate to the human
   └─ Jev D4/D5/D6 gate: complete? needs-human-eyes? stop?
   └─ merge into project state; stream decisions + research + parts to the UI
+  └─ HUMAN CHECKPOINT (chat): approve / answer / re-run / reject — deterministic,
+     recorded on the evidence ladder, and the way out of `awaiting_human`
 ```
+
+Stage order on the wire (each stage is a `phase.start` / `phase.end` pair):
+`classify → decompose-plan → decompose → research (per part: triage → research → sufficiency) →
+reconcile → verify → done`, with `batch.*`, `provider.*`, `human.*` and `run.*` events around them.
 
 ## Domain profiles — how one engine builds *anything*
 
@@ -109,15 +143,71 @@ The human approves parts that need their own eyes; the agent keeps iterating unt
 ## Run it
 
 ```bash
-# 1) server (reuses forge keys from ../forge/server/.env)
+# 1) configure (WireGI's OWN env — copy the example and fill in one provider key)
+cp WireGI/server/.env.example WireGI/server/.env
+
+# 2) server
 cd WireGI/server && npm install && npm start        # listens on :4322
 
-# 2) client (in another terminal)
-cd WireGI/client && npm install && npm run dev      # http://localhost:5173 (proxies /api → :4322)
+# 3) client (another terminal)
+cd WireGI/client && npm install && npm run dev      # http://localhost:5175 (proxies /api → :4322)
 ```
 
-Then open the client, type **`make me a drone`**, and watch the live event stream, the per-part cards
-(research/gather/understand/data), and the Jev decision log fill in.
+Then open **http://localhost:5175**, type **`make me a drone`**, and watch the chat on the left and the
+inspector on the right fill in: parts, the live flow, decisions and the integration pass.
+
+### Verify it without spending tokens
+
+```bash
+cd WireGI/server && npm run smoke     # dev mock provider + assertions over the real HTTP stream
+cd WireGI/client && npm run test:render   # renders the panels; fails if any "undefined" reaches the UI
+node WireGI/scripts/check-imports.cjs     # every relative import resolves and exports what it claims
+```
+
+`npm run smoke` starts `scripts/mock-llm.mjs` (a dev fixture — the product itself only ever uses real
+providers), drives a full build, then injects a provider failure, resumes, and exercises the human
+checkpoint. It asserts: 60+ trace events, one event per part, a non-empty message on every event,
+monotonic sequence numbers, a persisted run log, and a working `/api/debug/*`.
+
+## The debugger
+
+WireGI previously told you *that* something failed; it now tells you **what, where, when and why** —
+and it is impossible for it to print `ERROR undefined`:
+
+| Surface | What it gives you |
+| --- | --- |
+| **Flow** (right panel) | Every event with level, sequence, `+1.23s` timing, part context and expandable payload. Filter by level/part/text; expand any row for the full object. |
+| **Errors** | A full record — `name`, `message`, `where`, `status`, provider, `stack`, and the per-key **attempt table** (status + latency + message for every credential the failover loop tried). |
+| **Runs** | One record per run (`build`/`message`/`resume`/`human`): status, wall-clock ms, event count, error. |
+| **Debug tab** | Which `.env` files are in play, every key with its **provenance** (real env / WireGI .env / Forge fallback) and why one is missing, a live **Test LLM now** button, web-search test, the port map, and this project's run/error history. |
+| **Export** | The whole trace as JSON, in one click. |
+| **stdout** | With `WIREGI_DEBUG=1`, one labelled line per event, including a trimmed stack for errors. |
+
+Event contract (the UI depends on it): `{ seq, ts, t, runId, level, type, stage, message, …payload }`.
+`message` is always a non-empty string; a provider attempt failure is `type: 'provider'` (never
+`'error'`); a terminal failure is a single `{ type: 'error', fatal: true, error: {…} }`.
+
+## The human checkpoint
+
+`awaiting_human` used to be a dead end — the project said "needs you" and the only way out was a
+free-text message whose intent an LLM had to guess. It is now a first-class, **deterministic** path
+(no Jev, no LLM, no tokens — it works with zero provider keys):
+
+```
+POST /api/projects/:id/human   { partId?, decision, text }
+  decision: approve | provide | rerun | reject
+```
+
+- **approve** → the part becomes `verified`, and a `human-eyes` rung is appended to its evidence trail
+  with who approved and what they said. "Approve all" covers every researched part.
+- **provide** → your answer is stored on the part (`humanInput`) and recorded in the conversation.
+- **rerun / reject** → the part is re-researched with your input, which is injected into the research
+  prompt as authoritative (`HUMAN INPUT … do not contradict it`).
+
+In the UI this is a card in the chat: each waiting part lists its open questions, the researched BOM
+and wiring it wants you to confirm, a box for your answer, and **Approve / Answer & re-research / note
+only / Reject & re-run**. The card also appears whenever the project itself is `awaiting_human`, even if
+no single part raised a checkpoint.
 
 ## Resilience & throughput (Gap B)
 
@@ -194,22 +284,41 @@ A `choice` with a bare array of strings is rejected: *"Input should be a valid d
 correct shape, and the readers (`answerValue`, `noulTrue`, `answerCertainty`) understand the real reply shapes:
 `{choice:'<key>'}`, `{noul:0..1}`, `{score:<index>}`.
 
-**3. The port is pinned to 4322.** The shared `forge/server/.env` sets `PORT=4321` (Forge's port), so WireGI must
-not inherit it — it hard-codes 4322 and never reads `PORT`.
+**3. Ports are WireGI's own.** The UI is **5175** (Velxio 5173, Forge 5174) and the API is **4322**.
+Both come from WireGI's `.env` (`WIREGI_CLIENT_PORT` / `WIREGI_PORT`) — WireGI never reads `PORT`, so a
+Forge `.env` with `PORT=4321` cannot drag it onto Forge's port.
 
-## Configuration (no new .env)
+**4. The mock LLM is a test fixture, never a fallback.** `scripts/mock-llm.mjs` exists so the flow can be
+tested without keys; nothing in `src/` starts it or degrades to it. A run with no provider fails with a
+precise error, by design.
 
-WireGI does **not** create its own `.env`. It imports Forge's `loadConfig()`, which loads
-`../forge/server/.env`. So:
+## Configuration — `WireGI/server/.env`
 
-- **LLM providers** (Groq, Gemini, OpenRouter, Ollama, OpenAI-compatible, Bedrock) — configured exactly as
-  in Forge.
-- **Jev** — set `TYPESAFE_API_KEY` in `forge/server/.env` (the decision-maker). Without it, WireGI falls
-  back to an LLM acting as the typed decision model so the flow still runs.
-- **Web search** (optional, for *proper* web research) — add `TAVILY_API_KEY` or `BRAVE_API_KEY` to
-  `forge/server/.env`. Without it, research uses model knowledge and the log notes that.
+Copy `WireGI/server/.env.example` and fill in at least one provider key. Precedence, highest first:
 
-WireGI overrides only its own runtime paths (`data/wiregi-*.json`) so it never clobbers Forge's data.
+1. **real environment** (shell / docker / CI) — never overridden by a file
+2. **`WireGI/server/.env`** — WireGI's own config, always wins over a file fallback
+3. **`forge/server/.env`** — optional fallback, used only for keys not defined above
+
+Set `WIREGI_INHERIT_FORGE_ENV=false` to switch the fallback off completely. Every key the server sees is
+reported by `/api/debug/env` and shown in the UI's **Debug** tab **with its source** — so "why is this
+key not working?" has an answer that does not require reading code. Secrets are masked; they are never
+sent to the browser.
+
+| Group | Keys |
+| --- | --- |
+| Server | `WIREGI_PORT` (4322) · `WIREGI_CLIENT_PORT` (5175) · `CORS_ORIGIN` · `DATA_FILE` · `PROVIDERS_FILE` · `GLOBAL_RULES_FILE` |
+| Debug | `WIREGI_DEBUG` · `WIREGI_LOG_LEVEL` · `WIREGI_RUNLOG_LIMIT` · `WIREGI_LOG_PROVIDER_ATTEMPTS` |
+| LLM | `GEMINI_API_KEY` · `OPENROUTER_API_KEY` · `GROQ_API_KEY` · `LLM_API_KEY`/`LLM_API_BASE` · `OPENCODE_API_KEY` · `OLLAMA_MODEL`/`OLLAMA_BASE` · AWS Bedrock keys · `PLANNER_PROVIDER` · `FAILOVER_MAX_ROUNDS` |
+| Jev | `TYPESAFE_API_KEY` · `TYPESAFE_MODEL` · `WIREGI_JEV_TIMEOUT_MS` |
+| Web search | `TAVILY_API_KEY` · `BRAVE_API_KEY` |
+| Throughput | `WIREGI_CONCURRENCY` · `WIREGI_RPM` · `WIREGI_RETRIES` · `WIREGI_RETRY_BASE_MS` · `WIREGI_RETRY_MAX_MS` |
+| Env | `WIREGI_INHERIT_FORGE_ENV` |
+
+With **no** LLM key the server still boots, still streams a full trace, and fails *visibly*: the header
+shows `no LLM key`, a banner explains the fix, and the first failed call carries a precise message (plus
+a `hint`) instead of an empty error. `POST /api/debug/llm-test` tells you exactly which credential was
+tried, with which status and latency.
 
 ## Notes
 
