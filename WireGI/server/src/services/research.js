@@ -4,44 +4,66 @@
 // gets bomRow/wiring/config while software gets deps/interfaces/config. Adding a
 // domain never touches this file.
 //
-// Includes live web search (Tavily/Brave if a key is in the Forge .env) and an
+// Includes live web search (Tavily/Brave, key from WireGI/server/.env) and an
 // indexer speed-up that reuses prior findings for similar topics.
-import { generate, generateJSON } from './llm.js';
+//
+// Debugging: every stage emits a timed event, a failed web search reports WHY
+// (HTTP status + body excerpt) instead of silently degrading to model
+// knowledge, and the research call returns which provider/key/model answered.
+import { generateWithMeta } from './llm.js';
 import { getProfile, schemaBlock, ladderText } from './profiles.js';
+import { errorSummary, trimText } from './debug.js';
 
-// Live web search. Uses TAVILY_API_KEY or BRAVE_API_KEY when present (read from
-// the Forge environment). Returns null when no key is configured — never mocks.
-export async function webSearch(query, { maxResults = 5 } = {}) {
+// Live web search. Uses TAVILY_API_KEY or BRAVE_API_KEY when present. Returns
+// null when no key is configured — never mocks results.
+export async function webSearch(query, { maxResults = 5, emit } = {}) {
   const tavily = process.env.TAVILY_API_KEY;
   const brave = process.env.BRAVE_API_KEY;
-  try {
-    if (tavily) {
+  if (!tavily && !brave) return null;
+
+  const fail = (engine, detail) => {
+    emit?.({
+      type: 'research',
+      stage: 'web-error',
+      level: 'warn',
+      message: `${engine} search failed (${detail}) — falling back to model knowledge.`,
+      engine,
+      detail,
+    });
+    return { engine, query, items: [], error: detail };
+  };
+
+  if (tavily) {
+    try {
       const r = await fetch('https://api.tavily.com/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ api_key: tavily, query, max_results: maxResults, search_depth: 'advanced' }),
+        signal: AbortSignal.timeout(20000),
       });
-      if (r.ok) {
-        const d = await r.json();
-        const items = (d.results || []).map((x) => ({ title: x.title, url: x.url, snippet: x.content }));
-        return { engine: 'tavily', query, items };
-      }
+      if (!r.ok) return fail('tavily', `HTTP ${r.status} ${trimText(await r.text().catch(() => ''), 160)}`);
+      const d = await r.json();
+      const items = (d.results || []).map((x) => ({ title: x.title, url: x.url, snippet: x.content }));
+      return { engine: 'tavily', query, items };
+    } catch (err) {
+      return fail('tavily', errorSummary(err));
     }
-    if (brave) {
-      const r = await fetch(
-        `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}`,
-        { headers: { Accept: 'application/json', 'X-Subscription-Token': brave } },
-      );
-      if (r.ok) {
-        const d = await r.json();
-        const items = (d.web?.results || []).map((x) => ({ title: x.title, url: x.url, snippet: x.description }));
-        return { engine: 'brave', query, items };
-      }
-    }
-  } catch {
-    /* network issues -> treat as no web */
   }
-  return null;
+  try {
+    const r = await fetch(
+      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}`,
+      {
+        headers: { Accept: 'application/json', 'X-Subscription-Token': brave },
+        signal: AbortSignal.timeout(20000),
+      },
+    );
+    if (!r.ok) return fail('brave', `HTTP ${r.status} ${trimText(await r.text().catch(() => ''), 160)}`);
+    const d = await r.json();
+    const items = (d.web?.results || []).map((x) => ({ title: x.title, url: x.url, snippet: x.description }));
+    return { engine: 'brave', query, items };
+  } catch (err) {
+    return fail('brave', errorSummary(err));
+  }
 }
 
 const buildSys = (profile) => `You are the research lead for a build project in the ${profile.label} domain.
@@ -65,9 +87,7 @@ If anything is uncertain, put it in openQuestions and set humanCheckpoint true.`
 // Turn what was learned into reusable index context. Gathered fields are the
 // valuable part; raw search titles are not.
 function indexSummary(out) {
-  const gathered = (out.gathered || [])
-    .slice(0, 10)
-    .map((g) => `${g.field}=${g.value}`);
+  const gathered = (out.gathered || []).slice(0, 10).map((g) => `${g.field}=${g.value}`);
   const validated = (out.understand?.validation || []).slice(0, 4);
   return [...gathered, ...validated].join(' | ').slice(0, 1200);
 }
@@ -75,7 +95,14 @@ function indexSummary(out) {
 export async function researchPart({ part, project, registry, emit, indexer, prefer }) {
   const profile = getProfile(project.profileId);
   const topic = `${project.goal} — ${part.name} (${part.domain})`;
-  emit?.({ type: 'research', stage: 'research', partId: part.id, part: part.name, message: `Researching ${part.name}…` });
+  const startedAt = Date.now();
+  emit?.({
+    type: 'research',
+    stage: 'research',
+    partId: part.id,
+    part: part.name,
+    message: `Researching ${part.name}…`,
+  });
 
   // ── Prior knowledge: exact topic first, then the part itself (which is what
   // makes cross-project reuse possible — "Battery electronics" hits again).
@@ -91,16 +118,19 @@ export async function researchPart({ part, project, registry, emit, indexer, pre
       partId: part.id,
       part: part.name,
       message: `Index hit (${cached.overlap} term match) — reusing prior research on "${cached.topic}".`,
+      reusedFrom: cached.topic,
     });
   } else {
-    web = await webSearch(topic);
+    const webStart = Date.now();
+    web = await webSearch(topic, { emit: emit ? (e) => emit({ ...e, partId: part.id, part: part.name }) : undefined });
     if (web && web.items.length) {
       emit?.({
         type: 'research',
         stage: 'web',
         partId: part.id,
         part: part.name,
-        message: `Web search (${web.engine}): ${web.items.length} results.`,
+        ms: Date.now() - webStart,
+        message: `Web search (${web.engine}): ${web.items.length} results in ${Date.now() - webStart}ms.`,
         results: web.items,
       });
       indexer?.add({
@@ -113,6 +143,16 @@ export async function researchPart({ part, project, registry, emit, indexer, pre
         sources: web.items.map((i) => i.url),
         partName: part.name,
         profileId: profile.id,
+      });
+    } else if (web?.error) {
+      // already reported by webSearch — record it on the part's flow too
+      emit?.({
+        type: 'research',
+        stage: 'web',
+        partId: part.id,
+        part: part.name,
+        level: 'warn',
+        message: `Web search unavailable (${web.error}) — using model knowledge.`,
       });
     } else {
       emit?.({
@@ -138,14 +178,27 @@ ${prior.summary || '(stored findings)'}${
 
   const constraints = JSON.stringify(project.constraints || {});
 
+  // What the HUMAN said at the checkpoint. This is the top rung of the
+  // verification ladder, so it outranks both the index and the web results:
+  // if they corrected a spec or answered an open question, the model must
+  // honour that instead of re-deriving it.
+  const humanNotes = (part.humanInput || []).filter((h) => h?.text);
+  const humanBlock = humanNotes.length
+    ? `\nHUMAN INPUT (authoritative — the builder told us this; treat it as a hard requirement and do not contradict it):\n${humanNotes
+        .slice(-5)
+        .map((h) => `- [${h.decision || 'note'}] ${h.text}`)
+        .join('\n')}`
+    : '';
+
   const user = `PROJECT GOAL: ${project.goal}
 CONSTRAINTS: ${constraints}
 PART: ${part.name} (domain: ${part.domain})
-IDEA for this part: ${JSON.stringify(part.idea || {})}
+IDEA for this part: ${JSON.stringify(part.idea || {})}${humanBlock}
 ${prior ? 'PRIOR FINDINGS FROM INDEX' : 'LIVE WEB RESULTS'}:
 ${context}`;
 
-  const out = await generateJSON({
+  const llmStart = Date.now();
+  const call = await generateWithMeta({
     registry,
     system: buildSys(profile),
     user,
@@ -153,7 +206,9 @@ ${context}`;
     maxTokens: 4096,
     emit,
     prefer,
+    operation: `research:${part.name}`,
   });
+  const out = parseResearchJSON(call, { emit, part });
 
   // Store what was learned so the next part (or the next week) benefits.
   try {
@@ -172,12 +227,63 @@ ${context}`;
     gathered: out.gathered || [],
     understand: out.understand || { validation: [], openQuestions: [], conflicts: [] },
     data: out.data || null,
-    humanCheckpoint:
-      Boolean(out.humanCheckpoint) || (out.understand?.openQuestions || []).length > 0,
+    humanCheckpoint: Boolean(out.humanCheckpoint) || (out.understand?.openQuestions || []).length > 0,
     web: prior
       ? { engine: 'index', count: 0, reusedFrom: prior.topic }
       : web
         ? { engine: web.engine, count: web.items.length }
         : { engine: 'none', count: 0 },
+    // Provenance for the debugger: who answered, how fast, how many attempts.
+    meta: {
+      ...call.used,
+      llmMs: Date.now() - llmStart,
+      totalMs: Date.now() - startedAt,
+      webEngine: prior ? 'index' : web?.engine || 'none',
+      webCount: prior ? 0 : web?.items?.length || 0,
+    },
   };
+}
+
+// Parse the research reply, tolerating fences/prose — and when it is unusable,
+// fail with an error that names the provider, the model and the raw head.
+function parseResearchJSON(call, { emit, part }) {
+  const cleaned = call.text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+  const tryParse = (s) => {
+    try {
+      const v = JSON.parse(s);
+      return v && typeof v === 'object' ? v : null;
+    } catch {
+      return null;
+    }
+  };
+  let out = tryParse(cleaned);
+  if (!out) {
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start >= 0 && end > start) out = tryParse(cleaned.slice(start, end + 1));
+  }
+  if (!out) {
+    const error = new Error(
+      `${call.used?.provider || 'provider'}/${call.used?.model || '?'} returned unusable JSON for ${part.name} ` +
+        `(${cleaned.length} chars). First 300: ${trimText(cleaned, 300)}`,
+    );
+    error.name = 'InvalidJSONError';
+    error.provider = call.used?.provider;
+    error.where = `research:${part.name}`;
+    error.raw = cleaned;
+    emit?.({
+      type: 'log',
+      level: 'warn',
+      partId: part?.id,
+      part: part?.name,
+      message: errorSummary(error),
+      text: trimText(cleaned, 1200),
+    });
+    throw error;
+  }
+  return out;
 }

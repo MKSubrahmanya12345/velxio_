@@ -1,12 +1,14 @@
 {
   "name": "wiregi-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "private": true,
-  "description": "WireGI server — agentic build assistant. Reuses Forge's provider/Jev plumbing from ../forge/server/src and reads ../forge/server/.env.",
+  "description": "WireGI server — agentic build assistant. Own .env (server/.env), Forge plumbing reused for providers/Jev, full event tracing + debugger endpoints.",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "mock": "node ../scripts/mock-llm.mjs",
+    "check": "node ../scripts/check-imports.cjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

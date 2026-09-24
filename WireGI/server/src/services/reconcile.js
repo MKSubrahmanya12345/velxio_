@@ -87,6 +87,7 @@ function applyPatch(project, parts, patch) {
 }
 
 export async function reconcileProject({ project, emit = () => {}, registry, jev, prefer }) {
+  const startedAt = Date.now();
   const profile = getProfile(project.profileId);
   const parts = (project.state.parts || []).filter((p) => p.current?.data && p.status !== 'failed');
 
@@ -170,6 +171,7 @@ ${JSON.stringify(bundle, null, 2)}`;
       maxTokens: 4096,
       emit,
       prefer,
+      operation: 'reconcile',
     }),
   );
 
@@ -238,6 +240,7 @@ ${JSON.stringify(bundle, null, 2)}`;
     blocking: report.filter((r) => r.severity === 'blocking').length,
     patchesApplied: applied,
     summary: entry.summary,
+    ms: Date.now() - startedAt,
   });
 
   return entry;
