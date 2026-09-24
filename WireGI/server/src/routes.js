@@ -6,6 +6,7 @@ import { createDebugRouter } from './routes/debugRoutes.js';
 // Reuse Forge's provider management backend (reads the same registry we build
 // from WireGI's own .env — see config.js / env.js).
 import { createProviderRouter } from '../../../forge/server/src/providerRoutes.js';
+import { createVerifyRouter } from './verifyRoutes.js';
 
 export function createRouter(deps) {
   const r = Router();
@@ -14,6 +15,7 @@ export function createRouter(deps) {
   r.use('/api/research', createResearchRouter(deps));
   r.use('/api/decisions', createDecisionRouter(deps));
   r.use('/api/debug', createDebugRouter(deps));
+  r.use('/api/verify/:id', createVerifyRouter(deps));
 
   // Compact summary the UI header + Debug tab read on load.
   r.get('/api/health', (req, res) => {

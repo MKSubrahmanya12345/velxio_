@@ -5,10 +5,14 @@ import TasksScreen from './components/TasksScreen';
 import { health, listProjects } from './lib/api';
 import type { ProjectSummary } from './lib/types';
 
-type Route = { view: 'chats' } | { view: 'tasks' } | { view: 'thread'; id: string };
+import VerifyPage from './pages/VerifyPage';
+
+type Route = { view: 'chats' } | { view: 'tasks' } | { view: 'thread'; id: string } | { view: 'verify'; id: string };
 
 function routeOf(hash: string): Route {
   if (hash.startsWith('#/tasks')) return { view: 'tasks' };
+  const v = hash.match(/^#\/v\/([^/]+)/);
+  if (v) return { view: 'verify', id: decodeURIComponent(v[1]) };
   const m = hash.match(/^#\/p\/([^/]+)/);
   if (m) return { view: 'thread', id: decodeURIComponent(m[1]) };
   return { view: 'chats' };
@@ -69,6 +73,9 @@ export default function App() {
       )}
       {route.view === 'tasks' && (
         <TasksScreen projects={projects} onOpenThread={openThread} onCountChange={setOpenTasks} />
+      )}
+      {route.view === 'verify' && (
+        <VerifyPage id={route.id} />
       )}
       {route.view === 'thread' && (
         <Thread
