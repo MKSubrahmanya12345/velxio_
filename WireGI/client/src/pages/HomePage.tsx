@@ -16,6 +16,12 @@ const SUGGESTIONS = [
 /**
  * Landing page — a chat, not a form. Type the goal and the run starts; the
  * project page takes over from there with the live chat + inspector.
+ *
+ * The six-step "How WireGI works" explainer, the debugging bullet list and the
+ * .env precedence paragraph used to be rendered in full at the bottom of this
+ * page, on every visit — roughly 250 words of documentation sitting between
+ * the user and the projects they came back for. It is a collapsed <details>
+ * now. The same component is reachable from `?` in the header on a project.
  */
 export default function HomePage({
   onOpen,
@@ -112,7 +118,7 @@ export default function HomePage({
             </div>
           )}
 
-          {showLive && (
+          {showLive && !busy && (
             <div className="panel">
               <h3>Live flow</h3>
               <FlowPanel flow={flow} project={null} health={health} onClear={() => {}} />
@@ -130,7 +136,6 @@ export default function HomePage({
                       <span className={`pill status-${p.status}`}>{p.status}</span>
                       {p.parts > 0 && <span className="muted small">{p.parts} parts</span>}
                       {p.failed > 0 && <span className="bad small">{p.failed} failed</span>}
-                      {p.errors > 0 && <span className="muted small">{p.errors} error(s)</span>}
                       <span className="muted small">{new Date(p.updatedAt).toLocaleString()}</span>
                     </button>
                     <button
@@ -149,7 +154,10 @@ export default function HomePage({
             </div>
           )}
 
-          <HowItWorks />
+          <details className="panel collapsible">
+            <summary>How WireGI works</summary>
+            <HowItWorks />
+          </details>
         </div>
       </div>
     </div>

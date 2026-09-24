@@ -18,6 +18,19 @@ export function createRouter(deps) {
   // Compact summary the UI header + Debug tab read on load.
   r.get('/api/health', (req, res) => {
     const candidates = typeof deps.registry?.candidates === 'function' ? deps.registry.candidates() : [];
+    // Credentials sidelined by a permanent failure (401/403/404). Surfaced so a
+    // dead key is visible instead of merely felt as a slower run: with one key
+    // left, every "light tier" part silently falls back to the slow provider.
+    const rejected = deps.registry?.permanentRejections;
+    const sidelined =
+      rejected instanceof Map
+        ? [...rejected.entries()].map(([id, v]) => ({
+            id,
+            status: v?.status ?? null,
+            message: String(v?.message || '').slice(0, 200),
+            at: v?.at,
+          }))
+        : [];
     res.json({
       ok: true,
       service: 'wiregi-server',
@@ -25,6 +38,7 @@ export function createRouter(deps) {
       ports: { server: deps.cfg?.port, client: deps.cfg?.clientPort },
       jev: deps.jev?.available ? 'typesafe' : 'llm-fallback',
       providers: candidates.length,
+      sidelined,
       activeProvider: candidates[0] ? `${candidates[0].provider}/${candidates[0].model}` : null,
       webSearch: deps.cfg?.webSearch?.engine || null,
       env: {

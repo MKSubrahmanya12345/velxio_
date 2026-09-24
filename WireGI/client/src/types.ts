@@ -248,6 +248,14 @@ export interface EnvInfo {
   jev: { configured: boolean };
 }
 
+/** A credential sidelined by a permanent failure (401/403/404). */
+export interface SidelinedCredential {
+  id: string;
+  status: number | null;
+  message: string;
+  at?: string;
+}
+
 export interface Health {
   ok: boolean;
   service: string;
@@ -255,6 +263,8 @@ export interface Health {
   ports?: { server?: number; client?: number };
   jev: string;
   providers: number;
+  /** Credentials that failed permanently and were taken out of rotation. */
+  sidelined?: SidelinedCredential[];
   activeProvider?: string | null;
   webSearch?: string | null;
   env?: { files: EnvInfo['files']; inheritForge: boolean; llmConfigured: boolean; llmKeys: string[] };

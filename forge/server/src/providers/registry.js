@@ -124,6 +124,16 @@ export class ProviderRegistry {
     return this;
   }
 
+  /**
+   * Credentials sidelined by a permanent failure (401/403/404) — see
+   * `permanentRejections()` in failover.js. Clearing them makes the next call
+   * retry everything, which is what you want after fixing a key or a model name.
+   */
+  clearPermanentRejections() {
+    this.permanentRejections = new Map();
+    return this;
+  }
+
   async _commit(update) {
     const write = this.writeQueue.catch(() => {}).then(async () => {
       const snapshot = {
