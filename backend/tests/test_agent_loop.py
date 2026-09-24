@@ -168,7 +168,7 @@ async def test_unconfigured_provider_is_a_graceful_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_defaults_to_opencode(monkeypatch):
+async def test_run_defaults_to_bedrock(monkeypatch):
     seen = []
 
     async def fake_propose_once(messages, spec, max_tokens=None):
@@ -177,10 +177,9 @@ async def test_run_defaults_to_opencode(monkeypatch):
 
     monkeypatch.setattr(service, "_propose_once", fake_propose_once)
     events = await collect(AgentRequest(prompt="explain", project=Project()))
-    assert seen and seen[0].id == "opencode"
-    assert seen[0].kind == "opencode"
-    assert seen[0].model == service.settings.AGENT_OPENCODE_MODEL
-    assert seen[0].base_url == service.settings.AGENT_OPENCODE_BASE_URL
+    assert seen and seen[0].id == "bedrock"
+    assert seen[0].kind == "bedrock"
+    assert seen[0].model == service.settings.BEDROCK_MODEL_ID
     assert events[-1]["type"] == "answer"
 
 

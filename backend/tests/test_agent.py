@@ -290,7 +290,8 @@ async def test_invalid_model_output_repairs_without_compilation(monkeypatch):
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(agent.settings, "AGENT_ENABLED", True)
-    monkeypatch.setattr(agent.settings, "AGENT_API_KEY", "server-secret")
+    monkeypatch.setattr(agent.settings, "BEDROCK_MODEL_ID", "bedrock-model")
+    monkeypatch.setattr(agent.settings, "AWS_REGION", "us-east-1")
     app = FastAPI()
     app.include_router(agent.router, prefix="/api/agent")
     return TestClient(app)

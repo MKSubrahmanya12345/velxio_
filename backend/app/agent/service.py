@@ -12,6 +12,8 @@ Transient provider failures (429/5xx/transport) are retried with backoff and
 do not consume a repair attempt. Every yielded event carries a run_id.
 """
 import asyncio
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -22,7 +24,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Tuple
+from typing import Callable, Tuple
 
 import httpx
 from pydantic import ValidationError
@@ -388,7 +390,7 @@ async def _fix_json_openai(prompt: str, base_url: str, model: str, api_key: str)
         "temperature": 0.1,
     }
     try:
-        async with httpx.AsyncClient(timeout=min(settings.AGENT_PROVIDER_TIMEOUT_S, 45)) as client:
+        async with httpx.AsyncClient(timeout=min(_http_timeout(settings.AGENT_PROVIDER_TIMEOUT_S), 45)) as client:
             response = await client.post(
                 base_url.rstrip("/") + "/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -413,7 +415,7 @@ async def _fix_json_mantle(prompt: str, spec: ProviderSpec) -> str | None:
             return None
         headers["Authorization"] = f"Bearer {spec.api_key}"
     try:
-        async with httpx.AsyncClient(timeout=min(settings.AGENT_PROVIDER_TIMEOUT_S, 45)) as client:
+        async with httpx.AsyncClient(timeout=min(_http_timeout(settings.AGENT_PROVIDER_TIMEOUT_S), 45)) as client:
             response = await client.post(url, headers=headers, content=body)
     except httpx.HTTPError:
         return None
@@ -435,7 +437,7 @@ async def _fix_json_opencode(prompt: str, spec: ProviderSpec) -> str | None:
     if not base_url or not spec.model:
         return None
     try:
-        async with httpx.AsyncClient(timeout=min(settings.AGENT_PROVIDER_TIMEOUT_S, 45)) as client:
+        async with httpx.AsyncClient(timeout=min(_http_timeout(settings.AGENT_PROVIDER_TIMEOUT_S), 45)) as client:
             created = await client.post(f"{base_url}/session",
                                         json={"title": "velxio-agent-json-fix"})
             if created.status_code >= 400:
@@ -471,9 +473,9 @@ async def _fix_json_via_model(raw_text: str, error: str, spec: ProviderSpec | No
     main loop can continue. Returns the raw content string or None on failure.
 
     The call goes back to the SAME provider that produced the bad response.
-    It used to be pinned to AGENT_BASE_URL/AGENT_API_KEY (the Groq defaults),
-    so on a Bedrock deployment the fixer POSTed to an endpoint with no key and
-    returned None every time — the repair looked wired up but never ran.
+    It used to be pinned to a hard-coded endpoint/key pair, so on a Bedrock
+    deployment the fixer POSTed to an endpoint with no key and returned None
+    every time — the repair looked wired up but never ran.
     """
     prompt = _json_fixer_prompt(raw_text, error, pos)
     # Cheap-model routing: the fixer only repairs JSON syntax, so when a
@@ -492,8 +494,9 @@ async def _fix_json_via_model(raw_text: str, error: str, spec: ProviderSpec | No
             logger.warning("configured JSON fixer failed; falling back to the run's provider", exc_info=True)
     try:
         if spec is None:
-            return await _fix_json_openai(prompt, settings.AGENT_BASE_URL,
-                                          settings.AGENT_MODEL, settings.AGENT_API_KEY)
+            # No run provider to route back to: only a dedicated fixer model
+            # (AGENT_FIXER_*) could repair this, and it was already tried.
+            return None
         if spec.kind == "bedrock":
             if _is_mantle_model(spec.model):
                 return await _fix_json_mantle(prompt, spec)
@@ -678,6 +681,219 @@ class ProviderError(Exception):
     """Safe user-facing provider failure, without provider response bodies."""
 
 
+class ProviderRejected(ProviderError):
+    """A terminal 4xx from the provider, carrying status and a bounded body peek.
+
+    Callers need the status to tell "this gateway does not implement an
+    optional parameter" (retry with it removed) from "your key or model id is
+    wrong" (report and stop).
+    """
+
+    def __init__(self, message: str, status: int, body: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
+
+
+# --- run-scoped context ------------------------------------------------------
+# Set once per run and read by the provider adapters, so `propose()` and
+# `_propose_once()` keep the signatures the tests already mock.
+
+# Absolute monotonic deadline for the run executing on this task. Every
+# outbound call clips its HTTP timeout to the time left, so a stalled provider
+# is cut off by ITS OWN timeout (which names the provider) instead of by the
+# run deadline (which can only say "time limit reached").
+_run_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "velxio_agent_run_deadline", default=None)
+# Queue the retry loop appends UI events to; drained by the heartbeat loop.
+_retry_sink: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "velxio_agent_retry_sink", default=None)
+# Called with the char count as a reply streams in, so the UI can show the
+# model is alive rather than merely "waiting".
+_stream_sink: contextvars.ContextVar[Callable[[int], None] | None] = (
+    contextvars.ContextVar("velxio_agent_stream_sink", default=None))
+
+
+def _http_timeout(ceiling: float) -> float:
+    """HTTP timeout for one outbound call: `ceiling`, clipped to time left.
+
+    Without this a call could outlive the run and be reported as the generic
+    deadline error. Never returns <= 0: httpx reads 0 as "no timeout", which
+    is precisely the hang this removes.
+    """
+    deadline = _run_deadline.get()
+    if deadline is None:
+        return max(1.0, ceiling)
+    return max(1.0, min(ceiling, deadline - time.monotonic()))
+
+
+def _report_progress(chars: int) -> None:
+    """Report streamed output size to whoever is waiting. Never fatal."""
+    sink = _stream_sink.get()
+    if sink is not None:
+        try:
+            sink(chars)
+        except Exception:  # noqa: BLE001 - progress is decoration
+            pass
+
+
+# `stream_options` (usage accounting) is not implemented by every gateway.
+# Rejected once -> off for the process, rather than paying a 400 on every call.
+_STREAM_USAGE = True
+
+_DONE = object()
+
+
+async def _next_line(lines) -> object:
+    """One line from an httpx line iterator, or _DONE at end of stream.
+
+    Wrapped because `asyncio.wait_for` cancels whatever it is given, and a
+    StopAsyncIteration escaping a coroutine becomes a RuntimeError instead of
+    ending the loop. The sentinel makes both paths ordinary.
+    """
+    try:
+        return await lines.__anext__()
+    except StopAsyncIteration:
+        return _DONE
+
+
+def _recover_unstreamed(raw: list[str], finish_reason: str | None,
+                        usage: dict | None) -> tuple[str, str | None, dict | None]:
+    """A few gateways ignore `stream: true` and reply with one plain JSON body.
+
+    Recovering it beats failing a whole run over a transport detail.
+    """
+    body = "".join(raw).strip()
+    if not body.startswith("{"):
+        return "", finish_reason, usage
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return "", finish_reason, usage
+    if not isinstance(payload, dict):
+        return "", finish_reason, usage
+    choices = payload.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return "", finish_reason, usage
+    message = choices[0].get("message") or {}
+    content = message.get("content") if isinstance(message, dict) else ""
+    reported = payload.get("usage")
+    return (content or "",
+            choices[0].get("finish_reason") or finish_reason,
+            reported if isinstance(reported, dict) else usage)
+
+
+async def _stream_chat_completion(spec: ProviderSpec, url: str, headers: dict,
+                                  payload: dict | None = None,
+                                  content: bytes | None = None):
+    """POST /chat/completions and read the reply as SSE, refusing silence.
+
+    The old code did `await client.post(...)`, which waits for the ENTIRE body
+    before a single byte is inspected. A provider that accepted the connection
+    and then went quiet was therefore indistinguishable from a model that was
+    merely thinking, and the run sat there until the outer deadline killed it
+    with a generic error. Reading incrementally separates the two cases:
+
+      * no first chunk within AGENT_STREAM_TTFB_S     -> never started
+      * no further chunk within AGENT_STREAM_STALL_S  -> died mid-reply
+
+    Both are transient, so the retry loop turns them into a visible retry
+    instead of a multi-minute freeze.
+
+    Pass `payload` to have httpx encode the body, or `content` to send exact
+    bytes (required when the body is signed, as with Bedrock Mantle).
+    """
+    ttfb = max(1.0, settings.AGENT_STREAM_TTFB_S)
+    stall = max(1.0, settings.AGENT_STREAM_STALL_S)
+    pieces: list[str] = []
+    raw: list[str] = []
+    total = 0
+    finish_reason: str | None = None
+    usage: dict | None = None
+    started = False
+    timeout = httpx.Timeout(_http_timeout(settings.AGENT_PROVIDER_TIMEOUT_S),
+                            connect=10.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            send = {"content": content} if content is not None else {"json": payload}
+            async with client.stream("POST", url, headers=headers, **send) as response:
+                status = response.status_code
+                if status == 429 or status >= 500:
+                    raise ProviderTransientError(
+                        f"{spec.label} returned HTTP {status}. Retrying…")
+                if status >= 400:
+                    # Bounded peek. Provider bodies may contain account detail,
+                    # so they are never surfaced — only matched on.
+                    body = (await response.aread()).decode("utf-8", "replace")[:600]
+                    logger.warning("propose %s http=%d body=%s", spec.id, status, body[:200])
+                    raise ProviderRejected(
+                        f"{spec.label} returned HTTP {status}. Check the model id, "
+                        "the API key and the account quota.", status, body)
+                lines = response.aiter_lines()
+                budget = ttfb
+                while True:
+                    try:
+                        line = await asyncio.wait_for(_next_line(lines),
+                                                      timeout=budget)
+                    except asyncio.TimeoutError:
+                        if not started:
+                            raise ProviderTransientError(
+                                f"{spec.label} accepted the request but sent nothing "
+                                f"for {int(ttfb)}s. Retrying…") from None
+                        raise ProviderTransientError(
+                            f"{spec.label} went quiet mid-reply ({total} chars "
+                            f"received, {int(stall)}s idle). Retrying…") from None
+                    if line is _DONE:
+                        break
+                    started = True
+                    budget = stall
+                    text = line.strip() if isinstance(line, str) else ""
+                    if not text:
+                        continue
+                    raw.append(text)
+                    if not text.startswith("data:"):
+                        continue
+                    data = text[5:].strip()
+                    if not data:
+                        continue
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        continue
+                    if not isinstance(chunk, dict):
+                        continue
+                    if isinstance(chunk.get("usage"), dict):
+                        usage = chunk["usage"]
+                    error = chunk.get("error")
+                    if isinstance(error, dict):
+                        detail = str(error.get("message") or "")[:200]
+                        raise ProviderTransientError(
+                            f"{spec.label} reported an error mid-stream"
+                            f"{': ' + detail if detail else ''}. Retrying…")
+                    for choice in (chunk.get("choices") or []):
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta") or choice.get("message") or {}
+                        piece = delta.get("content") if isinstance(delta, dict) else None
+                        if isinstance(piece, str) and piece:
+                            pieces.append(piece)
+                            total += len(piece)
+                            _report_progress(total)
+                        reason = choice.get("finish_reason")
+                        if isinstance(reason, str) and reason:
+                            finish_reason = reason
+    except httpx.HTTPError:
+        raise ProviderTransientError(f"{spec.label} is unreachable. Retrying…") from None
+
+    streamed = "".join(pieces)
+    if streamed.strip():
+        return streamed, finish_reason, usage
+    return _recover_unstreamed(raw, finish_reason, usage)
+
+
+
 class ProviderTransientError(ProviderError):
     """Retryable provider failure: HTTP 429/5xx, timeouts, transport errors."""
 
@@ -711,7 +927,7 @@ async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec,
              for m in messages]
     prompt = "\n\n".join(turns)
 
-    async with httpx.AsyncClient(timeout=settings.AGENT_PROVIDER_TIMEOUT_S) as client:
+    async with httpx.AsyncClient(timeout=_http_timeout(settings.AGENT_PROVIDER_TIMEOUT_S)) as client:
         try:
             session_resp = await client.post(f"{base_url}/session", json={"title": "velxio-agent-propose"})
         except httpx.HTTPError:
@@ -784,36 +1000,45 @@ async def _propose_once_opencode(messages: list[dict], spec: ProviderSpec,
 
 async def _propose_once_openai(messages: list[dict], spec: ProviderSpec,
                                max_tokens: int | None = None) -> Proposal:
+    """One proposal over an OpenAI-compatible /chat/completions endpoint.
+
+    Streamed rather than buffered: an incremental reply can be shown to the
+    user, and a provider that goes silent can be abandoned on a stall timeout
+    instead of holding the run open until the outer deadline kills it.
+    """
+    global _STREAM_USAGE
     start = time.monotonic()
+    url = spec.base_url.rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {spec.api_key}"}
+
+    def body(include_usage: bool) -> dict:
+        payload = {"model": spec.model, "messages": messages,
+                   "response_format": {"type": "json_object"},
+                   "max_tokens": max_tokens or settings.AGENT_MAX_TOKENS_PROPOSAL,
+                   "stream": True}
+        if include_usage:
+            payload["stream_options"] = {"include_usage": True}
+        return payload
+
     try:
-        async with httpx.AsyncClient(timeout=settings.AGENT_PROVIDER_TIMEOUT_S) as client:
-            response = await client.post(
-                spec.base_url.rstrip("/") + "/chat/completions",
-                headers={"Authorization": f"Bearer {spec.api_key}"},
-                json={"model": spec.model, "messages": messages,
-                      "response_format": {"type": "json_object"},
-                      "max_tokens": max_tokens or settings.AGENT_MAX_TOKENS_PROPOSAL},
-            )
-    except httpx.HTTPError:
-        raise ProviderTransientError("Model provider is unreachable. Retrying…") from None
-    # Never expose provider bodies (may contain account info/credentials).
-    if response.status_code == 429 or response.status_code >= 500:
-        raise ProviderTransientError(f"Model provider returned HTTP {response.status_code}. Retrying…")
-    if response.status_code >= 400:
-        raise ProviderError(f"Model provider returned HTTP {response.status_code}. Check server configuration or quota.")
-    try:
-        payload = response.json()
-        content = payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, ValueError):
-        raise ProviderError("Model provider returned an invalid response") from None
-    finish_reason = (
-        payload.get("choices", [{}])[0].get("finish_reason")
-        if isinstance(payload, dict) else None
-    )
+        content, finish_reason, usage = await _stream_chat_completion(
+            spec, url, headers, payload=body(_STREAM_USAGE))
+    except ProviderRejected as exc:
+        if exc.status != 400 or not _STREAM_USAGE:
+            # Not the optional parameter: report what an admin can actually fix.
+            raise ProviderError(str(exc)) from None
+        logger.warning("propose %s: stream_options rejected; usage accounting off",
+                       spec.id)
+        _STREAM_USAGE = False
+        content, finish_reason, usage = await _stream_chat_completion(
+            spec, url, headers, payload=body(False))
+
+    if not content.strip():
+        raise ProviderError(
+            f"{spec.label} returned an empty response. Check the model id and quota.")
     # finish_reason "length" means the object was cut off by max_tokens, which
     # the repair prompt states explicitly (otherwise the model repeats itself).
     proposal = await parse_proposal_with_fix(content, spec, finish_reason)
-    usage = payload.get("usage")
     if isinstance(usage, dict):
         cached = _cached_tokens_from_usage(usage)
         if cached is not None:
@@ -821,7 +1046,7 @@ async def _propose_once_openai(messages: list[dict], spec: ProviderSpec,
         proposal._usage = {k: usage.get(k) for k in
                            ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
                            if isinstance(usage.get(k), int)}
-    _log_proposal_ok(spec, response.status_code, start, content, usage)
+    _log_proposal_ok(spec, 200, start, content, usage)
     _debug_calls(spec, messages, content)
     return proposal
 
@@ -942,7 +1167,7 @@ def _mantle_payload(spec: ProviderSpec, messages: list[dict], max_tokens: int | 
     return payload
 
 
-def _rejects_json_mode(response: httpx.Response) -> bool:
+def _rejects_json_mode(body: str) -> bool:
     """True when a 400 is about `response_format` rather than the request itself.
 
     Only keywords are matched — provider bodies are never logged or surfaced. A
@@ -952,66 +1177,94 @@ def _rejects_json_mode(response: httpx.Response) -> bool:
     "Operation not allowed" instead of naming the parameter; without this entry
     every Mantle call would keep paying that 400 forever.
     """
-    body = (response.text or "")[:600].lower()
+    body = (body or "")[:600].lower()
     return any(hint in body for hint in
                ("response_format", "json_object", "json mode", "unsupported",
                 "operation not allowed", "not allowed", "not supported",
                 "does not support", "unimplemented", "invalid", "parameter"))
 
 
-async def _mantle_post(spec: ProviderSpec, payload: dict) -> httpx.Response:
-    """One signed POST to the Mantle gateway (SigV4 preferred, bearer fallback)."""
+async def _mantle_stream(spec: ProviderSpec, payload: dict):
+    """One signed streaming POST to the Mantle gateway (SigV4 or bearer).
+
+    The body is serialised here and sent as exact bytes: httpx would
+    re-encode a `json=` dict with different separators, and a SigV4 signature
+    over different bytes is an invalid signature.
+    """
     body = json.dumps(payload).encode()
     url = _mantle_url(spec)
     headers = _mantle_headers(url, body, spec.region)
     if not headers.get("Authorization") and spec.api_key:
         headers["Authorization"] = f"Bearer {spec.api_key}"
-    try:
-        async with httpx.AsyncClient(timeout=settings.AGENT_PROVIDER_TIMEOUT_S) as client:
-            return await client.post(url, headers=headers, content=body)
-    except httpx.HTTPError:
-        raise ProviderTransientError("Bedrock is unreachable. Retrying…") from None
+    return await _stream_chat_completion(spec, url, headers, content=body)
 
 
 async def _propose_once_mantle(messages: list[dict], spec: ProviderSpec,
                                max_tokens: int | None = None) -> Proposal:
     global _MANTLE_JSON_MODE
+    global _STREAM_USAGE
     if not spec.region:
         raise ProviderError("Bedrock needs a region. Ask an administrator to set AWS_REGION in backend/.env.")
     if not (settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY) and not spec.api_key:
         raise ProviderError("Bedrock Mantle needs AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) or BEDROCK_API_KEY in backend/.env.")
     start = time.monotonic()
-    response = await _mantle_post(spec, _mantle_payload(spec, messages, max_tokens=max_tokens,
-                                                        json_mode=_MANTLE_JSON_MODE))
-    if response.status_code == 400 and _MANTLE_JSON_MODE and _rejects_json_mode(response):
-        # This gateway doesn't implement response_format: drop it for the rest
-        # of the process instead of failing every call the same way.
-        logger.warning("propose %s: gateway rejected response_format; JSON mode disabled", spec.id)
-        _MANTLE_JSON_MODE = False
-        response = await _mantle_post(spec, _mantle_payload(spec, messages, max_tokens=max_tokens,
-                                                            json_mode=False))
-    if response.status_code == 429 or response.status_code >= 500:
-        raise ProviderTransientError(f"Bedrock returned HTTP {response.status_code}. Retrying…")
-    if response.status_code >= 400:
-        # A rejection that survives the JSON-mode drop is policy-side, not
-        # payload-side; name the things an administrator can actually check.
+
+    def body(json_mode: bool, include_usage: bool) -> dict:
+        payload = _mantle_payload(spec, messages, max_tokens=max_tokens,
+                                  json_mode=json_mode)
+        payload["stream"] = True
+        if include_usage:
+            payload["stream_options"] = {"include_usage": True}
+        return payload
+
+    # Two optional parameters a gateway may not implement. Each 400 drops one
+    # and the choice is remembered process-wide, so later calls never re-pay
+    # the same rejection. Order: usage accounting first (cheaper to lose).
+    plan = [(_MANTLE_JSON_MODE, _STREAM_USAGE)]
+    if _STREAM_USAGE:
+        plan.append((_MANTLE_JSON_MODE, False))
+    if _MANTLE_JSON_MODE:
+        plan.append((False, _STREAM_USAGE))
+        plan.append((False, False))
+
+    content: str | None = None
+    finish_reason: str | None = None
+    usage: dict | None = None
+    last: ProviderRejected | None = None
+    for json_mode, include_usage in plan:
+        try:
+            content, finish_reason, usage = await _mantle_stream(
+                spec, body(json_mode, include_usage))
+            break
+        except ProviderRejected as exc:
+            if exc.status != 400:
+                raise ProviderError(str(exc)) from None
+            last = exc
+            if include_usage and _STREAM_USAGE:
+                logger.warning("propose %s: stream_options rejected; usage accounting off",
+                               spec.id)
+                _STREAM_USAGE = False
+                continue
+            if json_mode and _MANTLE_JSON_MODE and _rejects_json_mode(exc.body):
+                logger.warning("propose %s: gateway rejected response_format; JSON mode disabled",
+                               spec.id)
+                _MANTLE_JSON_MODE = False
+                continue
+            # Not an optional-parameter problem: name what an admin can check.
+            raise ProviderError(
+                f"Bedrock returned HTTP {exc.status}. The Mantle gateway rejected this "
+                "request — check that the model id is served in "
+                f"{spec.region or 'the configured region'}, that the IAM role/user is "
+                "allowed for bedrock-mantle (or a valid BEDROCK_API_KEY), and account "
+                "quota.")
+
+    if content is None or not content.strip():
         raise ProviderError(
-            f"Bedrock returned HTTP {response.status_code}. The Mantle gateway rejected this "
-            "request even without JSON mode — check that the model id is served in "
-            f"{spec.region or 'the configured region'}, that the IAM role/user is allowed for "
-            "bedrock-mantle (or a valid BEDROCK_API_KEY), and account quota."
-        )
-    try:
-        payload = response.json()
-        choice = payload["choices"][0]
-        content = choice["message"]["content"]
-    except (KeyError, IndexError, TypeError, ValueError):
-        raise ProviderError("Bedrock returned an invalid response") from None
-    # Same salvage + repair pipeline as every other provider: this call used to
-    # validate the raw text with model_validate_json, so a single unescaped
-    # quote in embedded source killed the run instead of being repaired.
-    proposal = await parse_proposal_with_fix(content, spec, choice.get("finish_reason"))
-    usage = payload.get("usage")
+            "Bedrock returned an empty or rejected response"
+            f"{' (HTTP ' + str(last.status) + ')' if last else ''}. Check the model id, "
+            "region and credentials.")
+
+    proposal = await parse_proposal_with_fix(content, spec, finish_reason)
     if isinstance(usage, dict):
         cached = _cached_tokens_from_usage(usage)
         if cached is not None:
@@ -1019,7 +1272,7 @@ async def _propose_once_mantle(messages: list[dict], spec: ProviderSpec,
         proposal._usage = {k: usage.get(k) for k in
                            ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
                            if isinstance(usage.get(k), int)}
-    _log_proposal_ok(spec, response.status_code, start, content, usage,
+    _log_proposal_ok(spec, 200, start, content, usage,
                      extra=f"model={spec.model} json_mode={_MANTLE_JSON_MODE}")
     _debug_calls(spec, messages, content)
     return proposal
@@ -1043,7 +1296,7 @@ def _bedrock_converse_blocking(messages: list[dict], spec: ProviderSpec,
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
             aws_session_token=settings.AWS_SESSION_TOKEN or None,
         )
-    timeout = max(1.0, settings.BEDROCK_TIMEOUT_MS / 1000.0)
+    timeout = _http_timeout(settings.BEDROCK_TIMEOUT_MS / 1000.0)
     config = Config(retries={"max_attempts": max(1, settings.BEDROCK_MAX_RETRIES + 1)},
                     connect_timeout=min(10.0, timeout), read_timeout=timeout)
     client = boto3.client("bedrock-runtime", config=config, **client_kwargs)
@@ -1130,23 +1383,76 @@ def _resolve_provider(provider_id: str) -> ProviderSpec:
     return spec
 
 
+def _time_left() -> float:
+    """Seconds remaining in this run's budget (unbounded outside a run)."""
+    deadline = _run_deadline.get()
+    if deadline is None:
+        return float("inf")
+    return deadline - time.monotonic()
+
+
+# Sent when the run is nearly out of budget: a patch built from what the model
+# already knows beats a deadline kill that applies nothing at all.
+_COMMIT_NOW = (
+    "STOP RESEARCHING — this run is nearly out of time. Do not request any "
+    "more tools. Respond NOW with ONE complete Proposal JSON for the ORIGINAL "
+    "request: if you have enough information, include the full patch; if you "
+    "do not, include only the parts you are confident about. No prose, no "
+    "markdown fences, and no tool_calls."
+)
+
+
 async def propose(messages: list[dict], spec: ProviderSpec | None = None,
                   max_tokens: int | None = None) -> Proposal:
     """One provider call with bounded retry/backoff on transient failures.
 
     `max_tokens` is the output ceiling for this call type (see
     AGENT_MAX_TOKENS_PROPOSAL / AGENT_MAX_TOKENS_TOOL_ROUNDS); None keeps
-    each path's historical default."""
+    each path's historical default.
+
+    Every retry is logged and pushed to the run's `_retry_sink` (a UI event).
+    Retries used to be silent — no log line, no event — so a rate-limited or
+    stalling provider produced a frozen action list with nothing anywhere to
+    explain it."""
     if spec is None:
         spec = _resolve_provider("opencode")
     last: ProviderTransientError | None = None
-    for try_index in range(settings.AGENT_PROVIDER_RETRIES + 1):
+    retries = settings.AGENT_PROVIDER_RETRIES
+    sink = _retry_sink.get()
+    retry_deadline = time.monotonic() + settings.AGENT_RETRY_TIME_BUDGET_S
+    for try_index in range(retries + 1):
         try:
             return await _propose_once(messages, spec, max_tokens)
         except ProviderTransientError as exc:
             last = exc
-            if try_index < settings.AGENT_PROVIDER_RETRIES:
-                await asyncio.sleep(min(2 ** try_index, 4) + random.uniform(0, 0.5))
+            logger.warning("propose %s attempt %d/%d failed: %s",
+                           spec.id, try_index + 1, retries + 1, exc)
+            if sink is not None:
+                sink.append({
+                    "type": "retry",
+                    "provider": spec.id,
+                    "attempt": try_index + 1,
+                    "of": retries + 1,
+                    "message": f"{spec.label} is busy — retrying "
+                               f"({try_index + 1} of {retries + 1})",
+                })
+            if try_index < retries:
+                delay = min(2 ** try_index, 4) + random.uniform(0, 0.5)
+                # Two caps on the backoff, because the count alone is not a
+                # time bound: 15 retries is over a minute of a 4-minute run
+                # spent asleep, and a retry that outlives the run can only
+                # ever be reported as a generic timeout.
+                if time.monotonic() + delay > retry_deadline:
+                    logger.error("propose %s: retry budget of %.0fs exhausted "
+                                 "after %d attempt(s)", spec.id,
+                                 settings.AGENT_RETRY_TIME_BUDGET_S, try_index + 1)
+                    break
+                remaining = _time_left()
+                if delay >= remaining:
+                    logger.error("propose %s: stopping retries — only %.1fs of "
+                                 "the run budget is left", spec.id, remaining)
+                    break
+                await asyncio.sleep(delay)
     raise last  # type: ignore[misc]
 
 
@@ -1319,6 +1625,13 @@ async def run_agent(request: AgentRequest):
                 len(request.project.files))
     record = start_run_record(run_id)
     rid, feedback_q = register_feedback(run_id)
+    # Arm the per-call deadline: every outbound call in this run clips its HTTP
+    # timeout to the time left here, so a stalling provider is cut off by its
+    # own timeout (which names the provider) rather than by the route deadline
+    # (which can only report "time limit reached"). The 2s margin lets the
+    # provider-specific error win the race and reach the user.
+    deadline_token = _run_deadline.set(
+        time.monotonic() + settings.AGENT_RUN_TIMEOUT_S - 2.0)
     # Forge project memory (opt-in, direct connection, fail-open) runs as a
     # background task instead of a serial pre-run step: the first provider
     # call no longer waits for it. If it lands before the first call it is in
@@ -1368,6 +1681,7 @@ async def run_agent(request: AgentRequest):
                                 run_id)
                 forge_task.cancel()
             forge_task.add_done_callback(_discard_task_result)
+        _run_deadline.reset(deadline_token)
         unregister(rid)
 
 
@@ -1410,6 +1724,55 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                 "cached_tokens": usage.get("cached_tokens"),  # None = not reported
             })
         return proposal
+
+    # Result slot for _propose_stream: async generators cannot `return` a value
+    # to `async for`, so the awaited Proposal lands here instead. A failed call
+    # re-raises out of the loop, exactly as a plain `await` would.
+    call_result: dict[str, Proposal] = {}
+
+    async def _propose_stream(messages: list[dict], max_tokens: int | None = None,
+                              stage: str = "", attempt: int = 0):
+        """Await one provider call, reporting progress while it runs.
+
+        Streaming tells us the model is emitting tokens, but a long prefill
+        emits nothing, so the run still needs a periodic tick to prove it is
+        alive. Between ticks this drains any retry events `propose()` queued.
+        """
+        retries: list[dict] = []
+        live = {"chars": 0}
+        retry_token = _retry_sink.set(retries)
+        stream_token = _stream_sink.set(lambda n: live.__setitem__("chars", n))
+        task = asyncio.ensure_future(
+            propose_counted(messages, max_tokens=max_tokens, stage=stage,
+                            attempt=attempt))
+        tick = max(0.5, settings.AGENT_HEARTBEAT_S)
+        waited = 0.0
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=tick)
+                if task in done:
+                    # Re-raises ProviderError / MalformedResponse /
+                    # ValidationError into the caller's `async for`.
+                    call_result["proposal"] = task.result()
+                    return
+                waited += tick
+                for payload in retries:
+                    yield event(payload)
+                retries.clear()
+                chars = live["chars"]
+                detail = (f"generating · {chars:,} chars" if chars
+                          else "waiting for the first token")
+                yield event({"type": "heartbeat", "stage": stage,
+                             "attempt": attempt, "waited": round(waited),
+                             "chars": chars, "provider": spec.id,
+                             "message": f"{spec.label} is {detail} · {int(waited)}s"})
+        finally:
+            _retry_sink.reset(retry_token)
+            _stream_sink.reset(stream_token)
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await task
 
     pending_notes: list[str] = []
     forge_note: str | None = None
@@ -1540,6 +1903,10 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
     # once — repeats across rounds return instantly, identical calls batched
     # in the same round share a single in-flight execution (single-flight).
     tool_memo = ToolMemo()
+    # Reserve a slice of the budget for committing a result. Capped at 40% so
+    # a short AGENT_RUN_TIMEOUT_S still leaves room to research.
+    commit_reserve = min(settings.AGENT_COMMIT_RESERVE_S,
+                         settings.AGENT_RUN_TIMEOUT_S * 0.4)
 
     for attempt in range(settings.AGENT_MAX_ATTEMPTS):
         # Consume any mid-run notes the user sent while the previous attempt
@@ -1564,9 +1931,12 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         user_short = ""  # short human-readable label for the diagnostic event
         while proposal is None:
             try:
-                proposal = await propose_counted(messages,
-                                                 max_tokens=settings.AGENT_MAX_TOKENS_PROPOSAL,
-                                                 stage=stage, attempt=attempt + 1)
+                call_result.clear()
+                async for _ev in _propose_stream(
+                        messages, max_tokens=settings.AGENT_MAX_TOKENS_PROPOSAL,
+                        stage=stage, attempt=attempt + 1):
+                    yield _ev
+                proposal = call_result.get("proposal")
             except ProviderError as exc:
                 logger.error("run %s: %s", run_id, exc)
                 record.finish("error", str(exc))
@@ -1605,20 +1975,34 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
             while proposal.tool_calls and not nudged:
                 calls = proposal.tool_calls[:4]
                 drafting = any(call.tool in DRAFT_TOOLS for call in calls)
-                if drafting and draft_rounds_left > 0:
+                # Graceful degradation: with little budget left, another
+                # research round is a worse bet than committing the design we
+                # already have. Stop the loop and make the last call an
+                # "answer now" nudge, so the deadline cannot kill a run that
+                # had a usable patch in it.
+                out_of_time = _time_left() < commit_reserve
+                if drafting and draft_rounds_left > 0 and not out_of_time:
                     draft_rounds_left -= 1
-                elif not drafting and tool_rounds_left > 0:
+                elif not drafting and tool_rounds_left > 0 and not out_of_time:
                     tool_rounds_left -= 1
                 else:
-                    # Out of budget for this family of tools: one final nudge to
-                    # return the response itself, never another loop.
+                    # Out of budget for this family of tools (or out of time):
+                    # one final nudge to return the response itself, never
+                    # another loop.
                     nudged = True
                     append_proposal_echo(proposal)
-                    messages.append({"role": "user", "content": tool_results_message([], 0)})
+                    messages.append({
+                        "role": "user",
+                        "content": _COMMIT_NOW if out_of_time
+                        else tool_results_message([], 0)})
                     try:
-                        proposal = await propose_counted(messages,
-                                                         max_tokens=settings.AGENT_MAX_TOKENS_TOOL_ROUNDS,
-                                                         stage="nudge", attempt=attempt + 1)
+                        call_result.clear()
+                        async for _ev in _propose_stream(
+                                messages,
+                                max_tokens=settings.AGENT_MAX_TOKENS_TOOL_ROUNDS,
+                                stage="nudge", attempt=attempt + 1):
+                            yield _ev
+                        proposal = call_result.get("proposal")
                     except ProviderError as exc:
                         logger.error("run %s: %s", run_id, exc)
                         record.finish("error", str(exc))
@@ -1659,8 +2043,16 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                 yield event({"type": "tools", "calls": [{"tool": c.tool, "ok": r.get("ok", False)}
                                                         for c, r in zip(calls, results)]})
                 append_proposal_echo(proposal)
-                messages.append({"role": "user",
-                                 "content": tool_results_message(results, max(tool_rounds_left, draft_rounds_left))})
+                repeats = [c.tool for c in calls
+                           if tool_memo.is_cached(request.project, c)]
+                if repeats and len(repeats) == len(calls):
+                    logger.info("run %s round repeated %d cached tool call(s): %s",
+                                run_id, len(repeats), ", ".join(sorted(set(repeats))))
+                messages.append({
+                    "role": "user",
+                    "content": tool_results_message(
+                        results, max(tool_rounds_left, draft_rounds_left),
+                        repeats if len(repeats) == len(calls) else None)})
                 # Give the user a chance to steer between tool calls.
                 async for ev in pump_feedback():
                     yield ev
@@ -1674,10 +2066,14 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                              "message": "Testing the draft against the real toolchain and emulator"
                              if drafting else "Consulting the catalog, pinout and netlist"})
                 try:
-                    proposal = await propose_counted(messages,
-                                                     max_tokens=settings.AGENT_MAX_TOKENS_TOOL_ROUNDS,
-                                                     stage="testing" if drafting else "research",
-                                                     attempt=attempt + 1)
+                    call_result.clear()
+                    async for _ev in _propose_stream(
+                            messages,
+                            max_tokens=settings.AGENT_MAX_TOKENS_TOOL_ROUNDS,
+                            stage="testing" if drafting else "research",
+                            attempt=attempt + 1):
+                        yield _ev
+                    proposal = call_result.get("proposal")
                 except ProviderError as exc:
                     logger.error("run %s: %s", run_id, exc)
                     record.finish("error", str(exc))

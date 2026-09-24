@@ -74,7 +74,7 @@ async def status():
     # The browser reads model names/ids only; credentials never leave the server.
     providers = [{"id": p.id, "label": p.label, "model": p.model, "configured": p.configured}
                  for p in settings.providers()]
-    default = settings.provider("opencode")
+    default = settings.provider("bedrock")
     if default is None:
         default = next((spec for spec in settings.providers() if spec.configured), None)
     return {"configured": configured(),
@@ -100,14 +100,25 @@ async def run(body: AgentRequest, request: Request):
     await _slots.acquire()
 
     async def stream():
+        canvas_touched = False
         try:
-            async with asyncio.timeout(240):
+            async with asyncio.timeout(settings.AGENT_RUN_TIMEOUT_S):
                 async for event in run_agent(body):
                     if await request.is_disconnected():
                         return
+                    # Progressive canvas updates already called loadWorkspace()
+                    # in the browser, so a timeout may not claim "unchanged".
+                    if event.get("type") == "canvas_update":
+                        canvas_touched = True
                     yield json.dumps(event, allow_nan=False) + "\n"
         except TimeoutError:
-            yield json.dumps({"type": "error", "message": "Agent time limit reached. Your workspace is unchanged; try a smaller request."}) + "\n"
+            tail = (" Parts already dropped on the canvas are kept — use Checkpoints "
+                    "to undo." if canvas_touched else
+                    " Your workspace is unchanged.")
+            yield json.dumps({"type": "error",
+                              "message": f"Agent time limit reached after "
+                                         f"{int(settings.AGENT_RUN_TIMEOUT_S)}s."
+                                         f"{tail} Try a smaller request."}) + "\n"
         except Exception as exc:
             # Only explicitly safe provider errors may be shown to the browser.
             message = str(exc) if isinstance(exc, ProviderError) else "Agent service failed. Check backend connectivity and model configuration, then retry."
