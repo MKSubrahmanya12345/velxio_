@@ -91,19 +91,44 @@ export function createProjectRouter(deps) {
     try {
       const list = await deps.store.list();
       // The list view only needs the headline — not every event of every run.
+      // needsYou = parts the human still has to sign off (same filter the
+      // desktop chat uses), so the mobile chat app can badge conversations
+      // without downloading every project.
       res.json(
-        list.map((p) => ({
-          id: p.id,
-          goal: p.goal,
-          status: p.status,
-          profileLabel: p.profileLabel,
-          createdAt: p.createdAt,
-          updatedAt: p.updatedAt,
-          parts: (p.state?.parts || []).length,
-          failed: (p.state?.parts || []).filter((x) => x.status === 'failed').length,
-          runs: (p.state?.runs || []).length,
-          errors: (p.state?.errors || []).length,
-        })),
+        list.map((p) => {
+          const parts = p.state?.parts || [];
+          const chat = p.state?.chat || [];
+          const last = chat[chat.length - 1] || null;
+          const needsYou = parts.filter(
+            (x) =>
+              !x.verified &&
+              x.status !== 'failed' &&
+              x.current?.data &&
+              (x.humanCheckpoint || p.status === 'awaiting_human'),
+          ).length;
+          const preview = (content) =>
+            String(content || '')
+              .replace(/[#*`>_-]/g, '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 90);
+          return {
+            id: p.id,
+            goal: p.goal,
+            status: p.status,
+            profileLabel: p.profileLabel,
+            createdAt: p.createdAt,
+            updatedAt: p.updatedAt,
+            parts: parts.length,
+            failed: parts.filter((x) => x.status === 'failed').length,
+            runs: (p.state?.runs || []).length,
+            errors: (p.state?.errors || []).length,
+            needsYou,
+            lastMessagePreview: last ? (last.role === 'user' ? `You: ${preview(last.content)}` : preview(last.content)) : '',
+            lastMessageRole: last ? last.role : null,
+            lastMessageAt: last?.ts || null,
+          };
+        }),
       );
     } catch (e) {
       next(e);

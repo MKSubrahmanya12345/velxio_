@@ -52,6 +52,15 @@ app.use(createRouter(deps));
 // Serve the built client when present (same-origin deployment).
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(__dirname, '../../client/dist');
+const mobileDir = path.resolve(__dirname, '../../mobile/dist');
+
+if (fs.existsSync(mobileDir)) {
+  // WhatsApp-style mobile chat app for the "needs your eyes" checkpoint.
+  // Served at /m so a phone can open http://<host>:4322/m/ without another server.
+  app.use('/m', express.static(mobileDir));
+  app.get(/^\/m(?:\/.*)?$/, (req, res) => res.sendFile(path.join(mobileDir, 'index.html')));
+}
+
 if (fs.existsSync(distDir)) {
   app.use(express.static(distDir));
   app.get(/^(?!\/api\/).*/, (req, res) => res.sendFile(path.join(distDir, 'index.html')));
@@ -77,6 +86,7 @@ app.listen(cfg.port, '0.0.0.0', () => {
   console.log(`  ────────────────────────────────────────────────────────────`);
   console.log(`  SERVER    http://localhost:${cfg.port}  (bind 0.0.0.0)`);
   console.log(`  CLIENT    http://localhost:${cfg.clientPort}  (vite dev, proxies /api)`);
+  if (fs.existsSync(mobileDir)) console.log(`  MOBILE    http://localhost:${cfg.port}/m/  (checkpoint chat)`);
   console.log(`  JEV       ${jev.available ? 'typesafe (live)' : 'unconfigured — LLM answers the typed questions'}`);
   console.log(
     `  PROVIDERS ${candidates.length} key(s)${active ? ` · active: ${active.provider}/${active.model}` : ' · NONE configured'}`,

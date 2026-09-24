@@ -12,13 +12,14 @@ Jev typed-decision client) by importing it directly from `../forge/server/src`.
 always wins; `forge/server/.env` is only an optional fallback, used for keys this file does not define
 (switch it off with `WIREGI_INHERIT_FORGE_ENV=false`).
 
-## Ports — the three apps side by side
+## Ports — the four apps side by side
 
 | App | UI | API |
 | --- | --- | --- |
 | **Velxio** (repo root, `frontend/`) | **5173** | 8000/8080 |
 | **Forge** (`forge/client`) | **5174** | 4321 |
 | **WireGI** (`WireGI/client`) | **5175** | 4322 |
+| **WireGI mobile** (`WireGI/mobile`) | **5176** (dev) · **4322/m/** (prod) | — |
 
 WireGI reads its own ports from `WIREGI_CLIENT_PORT` / `WIREGI_PORT`, so `PORT=4321` in a Forge `.env`
 can never drag it onto Forge's port.
@@ -63,6 +64,13 @@ WireGI/
                         # OverviewPanel, PartCard, FlowPanel (the debugger), DecisionLog,
                         # ResearchLog, ReconcileLog, DebugPanel, HumanCheckpoint,
                         # ProviderStrip, TopBar, HowItWorks, ConfidenceMeter, StepCard
+  mobile/                # WhatsApp-style mobile chat app for the human checkpoint
+    src/
+      lib/api.ts        # trimmed REST + ndjson streaming client (sendMessage, respondHuman)
+      lib/types.ts      # Project / Part / ChatMsg + checkpointPartsOf() (needs-your-eyes set)
+      lib/markdown.tsx  # dependency-free markdown for agent replies
+      components/       # ChatsList (list) · ChatThread (chat + checkpoint card) · CheckpointCard
+      App.tsx           # hash router: #/ = chats, #/p/:id = thread
 ```
 
 ## How a request flows
@@ -151,10 +159,17 @@ cd WireGI/server && npm install && npm start        # listens on :4322
 
 # 3) client (another terminal)
 cd WireGI/client && npm install && npm run dev      # http://localhost:5175 (proxies /api → :4322)
+
+# 4) mobile (optional — the checkpoint chat, WhatsApp-style)
+cd WireGI/mobile && npm install && npm run dev      # http://localhost:5176 (proxies /api → :4322)
+#    open it on a phone: http://<your-LAN-ip>:5176 — the dev server binds 0.0.0.0.
+#    production build:  npm run build, then the server serves it at http://localhost:4322/m/
 ```
 
 Then open **http://localhost:5175**, type **`make me a drone`**, and watch the chat on the left and the
-inspector on the right fill in: parts, the live flow, decisions and the integration pass.
+inspector on the right fill in: parts, the live flow, decisions and the integration pass. When a build
+hits `awaiting_human`, the parts that need your eyes are also a WhatsApp-style chat at **5176** (or
+`/m/` on a phone) — approve, answer & re-research, note, or reject & re-run straight from chat.
 
 ### Verify it without spending tokens
 
@@ -284,7 +299,8 @@ A `choice` with a bare array of strings is rejected: *"Input should be a valid d
 correct shape, and the readers (`answerValue`, `noulTrue`, `answerCertainty`) understand the real reply shapes:
 `{choice:'<key>'}`, `{noul:0..1}`, `{score:<index>}`.
 
-**3. Ports are WireGI's own.** The UI is **5175** (Velxio 5173, Forge 5174) and the API is **4322**.
+**3. Ports are WireGI's own.** The UI is **5175** (Velxio 5173, Forge 5174), the mobile chat is **5176**,
+and the API is **4322**.
 Both come from WireGI's `.env` (`WIREGI_CLIENT_PORT` / `WIREGI_PORT`) — WireGI never reads `PORT`, so a
 Forge `.env` with `PORT=4321` cannot drag it onto Forge's port.
 
