@@ -87,7 +87,22 @@ Domain guidance: ${profile.verification}
 Verification ladder available in this domain: ${ladderText(profile)}
 
 Be concrete and buildable — cite real part numbers, specs, prices and versions when known.
-If anything is uncertain, put it in openQuestions and set humanCheckpoint true.`;
+
+"humanCheckpoint" — the escalation rule, and it is deliberately narrow.
+Set it true ONLY when the build is genuinely blocked on the human:
+  · a PREFERENCE only they hold (budget ceiling, brand loyalty, size, colour)
+  · a FACT only they can observe (what is already on their bench, which tools
+    they own, whether the frame is 5" or 3")
+  · a SAFETY sign-off that must happen before power is applied
+
+Do NOT set it for ordinary uncertainty. An approximate spec, a part with three
+equally good options, a price that varies by vendor, a detail a datasheet would
+settle — none of these block anyone. Put them in "openQuestions" and carry on.
+
+Rule of thumb: if you could pick a sensible default and the build would still
+work, pick the default and set humanCheckpoint false. Every checkpoint you raise
+costs the builder an interruption, and a build that asks them to verify all
+twelve parts has not saved them any work — it has just moved it.`;
 
 // Turn what was learned into reusable index context. Gathered fields are the
 // valuable part; raw search titles are not.
@@ -238,7 +253,15 @@ ${context}`;
     gathered: out.gathered || [],
     understand: out.understand || { validation: [], openQuestions: [], conflicts: [] },
     data: out.data || null,
-    humanCheckpoint: Boolean(out.humanCheckpoint) || (out.understand?.openQuestions || []).length > 0,
+    // Deliberately NOT `|| openQuestions.length > 0` any more.
+    //
+    // That clause meant every part with a single open question escalated to the
+    // human. On a drone build that is all of them — there is always something
+    // approximate about a motor, a prop or a price — so a twelve-part run came
+    // back with twelve "needs your eyes" and the agent had not saved the builder
+    // any work, it had just handed it back. Open questions are information; a
+    // checkpoint is an interruption. They are different things.
+    humanCheckpoint: Boolean(out.humanCheckpoint),
     web: prior
       ? { engine: 'index', count: 0, reusedFrom: prior.topic }
       : web

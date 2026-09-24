@@ -7,7 +7,7 @@
 // bucket throttles the load before it leaves the process.
 //
 // Knobs (env-overridable, read once at import):
-//   WIREGI_CONCURRENCY   max in-flight provider calls   (default 4)
+//   WIREGI_CONCURRENCY   max in-flight provider calls   (default 8)
 //   WIREGI_RPM           requests/minute ceiling, 0=off (default 0)
 //
 // The semaphore slot is acquired ONCE per part and held across that part's
@@ -18,7 +18,12 @@ function envInt(name, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-export const CONCURRENCY = Math.max(1, envInt('WIREGI_CONCURRENCY', 4));
+// 8, not 4. Parts are researched in parallel and each one is a ~25s round
+// trip, so on a twelve-part build the old default meant three serial waves
+// (≈75s) where one wave would do. Eight still stays well clear of a 429 storm
+// on any mainstream key; raise it further with WIREGI_CONCURRENCY if your
+// provider's rate limits allow.
+export const CONCURRENCY = Math.max(1, envInt('WIREGI_CONCURRENCY', 8));
 export const RPM = Math.max(0, envInt('WIREGI_RPM', 0));
 
 // A counting semaphore. acquire() resolves when a slot is free; release()

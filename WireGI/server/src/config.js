@@ -64,7 +64,7 @@ export function loadConfig(env = process.env) {
   };
 
   cfg.throughput = {
-    concurrency: Math.max(1, num(env.WIREGI_CONCURRENCY, 4)),
+    concurrency: Math.max(1, num(env.WIREGI_CONCURRENCY, 8)),
     rpm: Math.max(0, num(env.WIREGI_RPM, 0)),
     retries: Math.max(0, num(env.WIREGI_RETRIES, 4)),
   };

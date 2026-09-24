@@ -700,7 +700,12 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
         system:
           SYS_DECOMPOSE +
           `\nDomain guidance (${preProfile.label}): ${preProfile.decompose}` +
-          (plan.breadthHint ? ` Aim for about ${plan.breadthHint} parts.` : '') +
+          // A hard limit, not a target. "Aim for about 8" is read as a vibe by
+          // every model, which is how a plan for ~8 parts came back as 12 — and
+          // then got researched, one LLM pass each.
+          (plan.breadthHint
+            ? ` Return AT MOST ${plan.breadthHint} parts. Group related items instead of listing every sub-component or step — this is a hard ceiling, not a target, and returning more than ${plan.breadthHint} is a wrong answer. Do NOT include tools, assembly steps or verification procedures as parts.`
+            : '') +
           plan.riskBias,
         user: `GOAL: ${goal}\nCONSTRAINTS: ${JSON.stringify(constraints)}`,
         temperature: 0.3,
@@ -726,6 +731,20 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
       const parts = decomp.parts.map((p) =>
         makePart({ name: p.name, domain: p.domain, idea: { summary: p.idea } }),
       );
+
+      // The plan is a ceiling; say so when the model walks past it rather than
+      // quietly researching the overage. Keeping the extra parts is the safer
+      // failure — dropping them could lose something real — but the trace has
+      // to show that the plan was not honoured.
+      if (plan.usedJev && plan.breadthHint && parts.length > plan.breadthHint) {
+        tracer.emit({
+          type: 'log',
+          level: 'warn',
+          message: `Decomposition returned ${parts.length} parts against a plan of ${plan.breadthHint} — researching them all. Each extra part is one more research pass; tighten SYS_DECOMPOSE if this keeps happening.`,
+          planned: plan.breadthHint,
+          actual: parts.length,
+        });
+      }
       project.profileId = profile.id;
       project.profileLabel = profile.label;
       project.state.parts = parts;

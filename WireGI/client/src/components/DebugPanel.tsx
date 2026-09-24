@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { DebugBundle, EnvInfo, Health, Project } from '../types';
+import type { DebugBundle, EnvInfo, Health, Project, SidelinedCredential } from '../types';
 import { debugEnv, exportTrace, getDebugBundle, health as healthApi, llmTest, webTest } from '../api';
 import type { FlowEntry } from '../types';
 
@@ -59,8 +59,43 @@ export default function DebugPanel({
     return acc;
   }, {});
 
+  // A 404 from a provider is almost never "the provider is down" — it is a
+  // model name that no longer exists. Saying so plainly is the whole point:
+  // the symptom the user notices is "runs got slow", and the cause is one dead
+  // key silently pushing every cheap-tier call onto the slow provider.
+  const sidelined = health?.sidelined || [];
+  const diagnose = (s: SidelinedCredential) => {
+    if (s.status === 401 || s.status === 403) return 'the key is invalid, expired or revoked';
+    if (s.status === 404) return 'the model name is wrong or has been decommissioned';
+    if (s.status === 400 || s.status === 422) return 'the request was rejected — check the model name and base URL';
+    return 'the provider refused the call permanently';
+  };
+
   return (
     <div className="debug">
+      {sidelined.length > 0 && (
+        <section className="panel">
+          <h3>Sidelined credentials</h3>
+          <p className="muted small">
+            These failed permanently and were taken out of rotation for this process. Every call that would have used
+            them now falls through to whatever is left — which is usually why a run suddenly got slow.
+          </p>
+          <div className="errors-lite">
+            {sidelined.map((s) => (
+              <div className="err-line" key={s.id}>
+                <code>{s.id}</code>
+                {s.status ? ` · HTTP ${s.status}` : ''} — {diagnose(s)}
+                {s.message ? <div className="muted small ellipsis">{s.message}</div> : null}
+              </div>
+            ))}
+          </div>
+          <div className="hint">
+            Fix the key or the model name in <code>WireGI/server/.env</code>, then <b>restart the server</b> —
+            configuration is read once at boot, so editing the file alone will not bring these back.
+          </div>
+        </section>
+      )}
+
       <section className="panel">
         <h3>Plumbing test</h3>
         <p className="muted small">
