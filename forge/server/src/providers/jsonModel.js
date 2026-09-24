@@ -5,8 +5,7 @@
 // selected key runs first and any error switches to the next provider/key,
 // looping until one succeeds or the round budget is exhausted (providers/
 // failover.js). Without a registry the original .env-only path is used.
-import { signV4 } from './sigv4.js';
-import { bedrockModelPath } from './catalog.js';
+import { envEntries } from './catalog.js';
 import { callProviderEntry, runWithFailover } from './failover.js';
 
 export function parseJson(text) {
@@ -31,33 +30,26 @@ export function createJsonModel(cfg, { registry, emit, operation = 'generate', f
       return result;
     }
 
-    let res;
     if (cfg.planner.provider === 'bedrock') {
-      const b = cfg.bedrock;
-      const url = `${b.endpoint || `https://bedrock-runtime.${b.region}.amazonaws.com`}/model/${bedrockModelPath(b.model)}/converse`;
-      const body = JSON.stringify({ system: [{ text: system }], messages: [{ role: 'user', content: [{ text: user }] }], inferenceConfig: { maxTokens: 8192, temperature: 0.2 } });
-      const headers = signV4({ method: 'POST', url, region: b.region, service: 'bedrock', accessKeyId: b.accessKeyId, secretAccessKey: b.secretAccessKey, sessionToken: b.sessionToken || undefined, payload: body, headers: { 'content-type': 'application/json' } });
-      res = await (fetchImpl || fetch)(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(90000) });
-    } else {
-      res = await (fetchImpl || fetch)(`${cfg.planner.apiBase}/chat/completions`, {
-        method: 'POST', signal: AbortSignal.timeout(90000),
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.planner.apiKey}` },
-        body: JSON.stringify({ model: cfg.planner.model, temperature: 0.2, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
-      });
+      // Same request/response shapes as the registry path: Converse, or the
+      // Bedrock Mantle gateway for Kimi/Moonshot ids (catalog.js).
+      const entry = envEntries(cfg).find(e => e.id === 'env:bedrock');
+      if (!entry) throw new Error('Bedrock needs AWS_REGION, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in forge/server/.env. No project changes were saved.');
+      return parseJson(await callProviderEntry(entry, { system, user, fetchImpl }));
     }
+
+    const res = await (fetchImpl || fetch)(`${cfg.planner.apiBase}/chat/completions`, {
+      method: 'POST', signal: AbortSignal.timeout(90000),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.planner.apiKey}` },
+      body: JSON.stringify({ model: cfg.planner.model, temperature: 0.2, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+    });
     if (!res.ok) {
       let detail = '';
       try { detail = ` — ${(await res.text()).slice(0, 500)}`; } catch { /* body already consumed or unreadable */ }
-      // Same wall as the bedrock planner: Converse answers 400 "Operation not
-      // allowed" for Mantle-only ids (kimi/moonshot) — say so instead of
-      // leaving the raw body as the whole diagnosis.
-      if (cfg.planner.provider === 'bedrock' && res.status === 400 && /not allowed/i.test(detail)) {
-        throw new Error(`Bedrock Converse does not serve "${cfg.bedrock?.model || cfg.planner.model}" in ${cfg.bedrock?.region || 'the configured region'} (HTTP 400). Kimi/Moonshot models are Mantle-gateway-only and unsupported by Forge — pick a Converse-served id (anthropic.claude-*, amazon.nova-*). No project changes were saved.`);
-      }
       throw new Error(`Generation provider returned HTTP ${res.status}${detail}. No project changes were saved.`);
     }
     const data = await res.json();
-    const text = cfg.planner.provider === 'bedrock' ? data.output?.message?.content?.filter(c => c.text).map(c => c.text).join('\n') : data.choices?.[0]?.message?.content;
+    const text = data.choices?.[0]?.message?.content;
     return parseJson(text);
   };
 }

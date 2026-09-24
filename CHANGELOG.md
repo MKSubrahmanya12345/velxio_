@@ -46,6 +46,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   reverse proxy when exposing it
 
 ### Fixed
+- Forge/WireGI: AWS Bedrock with `BEDROCK_MODEL=moonshotai.kimi-k2.5` failed every
+  call with HTTP 400 `{"message":"Operation not allowed"}` — native Converse does not
+  serve Kimi/Moonshot ids. Those ids now go to the Bedrock Mantle chat-completions
+  gateway (`bedrock-mantle.<region>.api.aws/v1`, SigV4 service `bedrock-mantle`, same
+  AWS keys) on the registry and legacy `.env` paths alike. A Bedrock 400 "Operation not
+  allowed" now counts as a rejected credential, so failover stops re-paying it for all
+  10 rounds
 - The agent's repair loop converges instead of repeating one diagnostic until the
   attempt budget runs out ("Repairing from diagnostics · attempt 4" with nothing
   applied). A patch rejected by the static analysis was never put back into the

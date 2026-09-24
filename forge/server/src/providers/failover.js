@@ -14,7 +14,7 @@
 // later rounds; that is off-by-default behaviour controlled from the UI, and the
 // loop itself still runs to its budget for everything else.
 
-import { buildRequest, extractText, isPermanentStatus, providerDefinition, resolveProviderId } from './catalog.js';
+import { buildRequest, extractText, isPermanentFailure, providerDefinition, resolveProviderId } from './catalog.js';
 
 export const DEFAULT_MAX_ROUNDS = 10;
 
@@ -81,7 +81,7 @@ export async function callProviderEntry(entry, { system, user, temperature = 0.2
     const detail = (await res.text().catch(() => '')).slice(0, 300).replace(/\s+/g, ' ').trim();
     throw providerError(
       `${keyLabel(entry)} returned HTTP ${res.status}${detail ? `: ${detail}` : '.'}`,
-      { status: res.status, provider: entry.provider, keyId: entry.id, permanent: isPermanentStatus(res.status) }
+      { status: res.status, provider: entry.provider, keyId: entry.id, permanent: isPermanentFailure(entry, res.status, detail) }
     );
   }
 
