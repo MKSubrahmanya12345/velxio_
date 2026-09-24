@@ -262,6 +262,8 @@ export function useProject(projectId: string | null) {
         if (ev.stage === 'approve') {
           return { ...prev, [ev.partId!]: { ...cur, status: 'verified', humanCheckpoint: false, stage: 'verified' } };
         }
+        // A blocked approval (needsInput) changes nothing — leave the card as is.
+        if (ev.stage === 'approve-blocked') return prev;
         return { ...prev, [ev.partId!]: { ...cur, stage: 'research', status: 'researching' } };
       });
       setRun((prev) => (ev.stage === 'approve' ? { ...prev, done: prev.done + 1 } : prev));
@@ -342,14 +344,20 @@ export function useProject(projectId: string | null) {
   const failedParts = parts.filter((p) => p.status === 'failed');
   const pendingParts = parts.filter((p) => p.status === 'pending' || p.status === 'researching');
   /**
-   * Everything the human still has to look at: the parts that asked for eyes,
-   * plus every researched part whenever the project itself is `awaiting_human`
-   * (the D4–D6 gate can require human verification even when no single part
-   * raised a checkpoint of its own). This is what the chat's checkpoint card
-   * renders — an `awaiting_human` project is never a dead end.
+   * Everything still waiting on the human: parts that asked for eyes, parts the
+   * agent could not resolve on its own (needsInput — those want ANSWERS, and
+   * the card will not offer approval for them), plus every researched part
+   * whenever the project itself is `awaiting_human` (the D4–D6 gate can require
+   * human verification even when no single part raised a checkpoint of its
+   * own). This is what the chat's checkpoint card renders — an `awaiting_human`
+   * project is never a dead end.
    */
   const checkpointParts = parts.filter(
-    (p) => !p.verified && p.status !== 'failed' && Boolean(p.current?.data) && (p.humanCheckpoint || project?.status === 'awaiting_human'),
+    (p) =>
+      !p.verified &&
+      p.status !== 'failed' &&
+      Boolean(p.current?.data) &&
+      (p.humanCheckpoint || p.needsInput || project?.status === 'awaiting_human'),
   );
 
   return {

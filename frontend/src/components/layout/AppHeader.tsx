@@ -185,6 +185,11 @@ export const AppHeader: React.FC<AppHeaderProps> = ({ editorMenu, editorToolbar 
             <Link to={localize('/editor/')} className={'header-nav-link' + isActive('/editor')}>
               {t('header.nav.editor')}
             </Link>
+            {/* The agent chat — WireGI's speaking interface (create a chat →
+                prompt → research → build in the simulator → what to do). */}
+            <Link to={localize('/agent')} className={'header-nav-link' + isActive('/agent')}>
+              {t('header.nav.agent', 'Agent')}
+            </Link>
             {import.meta.env.VITE_PRO_BUILD && (
               <>
                 <Link to={localize('/about')} className={'header-nav-link' + isActive('/about')}>

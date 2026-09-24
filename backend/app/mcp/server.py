@@ -832,3 +832,93 @@ async def physics_simulate(
         result["supported"] = False
         result["error"] += " Rebuild it with `node scripts/build-physics-core.mjs`."
     return result
+
+
+# ---------------------------------------------------------------------------
+# Plain-callable tool registry (HTTP bridge for external agents)
+# ---------------------------------------------------------------------------
+#
+# The WireGI build agent (and any other HTTP agent) needs these tools WITHOUT
+# speaking MCP. FastMCP's @tool decorator returns the function itself in
+# current SDKs but wraps it in a Tool object (exposing `.fn`) in others —
+# _raw() normalises both, so this registry works either way.
+
+def _raw(fn):
+    return getattr(fn, "fn", fn)
+
+
+_TOOL_FNS = [
+    compile_project, run_project, import_wokwi_json, export_wokwi_json,
+    list_components, component_info, board_pinout, create_circuit,
+    update_circuit, generate_code_files, validate_circuit, simulate_firmware,
+    physics_capabilities, physics_simulate,
+]
+
+#: name -> the plain async (or sync) function behind each @mcp.tool().
+TOOL_FUNCTIONS: dict[str, Any] = {_raw(fn).__name__: _raw(fn) for fn in _TOOL_FNS}
+
+
+def tool_specs() -> list[dict[str, Any]]:
+    """Name, one-line doc and parameter surface of every tool, for agents
+    that discover capabilities at runtime (`GET /api/agent/tools`)."""
+    import inspect
+
+    specs = []
+    for name, fn in TOOL_FUNCTIONS.items():
+        try:
+            sig = inspect.signature(fn)
+            params = [
+                {
+                    "name": p.name,
+                    "required": p.default is inspect.Parameter.empty,
+                    "kind": str(p.annotation),
+                }
+                for p in sig.parameters.values()
+                if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+            ]
+        except (TypeError, ValueError):
+            params = []
+        doc = (inspect.getdoc(fn) or "").strip()
+        specs.append({"name": name, "summary": doc.split("\n")[0][:200], "params": params})
+    return specs
+
+
+async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Invoke a tool by name with JSON args. Filters unknown keys (agents
+    hallucinate parameters), returns {'ok': False, 'error': …} instead of
+    raising for bad input so the caller's loop can feed the error back to the
+    model as a tool result. Never returns secrets — the tools are local,
+    deterministic and already bounded (compile timeouts, result caps)."""
+    import inspect
+
+    fn = TOOL_FUNCTIONS.get(name)
+    if fn is None:
+        return {"ok": False,
+                "error": f"Unknown tool {name!r}. Available: {', '.join(sorted(TOOL_FUNCTIONS))}."}
+    if not isinstance(args, dict):
+        return {"ok": False, "error": "args must be a JSON object."}
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        sig = None
+    if sig is not None:
+        accepted = {
+            p.name for p in sig.parameters.values()
+            if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+        }
+        dropped = sorted(set(args) - accepted)
+        args = {k: v for k, v in args.items() if k in accepted}
+    else:
+        dropped = []
+    try:
+        result = fn(**args)
+        if inspect.isawaitable(result):
+            result = await result
+        return {"ok": True, "result": result, "dropped": dropped}
+    except TypeError as exc:
+        # signature mismatch — tell the model what the tool actually takes
+        params = next((s for s in tool_specs() if s["name"] == name), {"params": []})["params"]
+        return {"ok": False, "error": f"{name}: {exc}",
+                "params": [p["name"] for p in params]}
+    except Exception as exc:  # noqa: BLE001 — a tool failure is data, not a crash
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

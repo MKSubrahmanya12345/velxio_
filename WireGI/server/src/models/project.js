@@ -30,6 +30,11 @@ export function makeProject({ goal, constraints = {} }) {
       decisions: [],
       researchLog: [],
       reconciliations: [], // cross-part integration passes
+      // The simulation rung (services/velxio.js): the artifact the agent
+      // built in the Velxio simulator — circuit, firmware files, tool log,
+      // what was verified, and the human's next steps. null until a design
+      // loop has run.
+      sim: null,
       chat: [{ role: 'system', content: `Project created: ${goal}`, ts: now }],
       // ── debugger / observability ─────────────────────────────────────────
       runs: [], // one record per run: id, kind, status, startedAt, ms, events
@@ -49,7 +54,12 @@ export function makePart({ name, domain, idea = {} }) {
     idea, // IDEA
     current: null, // CURRENT: gathered/understood/data
     verified: false, // VERIFIED
-    humanCheckpoint: false,
+    humanCheckpoint: false, // needs your EYES (approval) — only when research is confident
+    // needs your ANSWER: the agent's own gate found its data insufficient and
+    // its self-repair pass could not close the gap. The human may answer (it
+    // is folded into the next research pass) but may NOT approve — approving
+    // data the agent itself doubts would forge the evidence ladder.
+    needsInput: false,
     attempts: 0, // how many research passes have run (Gap B resumability)
     error: null, // last failure message when status === 'failed'
     errorDetail: null, // {name, message, where, stack, attempts[]} for the debugger

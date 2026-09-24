@@ -21,6 +21,8 @@ export interface Part {
   current?: any;
   verified?: boolean;
   humanCheckpoint?: boolean;
+  /** Needs an ANSWER, not approval — agent's own gate found its data insufficient. */
+  needsInput?: boolean;
   research?: string[];
   gathered?: Array<{ field: string; value: string; source: string }>;
   data?: { bomRow?: string; wiring?: string; config?: string; checklist?: string[] } | null;

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { HumanDecision, Part } from '../lib/types';
+import type { HumanDecision, Part } from './types';
 
 interface Props {
   parts: Part[];

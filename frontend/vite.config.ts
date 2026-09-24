@@ -51,6 +51,15 @@ export default defineConfig(({ command }) => ({
         target: 'http://127.0.0.1:8001',
         changeOrigin: true,
       },
+      // The /agent chat page talks to the WireGI server through this prefix
+      // (relative URLs — the browser never needs the agent server's origin,
+      // so remote/preview setups work too). VITE_WIREGI_URL overrides for
+      // production builds that point somewhere else.
+      '/wiregi': {
+        target: 'http://127.0.0.1:4322',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/wiregi/, ''),
+      },
     },
   },
   assetsInclude: ['**/*.wasm'],

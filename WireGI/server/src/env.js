@@ -157,6 +157,8 @@ export const TRACKED_KEYS = [
   { key: 'WIREGI_PORT', group: 'server' },
   { key: 'WIREGI_CLIENT_PORT', group: 'server' },
   { key: 'CORS_ORIGIN', group: 'server' },
+  { key: 'VELXIO_URL', group: 'velxio' },
+  { key: 'VELXIO_SIM_ROUNDS', group: 'velxio' },
   { key: 'DATA_FILE', group: 'server' },
   { key: 'WIREGI_DEBUG', group: 'debug' },
   { key: 'WIREGI_LOG_LEVEL', group: 'debug' },

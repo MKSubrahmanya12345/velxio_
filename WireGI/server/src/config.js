@@ -41,9 +41,39 @@ export function loadConfig(env = process.env) {
 
   cfg.port = port;
   cfg.clientPort = clientPort;
-  cfg.corsOrigin = env.CORS_ORIGIN || `http://localhost:${clientPort}`;
+  // CORS: the Velxio frontend (5173) mounts the same chat UI the mobile app
+  // has, so it needs access too. CORS_ORIGIN may list more (comma-separated).
+  // In dev the Vite proxy makes the calls same-origin and CORS never fires —
+  // this list is the direct-connection fallback.
+  cfg.corsOrigins = [
+    ...new Set(
+      [
+        `http://localhost:${clientPort}`,
+        `http://localhost:${num(env.WIREGI_MOBILE_PORT, 5176)}`,
+        `http://localhost:${num(env.VELXIO_CLIENT_PORT, 5173)}`,
+        ...String(env.CORS_ORIGIN || '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ].filter((o) => /^https?:\/\//.test(o)),
+    ),
+  ];
+  // Kept for the Debug tab / backwards compatibility: the primary origin.
+  cfg.corsOrigin = cfg.corsOrigins[0] || null;
   cfg.label = 'wiregi-server';
-  cfg.version = '0.2.0';
+  cfg.version = '0.3.0';
+
+  // The Velxio simulator bridge — the agent's hands. The backend exposes the
+  // MCP toolset (catalog, circuit build, validate, compile, simulate, physics)
+  // over plain JSON at /api/agent/tools. Unreachable backend ⇒ the sim phase
+  // skips itself; research still works.
+  cfg.velxio = {
+    url: String(env.VELXIO_URL || 'http://localhost:8000').replace(/\/+$/, ''),
+    toolTimeoutMs: Math.max(5000, num(env.VELXIO_TOOL_TIMEOUT_MS, 120000)),
+    maxRounds: Math.max(1, num(env.VELXIO_SIM_ROUNDS, 12)),
+    budgetMs: Math.max(30000, num(env.VELXIO_SIM_BUDGET_MS, 420000)),
+    resultClip: 3800,
+  };
 
   // WireGI's own runtime files, always inside WireGI/server/data/. Only the
   // WireGI .env may point them elsewhere; Forge's DATA_FILE must never leak in

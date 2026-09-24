@@ -27,6 +27,48 @@ def authorize():
         raise HTTPException(503, "Agent is not configured. See docs/agent-workspace.md.")
 
 
+# --- Simulation tools bridge (for external agents, e.g. WireGI) -------------
+#
+# The MCP server (app/mcp/server.py) holds every simulation capability:
+# catalog/pinout lookups, circuit create/update, validation, the real
+# arduino-cli compile, headless firmware simulation and the physics runner.
+# These two endpoints expose that same toolset over plain JSON so an HTTP
+# agent can DISCOVER what the simulator can do (GET /tools) and USE it
+# (POST /tools/invoke) without speaking MCP. The tools are local and
+# deterministic (no provider keys, no cost), so — like /mcp — they are not
+# gated behind `authorize()`.
+
+try:
+    from app.mcp import server as _mcp_server
+    _TOOLS_ERROR = ""
+except Exception as _exc:  # noqa: BLE001 — mcp extras missing: degrade, don't crash the app
+    _mcp_server = None
+    _TOOLS_ERROR = f"MCP tool bridge unavailable: {type(_exc).__name__}: {_exc}"
+
+
+@router.get("/tools")
+async def tools_index():
+    if _mcp_server is None:
+        raise HTTPException(503, _TOOLS_ERROR)
+    return {"ok": True, "tools": _mcp_server.tool_specs()}
+
+
+class ToolInvokeBody(BaseModel):
+    tool: str = Field(min_length=1, max_length=64)
+    args: dict = Field(default_factory=dict)
+
+
+@router.post("/tools/invoke")
+async def tools_invoke(body: ToolInvokeBody):
+    if _mcp_server is None:
+        raise HTTPException(503, _TOOLS_ERROR)
+    # Bound the payload: tool args are circuit documents / source files, which
+    # are small; anything huge is a runaway agent, not a design.
+    if len(json.dumps(body.args, default=str)) > 512_000:
+        raise HTTPException(413, "Tool args too large (512 KB limit).")
+    return await _mcp_server.call_tool(body.tool, body.args)
+
+
 @router.get("/status")
 async def status():
     # The browser reads model names/ids only; credentials never leave the server.
