@@ -89,11 +89,17 @@ class Settings(BaseSettings):
     BEDROCK_TIMEOUT_MS: int = 120000
     BEDROCK_MAX_RETRIES: int = 50
     # Agent loop bounds — repair attempts, tool rounds, provider resilience.
-    AGENT_MAX_ATTEMPTS: int = 15
+    #
+    # Speed: these used to be 15/15/15, which allowed a single run to make a
+    # dozen-plus SEQUENTIAL provider calls (each re-emitting a full proposal)
+    # before answering — the "the agent is taking too much time" experience.
+    # A good run needs 1-3; the defaults now cut it off early and honestly.
+    # All are env-overridable for hard problems.
+    AGENT_MAX_ATTEMPTS: int = 6
     # Research rounds are cheap (catalog lookups) and are what make the loop
     # agentic; draft rounds compile and may simulate, so they are separate.
-    AGENT_MAX_TOOL_ROUNDS: int = 15
-    AGENT_MAX_DRAFT_ROUNDS: int = 15
+    AGENT_MAX_TOOL_ROUNDS: int = 8
+    AGENT_MAX_DRAFT_ROUNDS: int = 4
     AGENT_PROVIDER_TIMEOUT_S: float = 500.0
     AGENT_PROVIDER_RETRIES: int = 15
     # Output budget per provider call type (a ceiling, not a target — the

@@ -112,7 +112,7 @@ function indexSummary(out) {
   return [...gathered, ...validated].join(' | ').slice(0, 1200);
 }
 
-export async function researchPart({ part, project, registry, emit, indexer, prefer }) {
+export async function researchPart({ part, project, registry, emit, indexer, prefer, guidance }) {
   const profile = getProfile(project.profileId);
   const topic = `${project.goal} — ${part.name} (${part.domain})`;
   const startedAt = Date.now();
@@ -221,7 +221,7 @@ CONSTRAINTS: ${constraints}
 PART: ${part.name} (domain: ${part.domain})
 IDEA for this part: ${JSON.stringify(part.idea || {})}${humanBlock}
 ${prior ? 'PRIOR FINDINGS FROM INDEX' : 'LIVE WEB RESULTS'}:
-${context}`;
+${context}${guidance ? `\n\n${guidance}` : ''}`;
 
   const llmStart = Date.now();
   const call = await generateWithMeta({

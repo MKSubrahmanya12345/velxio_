@@ -45,7 +45,15 @@ app.disable('x-powered-by');
 // Same-origin by default; CORS_ORIGIN in WireGI/server/.env can allow the Vite
 // dev server (default http://localhost:5175) — and the preview proxy host that
 // serves this app also works same-origin through the Vite proxy.
-app.use(cors({ origin: cfg.corsOrigin ? cfg.corsOrigin : true, credentials: false }));
+app.use(
+  cors({
+    // corsOrigins is an array (Velxio frontend + mobile + env extras). The
+    // Vite dev proxy makes proxied calls same-origin, so this list only
+    // matters for direct browser connections.
+    origin: cfg.corsOrigins?.length ? cfg.corsOrigins : true,
+    credentials: false,
+  }),
+);
 app.use(express.json({ limit: '2mb' }));
 app.use(createRouter(deps));
 

@@ -27,6 +27,7 @@ import { triagePart, decomposePlan, affectedParts, isSufficient } from './gate.j
 import { choice, noul, answerValue, noulTrue } from './jevQuestions.js';
 import { pickProfile, getProfile, isSafetyCritical } from './profiles.js';
 import { reconcileProject } from './reconcile.js';
+import { runSimPhase } from './velxio.js';
 import { mapWithConcurrency, withProviderSlot, CONCURRENCY } from './queue.js';
 import { withRetry } from './retry.js';
 import { createTracer, describeError, errorSummary, withContext } from './debug.js';
@@ -169,6 +170,9 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
     part.current = { gathered: result.gathered, understand: result.understand, data: result.data };
     part.research = result.research;
     part.humanCheckpoint = result.humanCheckpoint;
+    // A fresh research pass clears "needs your answer" — the sufficiency check
+    // below re-raises it if the new data is still not enough.
+    part.needsInput = false;
     part.checklist = result.data?.checklist || [];
     part.openQuestions = result.understand?.openQuestions || [];
     part.error = null;
@@ -254,6 +258,9 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
           meta: { provider: '(reused)', model: src.meta?.model, latencyMs: 0, attempts: 0 },
         };
         applyResearch(part, project, result);
+        // applyResearch cleared it — inherit the sibling's flag, whatever it was.
+        part.needsInput = Boolean(src.needsInput);
+        if (part.needsInput) part.status = 'awaiting_human';
         const ms = researched({ reusedFrom: src.name });
         tracer.emit({
           type: 'part',
@@ -272,7 +279,8 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
       tracer.debug(`${part.name}: gate said duplicate but no sibling with data — running a full pass`);
     }
 
-    // skip → offload trivial part to the human (0 LLM call).
+    // skip → offload trivial part to the human (0 LLM call). This needs the
+    // human's INPUT, never their approval — so it is needsInput, not a checkpoint.
     if (triage.action === 'skip') {
       const result = {
         research: [],
@@ -283,11 +291,13 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
           conflicts: [],
         },
         data: { bomRow: '— provide —', wiring: '— provide —', config: '— provide —', checklist: ['Define this part'] },
-        humanCheckpoint: true,
+        humanCheckpoint: false,
         web: { engine: 'skip', count: 0 },
         meta: { provider: '(skipped by gate)', latencyMs: 0, attempts: 0 },
       };
       applyResearch(part, project, result);
+      part.needsInput = true;
+      part.status = 'awaiting_human';
       const ms = researched({ skipped: true });
       tracer.emit({
         type: 'part',
@@ -295,7 +305,8 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
         partId: part.id,
         part: part.name,
         data: result.data,
-        humanCheckpoint: true,
+        humanCheckpoint: false,
+        needsInput: true,
         ms,
         note: 'skipped (trivial) — needs your input',
         message: `${part.name} skipped by the gate — needs your input`,
@@ -316,14 +327,55 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
     applyResearch(part, project, result);
     const ms = researched({ provider: result.meta?.provider, model: result.meta?.model });
 
-    // T4 sufficiency → push to human instead of an auto-repair LLM call.
+    // T4 sufficiency. Insufficient data is the AGENT'S problem, not the
+    // human's — so the first move is a targeted self-repair pass with the gaps
+    // spelled out, not an escalation. Only if the data is STILL insufficient
+    // afterwards does the human hear about it, and then as questions to
+    // ANSWER (needsInput), never as something to APPROVE: offering approval on
+    // data the agent itself just doubted would forge the evidence ladder.
     const sufDone = tracer.phase('sufficiency', { partId: part.id, part: part.name });
     if (!(await isSufficient({ part, project, jev, registry }))) {
-      part.humanCheckpoint = true;
+      const gaps = (part.openQuestions || []).filter(Boolean);
+      tracer.emit({
+        type: 'log',
+        level: 'info',
+        partId: part.id,
+        part: part.name,
+        message: `${part.name}: data insufficient — the agent re-researches its own gaps before bothering you`,
+      });
+      try {
+        const repair = await researchPart({
+          part,
+          project,
+          registry,
+          emit: tracer.emit,
+          indexer,
+          prefer,
+          guidance: `A PREVIOUS RESEARCH PASS ON THIS PART WAS JUDGED INSUFFICIENT.${
+            gaps.length ? `\nUnresolved questions from that pass:\n${gaps.map((q) => `- ${q}`).join('\n')}` : ''
+          }\nResolve every gap yourself now: pick concrete, sensible values and commit to them. Do NOT list these as open questions again, do NOT defer to the human, and set "humanCheckpoint" false unless the build is truly blocked on a preference, a bench fact, or a safety sign-off only the builder can provide.`,
+        });
+        applyResearch(part, project, repair);
+      } catch (err) {
+        // A failed repair pass must not kill the part — the sufficiency
+        // re-check below decides what happens next.
+        tracer.emit({
+          type: 'log',
+          level: 'warn',
+          partId: part.id,
+          part: part.name,
+          message: `${part.name}: self-repair pass failed (${errorSummary(err)})`,
+          error: describeError(err),
+        });
+      }
+    }
+    if (!(await isSufficient({ part, project, jev, registry }))) {
+      part.needsInput = true;
+      part.humanCheckpoint = false; // never approvable while the agent doubts its own data
       if (part.status === 'data_ready') part.status = 'awaiting_human';
       part.openQuestions = [
         ...(part.openQuestions || []),
-        'Jev flagged gathered data as insufficient — please verify/refine.',
+        'The agent could not fully resolve this part on its own — answer the questions above and it will fold your answers in.',
       ];
       sufDone({ sufficient: false });
     } else {
@@ -336,12 +388,13 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
       part: part.name,
       data: result.data,
       humanCheckpoint: part.humanCheckpoint,
+      needsInput: part.needsInput,
       ms,
       provider: result.meta?.provider,
       model: result.meta?.model,
       attempts: part.attempts,
       message: `${part.name} researched via ${result.meta?.provider || '?'}/${result.meta?.model || '?'} in ${ms}ms${
-        part.humanCheckpoint ? ' — needs your eyes' : ''
+        part.humanCheckpoint ? ' — needs your eyes' : part.needsInput ? ' — needs your answer' : ''
       }`,
     });
     return result;
@@ -426,6 +479,7 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
     ];
     const statusOf = (p) => {
       if (p.verified) return '✓ verified';
+      if (p.needsInput) return '❓ needs your answer';
       if (p.humanCheckpoint) return '⚠ needs your eyes';
       if (p.status === 'failed') return '✖ failed';
       return p.status === 'data_ready' ? 'researched' : p.status;
@@ -452,6 +506,22 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
       lines.push('', '## Needs a resume', '');
       for (const p of failed) {
         lines.push(`- **${p.name}** — ${p.error || 'unknown error'}`);
+      }
+    }
+
+    // The simulation rung: what the agent actually BUILT and verified.
+    const sim = project.state.sim;
+    if (sim && sim.status && sim.status !== 'skipped') {
+      lines.push('', `## Simulator (Velxio) — ${sim.status}`, '');
+      if (sim.summary) lines.push(`- ${sim.summary}`);
+      for (const c of sim.checks || []) lines.push(`- ✓ ${c}`);
+      lines.push(
+        `- ${sim.rounds || 0} rounds · ${(sim.toolLog || []).length} tool calls${
+          sim.verified?.length ? ` · verified: ${sim.verified.join(', ')}` : ''
+        }`,
+      );
+      if (sim.instructions) {
+        lines.push('', '**What to do next**', '', sim.instructions);
       }
     }
 
@@ -499,6 +569,9 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
     const failed = parts.filter((p) => p.status === 'failed');
     const pending = parts.filter((p) => p.status === 'pending' || p.status === 'researching');
     const unverifiedHumanGates = parts.filter((p) => p.humanCheckpoint && !p.verified);
+    // Parts the agent could not resolve on its own: they block "complete" too,
+    // but they wait for ANSWERS, not approvals.
+    const unanswered = parts.filter((p) => p.needsInput && !p.verified);
 
     let dCheck = null;
     const verifyDone = tracer.phase('verify');
@@ -508,10 +581,11 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
           state: {
             operation: 'verify',
             goal: project.goal,
-            parts: project.state.current.parts.map((p) => ({
+            parts: project.state.parts.map((p) => ({
               name: p.name,
-              hasData: !!p.data,
+              hasData: !!p.current?.data,
               humanCheckpoint: p.humanCheckpoint,
+              needsInput: p.needsInput,
             })),
             failed: failed.map((p) => p.name),
           },
@@ -561,7 +635,7 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
     if (!parts.length) status = 'failed';
     else if (failed.length && failed.length === parts.length) status = 'failed';
     else if (failed.length || pending.length) status = 'partial';
-    else if (unverifiedHumanGates.length || decisionWantsHuman || blockingConflicts)
+    else if (unverifiedHumanGates.length || unanswered.length || decisionWantsHuman || blockingConflicts)
       status = 'awaiting_human';
     // No decision available (no Jev, no LLM key, provider down): the human is
     // the top rung anyway — if they have verified everything, the project is
@@ -579,6 +653,7 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
       done: parts.filter((p) => p.status === 'data_ready' || p.status === 'awaiting_human' || p.status === 'verified').length,
       failed: failed.length,
       needsHuman: parts.filter((p) => p.humanCheckpoint && !p.verified).length,
+      needsInput: unanswered.length,
     };
     tracer.emit({
       type: 'done',
@@ -656,6 +731,73 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
   // only has the tracer, so wrap it back into the shape runPart expects.
   function runFromTracer(tracer) {
     return { runId: tracer.runId, tracer };
+  }
+
+  // ── The simulation rung ─────────────────────────────────────────────────
+  //
+  // runSimPhase() (services/velxio.js) gives the agent hands: it turns the
+  // researched parts into a real artifact inside the Velxio simulator —
+  // circuit, firmware, validation, compile, simulate, physics — and reports
+  // what passed. This applies its record to the project: durable state, a
+  // chat message that tells the human what to do next, and per-part evidence
+  // on the verification ladder (research → SIM → human-eyes).
+  function applySim(project, sim, tracer) {
+    if (!sim) return;
+    project.state.sim = { ...sim, toolLog: (sim.toolLog || []).slice(-60) };
+
+    const title =
+      sim.status === 'simulated'
+        ? '🧪 **Built and verified in the simulator**'
+        : sim.status === 'partial'
+          ? '🧪 **Partially verified in the simulator**'
+          : sim.status === 'skipped'
+            ? '🧪 Simulator rung skipped'
+            : '🧪 **Simulator rung could not finish**';
+
+    const meta = [
+      `${sim.rounds || 0} design round${(sim.rounds || 0) === 1 ? '' : 's'}`,
+      (sim.toolLog || []).length
+        ? `${sim.toolLog.filter((t) => t.ok).length}/${sim.toolLog.length} tool calls ok`
+        : 'no tool calls',
+      sim.verified?.length ? `verified: ${sim.verified.join(', ')}` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
+    if (sim.status === 'skipped') {
+      project.state.chat.push({
+        role: 'agent',
+        content: `${title} — ${sim.reason || 'the simulator was not available'}. The research stands on its own; the design loop will run when Velxio is reachable.`,
+        ts: new Date().toISOString(),
+      });
+      return;
+    }
+
+    project.state.chat.push({
+      role: 'agent',
+      content: `${title} (${meta})\n\n${sim.summary || ''}\n\n${
+        sim.instructions || 'No instructions were produced — ask for them.'
+      }`,
+      ts: new Date().toISOString(),
+    });
+
+    // Ladder evidence: the sim rung now backs every part that fed the artifact.
+    if (sim.status !== 'skipped') {
+      const detail = `Velxio simulator: ${sim.verified?.length ? sim.verified.join(', ') : 'attempted'} · ${(sim.toolLog || []).length} tool calls`;
+      for (const p of project.state.parts) {
+        if (!p.current?.data && !p.data) continue;
+        p.evidence = [
+          ...(p.evidence || []),
+          { rung: 'simulation', at: sim.at || new Date().toISOString(), by: 'velxio', detail },
+        ];
+      }
+    }
+    tracer.emit({
+      type: 'sim',
+      stage: 'applied',
+      status: sim.status,
+      message: `Simulation rung applied to the project (${sim.status})`,
+    });
   }
 
   async function runProject(goal, constraints, { emit = () => {}, prefer } = {}) {
@@ -810,6 +952,14 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
 
       // Reassembly: make the independently-researched parts agree.
       await safeReconcile(project, tracer);
+
+      // The simulation rung: research said WHAT — now the agent BUILDS it in
+      // the Velxio simulator (circuit + firmware, validated, compiled,
+      // simulated) and writes the human's next steps. Skips itself when the
+      // Velxio backend is not reachable — research stands on its own.
+      const sim = await runSimPhase({ project, registry, cfg, emit: tracer.emit, prefer });
+      applySim(project, sim, tracer);
+
       const finished = await finalize(project, tracer);
       run.finish(project.status, { counts: { parts: parts.length } });
       await safeCheckpoint(project);
@@ -867,6 +1017,7 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
               approve: 'Approving/confirming finished work',
               add_constraint: 'Adding or changing a build constraint (budget, size, power, parts)',
               revise_part: 'Asking for a specific part to be redone or re-researched',
+              simulate: 'Asking the agent to build/simulate/verify the design in the simulator',
               ask: 'Asking a question about the build',
               other: 'Anything else',
             }),
@@ -971,11 +1122,31 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
         // Constraints changed → specs may no longer agree. Re-integrate.
         await safeReconcile(project, tracer);
 
+        // The artifact is now stale too: parts changed under it. Re-run the
+        // design loop so the simulator rung matches the new CURRENT state.
+        if (project.state.sim) {
+          const sim = await runSimPhase({ project, registry, cfg, emit: tracer.emit, prefer });
+          applySim(project, sim, tracer);
+        }
+
         project.state.chat.push({
           role: 'agent',
           content: `Updated constraints (IDEA revision ${project.state.idea.revisions.length}) and re-ran research for ${targets.length} part(s).`,
           ts: new Date().toISOString(),
         });
+      } else if (intent === 'simulate') {
+        // "Build it / simulate it / does it work?" — the design loop, on demand.
+        const sim = await runSimPhase({ project, registry, cfg, emit: tracer.emit, prefer });
+        if (!sim) {
+          project.state.chat.push({
+            role: 'agent',
+            content:
+              "I couldn't reach the Velxio simulator (is the Velxio backend running on port 8000?). Research is intact — ask again once it's up.",
+            ts: new Date().toISOString(),
+          });
+        } else {
+          applySim(project, sim, tracer);
+        }
       } else {
         const reply = await generate({
           registry,
@@ -1038,14 +1209,16 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
 
     try {
       const withData = project.state.parts.filter((p) => p.current?.data);
-      const waiting = project.state.parts.filter((p) => p.humanCheckpoint && !p.verified);
+      const waiting = project.state.parts.filter((p) => (p.humanCheckpoint || p.needsInput) && !p.verified);
 
       let targets;
       if (partId) {
         targets = project.state.parts.filter((p) => p.id === partId);
         if (!targets.length) throw Object.assign(new Error(`no part with id ${partId}`), { status: 404 });
       } else if (decision === 'approve') {
-        targets = withData.filter((p) => !p.verified); // "approve all" = everything researched
+        // "approve all" = everything researched — EXCEPT parts the agent itself
+        // still doubts (needsInput). Those cannot be approved into VERIFIED.
+        targets = withData.filter((p) => !p.verified && !p.needsInput);
       } else {
         targets = waiting.length ? waiting : withData;
       }
@@ -1053,10 +1226,26 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
       const approved = [];
       const answered = [];
       const requeued = [];
+      const notApprovable = [];
 
       for (const part of targets) {
         if (decision === 'approve') {
           if (!part.current?.data) continue;
+          // The logical guard: approval is a human-eyes rung on the evidence
+          // ladder, and a rung cannot certify data the agent flagged as
+          // insufficient. Answer the questions instead.
+          if (part.needsInput) {
+            notApprovable.push(part.name);
+            tracer.emit({
+              type: 'human',
+              stage: 'approve-blocked',
+              level: 'warn',
+              partId: part.id,
+              part: part.name,
+              message: `${part.name}: not approvable yet — the agent still has open questions on it`,
+            });
+            continue;
+          }
           part.verified = true;
           part.status = 'verified';
           part.updatedAt = new Date().toISOString();
@@ -1107,7 +1296,10 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
             text: note,
             message: `${part.name}: ${decision === 'reject' ? 'rejected' : 'your input recorded'}${note ? ` — ${note}` : ''}`,
           });
-          if (decision !== 'provide') requeued.push(part);
+          // Re-run the part when asked to — and ALSO when the human answers a
+          // needsInput part: an answer that is not folded into a new research
+          // pass is not really accepted, just stored.
+          if (decision !== 'provide' || (part.needsInput && note)) requeued.push(part);
         }
       }
 
@@ -1141,6 +1333,15 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
         project.state.chat.push({
           role: 'agent',
           content: `✅ Marked **${approved.length}** part(s) verified by you: ${approved.join(', ')}.`,
+          ts: new Date().toISOString(),
+        });
+      }
+      if (notApprovable.length) {
+        project.state.chat.push({
+          role: 'agent',
+          content: `⚠ Not approved: **${notApprovable.join(', ')}** — the agent still has open questions on ${
+            notApprovable.length === 1 ? 'it' : 'them'
+          }, and it won't ask you to verify data it doubts itself. Answer the questions (or re-research) instead.`,
           ts: new Date().toISOString(),
         });
       }

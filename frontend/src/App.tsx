@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'r
 import { EditorPage } from './pages/EditorPage';
 import { ExamplesPage } from './pages/ExamplesPage';
 import { BuildLabPage } from './pages/BuildLabPage';
+import { AgentChatPage } from './pages/AgentChatPage';
 // Login, Register, ForgotPassword, ResetPassword, Admin, UserProfile,
 // Project, ProjectById — moved to the pro overlay in Phase 3 of the
 // OSS split. They register themselves via registerProRoutes() inside
@@ -50,6 +51,9 @@ const ROUTES: { path: string; element: ReactElement; index?: boolean }[] = [
   { path: 'editor', element: <EditorPage /> },
   { path: 'examples', element: <ExamplesPage /> },
   { path: 'build', element: <BuildLabPage /> },
+  // The agent chat — WireGI's speaking interface (create a chat → prompt →
+  // the agent researches, builds in the simulator, tells you what to do).
+  { path: 'agent', element: <AgentChatPage /> },
   // /examples/<id> = SEO landing (preview, badges, "Open in Simulator" CTA).
   // /example/<id>  = live editor with the example pre-loaded; the URL
   //                  stays pinned so links are shareable + bookmarkable.

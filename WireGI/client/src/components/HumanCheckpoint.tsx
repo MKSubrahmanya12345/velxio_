@@ -28,6 +28,11 @@ export default function HumanCheckpoint({ parts, busy, onRespond, onApproveAll }
   const [input, setInput] = useState<Record<string, string>>({});
 
   if (!parts.length) return null;
+  // Two different asks: "needs your eyes" parts may be approved; "needs your
+  // answer" parts (agent's own data was insufficient) can only be ANSWERED —
+  // approval is never offered on data the agent itself doubts.
+  const needsEyes = parts.filter((p) => !p.needsInput);
+  const needsAnswers = parts.filter((p) => p.needsInput);
   const first = parts[0];
 
   return (
@@ -35,18 +40,23 @@ export default function HumanCheckpoint({ parts, busy, onRespond, onApproveAll }
       <div className="checkpoint-head">
         <span className="badge awaiting_human">⚠ needs you</span>
         <b>
-          {parts.length} part{parts.length === 1 ? '' : 's'} waiting on your eyes
+          {needsEyes.length > 0 &&
+            `${needsEyes.length} part${needsEyes.length === 1 ? '' : 's'} waiting on your eyes`}
+          {needsEyes.length > 0 && needsAnswers.length > 0 && ' · '}
+          {needsAnswers.length > 0 &&
+            `${needsAnswers.length} part${needsAnswers.length === 1 ? '' : 's'} waiting on your answer`}
         </b>
         <div className="spacer" />
-        {parts.length > 1 && (
+        {needsEyes.length > 1 && (
           <button className="primary small" onClick={onApproveAll} disabled={busy}>
-            ✓ Approve all {parts.length}
+            ✓ Approve all {needsEyes.length}
           </button>
         )}
       </div>
       <p className="muted small">
-        The ladder's top rung is human: solder joints, fit, finish and taste have no machine check. Approve to mark
-        verified, answer to correct it, or send it back to be re-researched with your input.
+        {needsAnswers.length > 0
+          ? 'Parts marked “needs your answer” are ones the agent could not resolve on its own — answer and it folds your answer in. Approval is only offered on parts the agent is confident about.'
+          : 'The ladder’s top rung is human: solder joints, fit, finish and taste have no machine check. Approve to mark verified, answer to correct it, or send it back to be re-researched with your input.'}
       </p>
 
       <div className="checkpoint-list">
@@ -59,6 +69,7 @@ export default function HumanCheckpoint({ parts, busy, onRespond, onApproveAll }
               <button className="checkpoint-row" onClick={() => setOpenId(open ? null : p.id)}>
                 <span className="name">{p.name}</span>
                 <span className="badge subtle">{p.domain}</span>
+                {p.needsInput && <span className="badge awaiting_human">needs your answer</span>}
                 {hasOpenQuestions && <span className="badge awaiting_human">{qs.length} question(s)</span>}
                 {p.current?.data?.bomRow && <span className="muted small ellipsis">{p.current.data.bomRow}</span>}
                 <span className="caret">{open ? '▾' : '▸'}</span>
@@ -95,37 +106,61 @@ export default function HumanCheckpoint({ parts, busy, onRespond, onApproveAll }
                     disabled={busy}
                   />
                   <div className="checkpoint-actions">
-                    <button
-                      className="primary small"
-                      onClick={() => onRespond({ partId: p.id, decision: 'approve', text: input[p.id] || '' })}
-                      disabled={busy}
-                    >
-                      ✓ Approve
-                    </button>
-                    <button
-                      className="ghost small"
-                      onClick={() => onRespond({ partId: p.id, decision: 'rerun', text: input[p.id] || '' })}
-                      disabled={busy}
-                      title="Re-research this part using your answer"
-                    >
-                      ↻ Answer &amp; re-research
-                    </button>
-                    <button
-                      className="ghost small"
-                      onClick={() => onRespond({ partId: p.id, decision: 'provide', text: input[p.id] || '' })}
-                      disabled={busy || !(input[p.id] || '').trim()}
-                      title="Just save my note, don't re-run anything"
-                    >
-                      note only
-                    </button>
-                    <button
-                      className="ghost small danger"
-                      onClick={() => onRespond({ partId: p.id, decision: 'reject', text: input[p.id] || '' })}
-                      disabled={busy}
-                      title="This is wrong — record it and re-research"
-                    >
-                      ✕ Reject &amp; re-run
-                    </button>
+                    {p.needsInput ? (
+                      <>
+                        <button
+                          className="primary small"
+                          onClick={() => onRespond({ partId: p.id, decision: 'provide', text: input[p.id] || '' })}
+                          disabled={busy || !(input[p.id] || '').trim()}
+                          title="Your answer is folded into a new research pass — the agent accepts it"
+                        >
+                          → Answer &amp; continue
+                        </button>
+                        <button
+                          className="ghost small danger"
+                          onClick={() => onRespond({ partId: p.id, decision: 'reject', text: input[p.id] || '' })}
+                          disabled={busy}
+                          title="This is wrong — record it and re-research"
+                        >
+                          ✕ Reject &amp; re-run
+                        </button>
+                        <span className="muted small">no approval until the agent resolves its own gaps</span>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className="primary small"
+                          onClick={() => onRespond({ partId: p.id, decision: 'approve', text: input[p.id] || '' })}
+                          disabled={busy}
+                        >
+                          ✓ Approve
+                        </button>
+                        <button
+                          className="ghost small"
+                          onClick={() => onRespond({ partId: p.id, decision: 'rerun', text: input[p.id] || '' })}
+                          disabled={busy}
+                          title="Re-research this part using your answer"
+                        >
+                          ↻ Answer &amp; re-research
+                        </button>
+                        <button
+                          className="ghost small"
+                          onClick={() => onRespond({ partId: p.id, decision: 'provide', text: input[p.id] || '' })}
+                          disabled={busy || !(input[p.id] || '').trim()}
+                          title="Just save my note, don't re-run anything"
+                        >
+                          note only
+                        </button>
+                        <button
+                          className="ghost small danger"
+                          onClick={() => onRespond({ partId: p.id, decision: 'reject', text: input[p.id] || '' })}
+                          disabled={busy}
+                          title="This is wrong — record it and re-research"
+                        >
+                          ✕ Reject &amp; re-run
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               )}

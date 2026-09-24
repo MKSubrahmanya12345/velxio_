@@ -1,6 +1,7 @@
-// Minimal type surface for the mobile chat app. Same shapes as WireGI/client
-// src/types.ts — trimmed to what the "needs your eyes" chat actually renders,
-// plus a loose `FlowEntry` for the live trace (never render raw `undefined`).
+// WireGI chat types for the Velxio integration — same shapes as
+// WireGI/mobile/src/lib/types.ts, plus the simulator state the agent now
+// produces. Kept local so the Velxio build never imports from WireGI's app
+// trees.
 
 export interface ChatMsg {
   role: 'system' | 'user' | 'agent';
@@ -51,6 +52,22 @@ export interface Part {
   updatedAt?: string;
 }
 
+/** The simulation rung: what the agent built in the Velxio simulator. */
+export interface SimState {
+  status: 'simulated' | 'partial' | 'failed' | 'skipped';
+  rounds?: number;
+  verified?: string[];
+  summary?: string;
+  instructions?: string;
+  checks?: string[];
+  toolLog?: Array<{ tool: string; ok: boolean; ms: number; at: string }>;
+  circuit?: unknown;
+  files?: Array<{ name: string; content: string }>;
+  ms?: number;
+  at?: string;
+  reason?: string;
+}
+
 export interface Project {
   id: string;
   goal: string;
@@ -62,6 +79,7 @@ export interface Project {
   state: {
     chat: ChatMsg[];
     parts: Part[];
+    sim?: SimState | null;
     reconciliations?: Reconciliation[];
     runs?: unknown[];
     errors?: unknown[];
@@ -85,7 +103,7 @@ export interface ProjectSummary {
   lastMessageAt?: string | null;
 }
 
-/** Loose trace event — see client types for the full contract. */
+/** Loose trace event from the ndjson stream. */
 export interface FlowEntry {
   seq?: number;
   t?: number;
@@ -97,6 +115,9 @@ export interface FlowEntry {
   message?: string;
   partId?: string;
   part?: string;
+  tool?: string;
+  ok?: boolean;
+  status?: string;
   error?: { name?: string; message?: string; where?: string } | string;
   fatal?: boolean;
   result?: Project;
@@ -113,7 +134,7 @@ export interface Health {
 
 export type HumanDecision = 'approve' | 'provide' | 'rerun' | 'reject';
 
-/** Derives the same "needs you" set the desktop chat shows. */
+/** Derives the "needs you" set the chat shows. */
 export function checkpointPartsOf(p: Project | null): Part[] {
   if (!p) return [];
   return (p.state.parts || []).filter(
