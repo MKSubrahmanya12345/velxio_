@@ -411,32 +411,47 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
 
   function buildSummary(project) {
     const profile = getProfile(project.profileId);
+    const statusLabel =
+      { init: 'not started', researching: 'working', awaiting_human: 'needs your eyes', partial: 'partial', complete: 'complete', failed: 'failed' }[
+        project.status
+      ] || project.status;
     const lines = [
       `# ${project.goal}`,
       '',
-      `Status: **${project.status}**`,
-      `Classification: ${project.state.idea.classification || '?'} · Domains: ${(project.state.idea.domains || []).join(', ')}`,
-      `Profile: **${profile.label}** · verification ladder: ${profile.ladder.join(' → ')}`,
+      `**${statusLabel}** · ${project.state.idea.classification || '? classification'} · ${(project.state.idea.domains || []).join(', ')}`,
+      `Profile: **${profile.label}** · ladder: ${profile.ladder.join(' → ')}`,
       '',
       '## Parts',
       '',
     ];
+    const statusOf = (p) => {
+      if (p.verified) return '✓ verified';
+      if (p.humanCheckpoint) return '⚠ needs your eyes';
+      if (p.status === 'failed') return '✖ failed';
+      return p.status === 'data_ready' ? 'researched' : p.status;
+    };
     for (const p of project.state.parts) {
-      lines.push(
-        `- **${p.name}** (${p.domain}) — ${p.status}${p.humanCheckpoint ? ' · ⚠ needs your eyes' : ''}${
-          p.error ? ` · ✖ ${p.error}` : ''
-        }`,
-      );
-      if (p.current?.data?.bomRow) lines.push(`    - BOM: ${p.current.data.bomRow}`);
-      if (p.current?.data?.wiring) lines.push(`    - Wiring: ${p.current.data.wiring}`);
-      if ((p.checklist || []).length) lines.push(`    - Checklist: ${p.checklist.join('; ')}`);
-      if ((p.openQuestions || []).length) lines.push(`    - Open: ${p.openQuestions.join('; ')}`);
+      lines.push(`- **${p.name}** · \`${p.domain}\` · ${statusOf(p)}`);
+      const d = p.current?.data || p.data;
+      if (d?.bomRow) lines.push(`  - **BOM** — ${d.bomRow}`);
+      if (d?.wiring) lines.push(`  - **Wiring** — ${d.wiring}`);
+      if ((p.checklist || []).length) {
+        lines.push('  - **Checklist**');
+        for (const c of p.checklist) lines.push(`    - ${c}`);
+      }
+      if ((p.openQuestions || []).length) {
+        lines.push('  - **Questions**');
+        for (const q of p.openQuestions) lines.push(`    - ${q}`);
+      }
+      if ((p.humanInput || []).length) {
+        lines.push(`  - **You said** — ${p.humanInput[p.humanInput.length - 1].text}`);
+      }
     }
     const failed = project.state.parts.filter((p) => p.status === 'failed');
     if (failed.length) {
-      lines.push('', `## Needs a resume`, '', `Failed parts: ${failed.map((p) => p.name).join(', ')}`);
+      lines.push('', '## Needs a resume', '');
       for (const p of failed) {
-        lines.push(`- **${p.name}**: ${p.error || 'unknown error'}`);
+        lines.push(`- **${p.name}** — ${p.error || 'unknown error'}`);
       }
     }
 
@@ -444,20 +459,33 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
     for (const r of project.state.reconciliations || []) {
       if (r.skipped) continue;
       if (r.failed) {
-        lines.push('', `## Integration`, '', `Failed: ${r.reason}`);
+        lines.push('', '## Integration', '', `Failed: ${r.reason}`);
         continue;
       }
-      lines.push('', `## Integration`, '', `${r.coherent ? '✅ coherent' : '⚠ conflicts found'} — ${r.summary || ''}`);
-      for (const c of r.conflicts || []) {
-        lines.push(`  - [${c.severity}] ${(c.parts || []).join(' ↔ ')}: ${c.issue}`);
-        if (c.resolution) lines.push(`      → ${c.resolution}`);
+      const conflicts = r.conflicts || [];
+      const blocking = conflicts.filter((c) => c.severity === 'blocking').length;
+      lines.push('', '## Integration', '');
+      if (r.coherent && !conflicts.length) {
+        lines.push(`✅ **coherent** — ${r.summary || 'the parts agree.'}`);
+      } else {
+        lines.push(
+          `⚠ **${conflicts.length} conflict${conflicts.length === 1 ? '' : 's'} found**${
+            blocking ? ` (${blocking} blocking)` : ''
+          } — ${r.summary || ''}`,
+        );
+      }
+      for (const c of conflicts) {
+        const who = (c.parts || []).join(' ↔ ');
+        lines.push(`- ${c.severity === 'blocking' ? '🛑 **blocking**' : '❗ **warning**'} · ${who}`);
+        lines.push(`  - ${c.issue}`);
+        if (c.resolution) lines.push(`  - → ${c.resolution}`);
       }
     }
     const errors = project.state.errors || [];
     if (errors.length) {
-      lines.push('', `## Errors during the run (last ${Math.min(errors.length, 5)})`, '');
+      lines.push('', '## Errors during the run', '');
       for (const e of errors.slice(-5)) {
-        lines.push(`- \`${e.where}\`: ${e.name?.toUpperCase()}: ${e.message}`);
+        lines.push(`- \`${e.where || '?'}\` — **${e.name || 'Error'}**: ${e.message}`);
       }
       lines.push('', '_Full trace: right-hand panel → Flow._');
     }

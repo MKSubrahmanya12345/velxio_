@@ -64,13 +64,15 @@ WireGI/
                         # OverviewPanel, PartCard, FlowPanel (the debugger), DecisionLog,
                         # ResearchLog, ReconcileLog, DebugPanel, HumanCheckpoint,
                         # ProviderStrip, TopBar, HowItWorks, ConfidenceMeter, StepCard
-  mobile/                # WhatsApp-style mobile chat app for the human checkpoint
+  mobile/                # mobile "needs your eyes" app — calm, airy light theme
     src/
       lib/api.ts        # trimmed REST + ndjson streaming client (sendMessage, respondHuman)
       lib/types.ts      # Project / Part / ChatMsg + checkpointPartsOf() (needs-your-eyes set)
-      lib/markdown.tsx  # dependency-free markdown for agent replies
+      lib/markdown.tsx  # dependency-free markdown for agent replies (nested lists)
+      lib/tasks.ts      # Tasks synthesis: conflicts + open questions + checklists → to-dos
       components/       # ChatsList (list) · ChatThread (chat + checkpoint card) · CheckpointCard
-      App.tsx           # hash router: #/ = chats, #/p/:id = thread
+                        # TasksScreen (aggregated action list, ticks stored locally)
+      App.tsx           # hash router: #/ = chats, #/tasks = tasks, #/p/:id = thread
 ```
 
 ## How a request flows

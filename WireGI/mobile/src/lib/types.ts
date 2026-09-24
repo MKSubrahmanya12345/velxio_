@@ -8,6 +8,25 @@ export interface ChatMsg {
   ts?: string;
 }
 
+export interface Conflict {
+  severity: 'blocking' | 'warning';
+  parts?: string[];
+  issue: string;
+  resolution?: string;
+  patchesApplied?: string[];
+}
+
+export interface Reconciliation {
+  at: string;
+  skipped?: boolean;
+  failed?: boolean;
+  reason?: string;
+  coherent?: boolean;
+  summary?: string;
+  conflicts?: Conflict[];
+  patchesApplied?: number;
+}
+
 export interface Part {
   id: string;
   name: string;
@@ -19,7 +38,11 @@ export interface Part {
   humanInput?: Array<{ at: string; text: string; decision?: string }>;
   current?: {
     data?: { bomRow?: string; wiring?: string; config?: string; checklist?: string[] };
+    gathered?: Array<{ field: string; value: string }>;
+    understand?: { validation?: string[]; openQuestions?: string[]; conflicts?: string[] };
   } | null;
+  checklist?: string[];
+  data?: { bomRow?: string; wiring?: string; config?: string } | null;
   error?: string | null;
   tier?: string | null;
   evidence?: Array<{ rung: string; at?: string; by?: string; detail?: string }>;
@@ -37,6 +60,9 @@ export interface Project {
   state: {
     chat: ChatMsg[];
     parts: Part[];
+    reconciliations?: Reconciliation[];
+    runs?: unknown[];
+    errors?: unknown[];
   };
 }
 

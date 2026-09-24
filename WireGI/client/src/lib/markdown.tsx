@@ -2,8 +2,17 @@ import type { ReactNode } from 'react';
 
 // Tiny, dependency-free markdown renderer for agent chat messages.
 // Deliberately not a general markdown engine: it handles what WireGI produces
-// (headings, bullets, bold, inline code, code fences) by building React
-// elements — never dangerouslySetInnerHTML.
+// (headings, bullets with nesting, bold, inline code, code fences) by building
+// React elements — never dangerouslySetInnerHTML.
+//
+// Bullets are indentation-aware: 2 spaces per level, so the summary's
+// part → BOM/Wiring/Checklist/Questions → checklist-steps structure renders as
+// real nested lists, not a flat wall.
+
+interface Bullet {
+  text: string;
+  children: Bullet[];
+}
 
 function inline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
@@ -23,42 +32,58 @@ function inline(text: string, keyPrefix: string): ReactNode[] {
   return nodes;
 }
 
+function renderBullets(root: Bullet[], key: string): ReactNode {
+  return (
+    <ul key={key}>
+      {root.map((b, i) => (
+        <li key={i}>
+          {inline(b.text, `${key}-${i}`)}
+          {b.children.length ? renderBullets(b.children, `${key}-${i}`) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function bulletDepth(line: string): number {
+  const lead = (line.match(/^[ \t]*/) || [''])[0].length;
+  return Math.min(6, Math.floor(lead / 2));
+}
+
 export function Markdown({ text }: { text: string }) {
   const lines = String(text ?? '').split('\n');
   const blocks: ReactNode[] = [];
-  let list: string[] = [];
-  let code: string[] | null = null;
+  const fence = { open: false, lines: [] as string[] };
+  let bullets: Bullet[] = [];
+  let bulletStack: Bullet[] = [];
 
   const flushList = (key: string) => {
-    if (!list.length) return;
-    blocks.push(
-      <ul key={key}>
-        {list.map((item, i) => (
-          <li key={i}>{inline(item, `${key}-${i}`)}</li>
-        ))}
-      </ul>,
-    );
-    list = [];
+    if (!bullets.length) return;
+    blocks.push(renderBullets(bullets, key));
+    bullets = [];
+    bulletStack = [];
   };
 
   lines.forEach((raw, idx) => {
     const line = raw.replace(/\s+$/, '');
     if (line.trim().startsWith('```')) {
-      if (code) {
+      if (fence.open) {
         blocks.push(
           <pre className="code" key={`code-${idx}`}>
-            {code.join('\n')}
+            {fence.lines.join('\n')}
           </pre>,
         );
-        code = null;
+        fence.open = false;
+        fence.lines = [];
       } else {
         flushList(`ul-${idx}`);
-        code = [];
+        fence.open = true;
+        fence.lines = [];
       }
       return;
     }
-    if (code) {
-      code.push(raw);
+    if (fence.open) {
+      fence.lines.push(raw);
       return;
     }
     const h = line.match(/^(#{1,4})\s+(.*)$/);
@@ -74,7 +99,12 @@ export function Markdown({ text }: { text: string }) {
     }
     const bullet = line.match(/^\s*[-*]\s+(.*)$/);
     if (bullet) {
-      list.push(bullet[1]);
+      const depth = Math.min(bulletDepth(line), bulletStack.length);
+      const node: Bullet = { text: bullet[1], children: [] };
+      bulletStack.length = depth;
+      if (depth === 0) bullets.push(node);
+      else bulletStack[depth - 1].children.push(node);
+      bulletStack[depth] = node;
       return;
     }
     if (!line.trim()) {
@@ -89,10 +119,10 @@ export function Markdown({ text }: { text: string }) {
     );
   });
   flushList('ul-final');
-  if (code) {
+  if (fence.open) {
     blocks.push(
       <pre className="code" key="code-final">
-        {code.join('\n')}
+        {fence.lines.join('\n')}
       </pre>,
     );
   }
