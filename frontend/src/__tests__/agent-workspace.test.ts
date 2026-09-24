@@ -55,7 +55,7 @@ const empty: Snapshot = {
   activeBoardId: null,
 };
 const design: AgentProject = {
-  board: { id: 'uno', x: 100, y: 150 },
+  board: { id: 'uno', boardKind: 'arduino-uno', x: 100, y: 150 },
   components: [{ id: 'r1', metadataId: 'resistor', x: 450, y: 100, properties: { value: '330' } }],
   wires: [
     {
@@ -194,10 +194,12 @@ describe('workspace transactions', () => {
     mocks.project.currentProject = { id: 'new-project' };
     expect(() => assertFresh(before, scope)).toThrow('workspace changed');
   });
-  it('rejects unsupported existing boards and unknown components without mutation', () => {
+  it('accepts ESP32 board context and rejects unknown boards/components without mutation', () => {
     const state = fromAgentProject(design, empty);
     state.boards[0].boardKind = 'esp32';
-    expect(() => toAgentProject(state)).toThrow('Arduino Uno');
+    expect(toAgentProject(state).board?.boardKind).toBe('esp32');
+    (state.boards[0] as any).boardKind = 'not-a-velxio-board';
+    expect(() => toAgentProject(state)).toThrow('30 Velxio boards');
     state.boards[0].boardKind = 'arduino-uno';
     // An id no catalog entry knows is still refused (a typo must never silently
     // drop a part from the wire format).

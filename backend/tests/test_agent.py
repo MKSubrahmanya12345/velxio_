@@ -123,6 +123,34 @@ def test_missing_or_parallel_led_resistor_rejected():
         apply_patch(Project(), p)
 
 
+def test_board_kind_is_explicit_and_first_draft_can_infer_esp32():
+    assert Board(id="esp32").boardKind == "esp32"
+    draft = apply_patch(
+        Project(),
+        Patch(upsert_files=[Source(
+            name="sketch.ino",
+            content="#include <WiFi.h>\nvoid setup(){} void loop(){}",
+        )]),
+        board_hint="Build this on an ESP32 with WiFi",
+    )
+    assert draft.board is not None
+    assert draft.board.boardKind == "esp32"
+
+
+def test_wifi_header_is_scoped_to_esp32():
+    source = Source(name="sketch.ino", content="#include <WiFi.h>\nvoid setup(){} void loop(){}")
+    with pytest.raises(ValueError, match="WiFi.h"):
+        apply_patch(Project(board=Board(id="uno"), files=[Source(
+            name="sketch.ino", content="void setup(){} void loop(){}")]),
+            Patch(upsert_files=[source]))
+    esp32 = apply_patch(
+        Project(board=Board(id="esp", boardKind="esp32"), files=[Source(
+            name="sketch.ino", content="void setup(){} void loop(){}")]),
+        Patch(upsert_files=[source]),
+    )
+    assert esp32.board.boardKind == "esp32"
+
+
 @pytest.mark.parametrize("kwargs", [
     {"metadataId": "esp32"}, {"x": float("nan")}, {"x": float("inf")},
     {"properties": {"value": "1"}, "metadataId": "resistor"},
@@ -149,19 +177,18 @@ async def test_stream_success(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fast_mode_returns_a_result_without_waiting_for_the_toolchain(monkeypatch):
-    """Fast Mode: one proposal, then a result carrying the fallback HEX.
-
-    The compile still runs, but a slow or failing toolchain no longer blocks the
-    canvas — the browser verifies behaviour against the live simulation instead.
-    """
+async def test_fast_mode_surfaces_toolchain_failure_without_fake_firmware(monkeypatch):
+    """Fast Mode still attempts a real build and never presents fake HEX."""
     llm = AsyncMock(return_value=Proposal(summary="Blink", patch=blink_patch()))
     monkeypatch.setattr(service, "propose", llm)
-    monkeypatch.setattr(service, "compile_project",
-                        AsyncMock(return_value={"success": False, "stderr": "no toolchain"}))
+    monkeypatch.setattr(service, "compile_project", AsyncMock(return_value={
+        "success": False,
+        "error_kind": "toolchain_unavailable",
+        "error": "no toolchain",
+    }))
     events = [e async for e in service.run_agent(AgentRequest(prompt="blink", project=Project()))]
-    assert events[-1]["type"] == "result"
-    assert events[-1]["hex"] == service.FALLBACK_HEX
+    assert events[-1]["type"] == "error"
+    assert "arduino-cli" in events[-1]["message"]
     assert llm.await_count == 1
 
 

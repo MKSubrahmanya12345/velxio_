@@ -6,6 +6,7 @@ import json
 import shutil
 import sys
 
+from app.agent import catalog
 from app.agent.models import Project
 from app.services.arduino_cli import ArduinoCLIService
 
@@ -48,32 +49,25 @@ BOARD_FQBN_MAP = {
     "raspberry-pi-5": "python:python:pi",
 }
 
+# Keep the worker bound to the same generated catalog used by validation and
+# the browser. The literal table above remains a readable fallback for a
+# rolling deploy that starts with an older catalog, but every supported board
+# overrides it here (including exact ATTiny/STM32/Wemos FQBN spelling).
+for _kind, _spec in catalog.BOARDS.items():
+    BOARD_FQBN_MAP[_kind] = _spec.get("fqbn") or "python:python:pi"
+
+
 def get_fqbn(board_kind: str) -> str:
-    """Get FQBN for board, default to Uno for unknown."""
-    if not board_kind:
-        return "arduino:avr:uno"
-    # Direct match
-    if board_kind in BOARD_FQBN_MAP:
-        return BOARD_FQBN_MAP[board_kind]
-    # Fuzzy: if contains esp32, use esp32
-    lower = board_kind.lower()
-    if "esp32-s3" in lower:
-        return "esp32:esp32:esp32s3"
-    if "esp32-c3" in lower:
-        return "esp32:esp32:esp32c3"
-    if "esp32" in lower:
-        return "esp32:esp32:esp32"
-    if "pico" in lower or "rp2040" in lower:
-        return "rp2040:rp2040:rpipico"
-    if "stm32" in lower or "bluepill" in lower or "blackpill" in lower:
-        return "STMicroelectronics:stm32:GenF1:pnum=BLUEPILL_F103C8"
-    if "pi" in lower and "pico" not in lower:
-        return "python:python:pi"
-    if "nano" in lower:
-        return "arduino:avr:nano"
-    if "mega" in lower:
-        return "arduino:avr:mega"
-    return "arduino:avr:uno"
+    """Return the catalog FQBN; never silently compile an unknown board as Uno."""
+    canonical = catalog.normalize_board_kind(board_kind)
+    if not canonical or canonical not in catalog.BOARDS:
+        raise ValueError(
+            f"Unsupported board kind {board_kind!r}; choose one of the "
+            f"{len(catalog.BOARDS)} generated Velxio boards.")
+    fqbn = BOARD_FQBN_MAP.get(canonical)
+    if not fqbn:
+        raise ValueError(f"Board {canonical!r} has no configured build target.")
+    return fqbn
 
 async def main():
     try:

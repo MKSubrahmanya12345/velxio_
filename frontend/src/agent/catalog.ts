@@ -58,8 +58,9 @@ export interface PartSpec {
 
 export interface BoardSpec {
   label: string;
-  fqbn: string;
+  fqbn: string | null;
   kind: string;
+  family?: string;
   pins: string[];
   pwm: number[];
   analog: string[];
@@ -74,6 +75,8 @@ export interface BoardSpec {
 interface CatalogFile {
   version: number;
   boards: Record<string, BoardSpec>;
+  boardCoreHeaders?: Record<string, string[]>;
+  boardCoreHeadersByBoard?: Record<string, string[]>;
   severity: Record<string, string>;
   runtimeProperties: { global: string[]; parts: Record<string, string[]> };
   parts: Record<string, PartSpec>;
@@ -82,6 +85,25 @@ interface CatalogFile {
 export const catalog = raw as unknown as CatalogFile;
 export const PARTS: Record<string, PartSpec> = catalog.parts;
 export const BOARD: BoardSpec = catalog.boards['arduino-uno'];
+
+const BOARD_ALIASES: Record<string, string> = {
+  uno: 'arduino-uno',
+  nano: 'arduino-nano',
+  mega: 'arduino-mega',
+  esp32dev: 'esp32',
+  'esp32-devkit': 'esp32',
+  pico: 'raspberry-pi-pico',
+  rp2040: 'raspberry-pi-pico',
+  picow: 'pi-pico-w',
+  'pico-w': 'pi-pico-w',
+};
+
+/** Canonical board kind shared with backend Board normalization. */
+export function normalizeBoardKind(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (Object.prototype.hasOwnProperty.call(catalog.boards, value)) return value;
+  return BOARD_ALIASES[value.toLowerCase()];
+}
 
 /** Every part a patch may place, sorted by id. */
 export const PLACEABLE_IDS: string[] = Object.entries(PARTS)

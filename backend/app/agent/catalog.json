@@ -76,7 +76,8 @@
    "vcc": 5,
    "logic_v": 5,
    "max_pin_ma": 40,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "arduino"
   },
   "arduino-nano": {
    "label": "Arduino Nano",
@@ -151,7 +152,8 @@
    "vcc": 5,
    "logic_v": 5,
    "max_pin_ma": 40,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "arduino"
   },
   "arduino-mega": {
    "label": "Arduino Mega 2560",
@@ -292,7 +294,8 @@
    "vcc": 5,
    "logic_v": 5,
    "max_pin_ma": 40,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "arduino"
   },
   "attiny85": {
    "label": "ATtiny85",
@@ -333,7 +336,8 @@
    "vcc": 5,
    "logic_v": 5,
    "max_pin_ma": 40,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "attiny"
   },
   "raspberry-pi-pico": {
    "label": "Raspberry Pi Pico",
@@ -434,7 +438,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 100
+   "max_total_ma": 100,
+   "family": "rp2040"
   },
   "pi-pico-w": {
    "label": "Raspberry Pi Pico W",
@@ -535,7 +540,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 100
+   "max_total_ma": 100,
+   "family": "rp2040"
   },
   "esp32": {
    "label": "ESP32 DevKit V1",
@@ -622,7 +628,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "esp32-devkit-c-v4": {
    "label": "ESP32 DevKit C V4",
@@ -709,7 +716,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "esp32-cam": {
    "label": "ESP32-CAM",
@@ -796,7 +804,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "wemos-lolin32-lite": {
    "label": "Wemos Lolin32 Lite",
@@ -883,7 +892,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "esp32-s3": {
    "label": "ESP32-S3 DevKit",
@@ -994,7 +1004,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "xiao-esp32-s3": {
    "label": "XIAO ESP32-S3",
@@ -1105,7 +1116,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "arduino-nano-esp32": {
    "label": "Arduino Nano ESP32",
@@ -1216,7 +1228,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "esp32-c3": {
    "label": "ESP32-C3 DevKit",
@@ -1301,7 +1314,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "xiao-esp32-c3": {
    "label": "XIAO ESP32-C3",
@@ -1386,7 +1400,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "aitewinrobot-esp32c3-supermini": {
    "label": "ESP32-C3 SuperMini",
@@ -1471,7 +1486,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 12,
-   "max_total_ma": 200
+   "max_total_ma": 200,
+   "family": "esp32"
   },
   "stm32-bluepill": {
    "label": "STM32 Blue Pill",
@@ -1575,7 +1591,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 20,
-   "max_total_ma": 150
+   "max_total_ma": 150,
+   "family": "stm32"
   },
   "stm32-bluepill-f103cb": {
    "label": "STM32 Blue Pill (F103CB)",
@@ -1679,7 +1696,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 20,
-   "max_total_ma": 150
+   "max_total_ma": 150,
+   "family": "stm32"
   },
   "stm32-blackpill": {
    "label": "STM32 Black Pill",
@@ -1783,7 +1801,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 20,
-   "max_total_ma": 150
+   "max_total_ma": 150,
+   "family": "stm32"
   },
   "stm32-blackpill-f401": {
    "label": "STM32 Black Pill (F401)",
@@ -1887,7 +1906,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 20,
-   "max_total_ma": 150
+   "max_total_ma": 150,
+   "family": "stm32"
   },
   "stm32-f4-discovery": {
    "label": "STM32F4 Discovery",
@@ -1991,7 +2011,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 20,
-   "max_total_ma": 150
+   "max_total_ma": 150,
+   "family": "stm32"
   },
   "stm32-olimex-h405": {
    "label": "Olimex STM32-H405",
@@ -2095,7 +2116,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 20,
-   "max_total_ma": 150
+   "max_total_ma": 150,
+   "family": "stm32"
   },
   "stm32-netduino-plus2": {
    "label": "Netduino Plus 2",
@@ -2199,7 +2221,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 20,
-   "max_total_ma": 150
+   "max_total_ma": 150,
+   "family": "stm32"
   },
   "stm32-netduino2": {
    "label": "Netduino 2",
@@ -2303,7 +2326,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 20,
-   "max_total_ma": 150
+   "max_total_ma": 150,
+   "family": "stm32"
   },
   "raspberry-pi-zero": {
    "label": "Raspberry Pi Zero",
@@ -2368,7 +2392,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 16,
-   "max_total_ma": 100
+   "max_total_ma": 100,
+   "family": "python"
   },
   "raspberry-pi-1": {
    "label": "Raspberry Pi 1B+",
@@ -2433,7 +2458,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 16,
-   "max_total_ma": 100
+   "max_total_ma": 100,
+   "family": "python"
   },
   "raspberry-pi-2": {
    "label": "Raspberry Pi 2B",
@@ -2498,7 +2524,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 16,
-   "max_total_ma": 100
+   "max_total_ma": 100,
+   "family": "python"
   },
   "raspberry-pi-3": {
    "label": "Raspberry Pi 3B",
@@ -2563,7 +2590,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 16,
-   "max_total_ma": 100
+   "max_total_ma": 100,
+   "family": "python"
   },
   "raspberry-pi-4": {
    "label": "Raspberry Pi 4B",
@@ -2628,7 +2656,8 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 16,
-   "max_total_ma": 100
+   "max_total_ma": 100,
+   "family": "python"
   },
   "raspberry-pi-5": {
    "label": "Raspberry Pi 5",
@@ -2693,8 +2722,77 @@
    "vcc": 3.3,
    "logic_v": 3.3,
    "max_pin_ma": 16,
-   "max_total_ma": 100
+   "max_total_ma": 100,
+   "family": "python"
   }
+ },
+ "boardCoreHeaders": {
+  "default": [
+   "Arduino.h",
+   "math.h",
+   "stdint.h",
+   "string.h",
+   "stdlib.h",
+   "stdio.h"
+  ],
+  "arduino": [
+   "avr/pgmspace.h",
+   "avr/interrupt.h",
+   "avr/io.h",
+   "avr/wdt.h",
+   "util/delay.h",
+   "Servo.h",
+   "Wire.h",
+   "SPI.h",
+   "EEPROM.h",
+   "SoftwareSerial.h",
+   "HID.h"
+  ],
+  "esp32": [
+   "WiFi.h",
+   "WebServer.h",
+   "HTTPClient.h",
+   "WiFiClient.h",
+   "WiFiServer.h",
+   "WiFiUdp.h",
+   "WiFiType.h",
+   "esp_wifi.h",
+   "BluetoothSerial.h",
+   "BLEDevice.h",
+   "BLEUtils.h",
+   "BLEServer.h",
+   "Preferences.h",
+   "FS.h",
+   "LittleFS.h",
+   "Update.h",
+   "ArduinoOTA.h",
+   "ESPmDNS.h",
+   "DNSServer.h",
+   "esp_system.h",
+   "esp_event.h",
+   "esp_netif.h",
+   "esp_err.h",
+   "esp_log.h",
+   "freertos/FreeRTOS.h",
+   "freertos/task.h",
+   "driver/gpio.h",
+   "driver/i2c.h",
+   "driver/spi_master.h",
+   "nvs_flash.h",
+   "esp_camera.h"
+  ],
+  "rp2040": [],
+  "stm32": [
+   "HardwareTimer.h"
+  ],
+  "python": []
+ },
+ "boardCoreHeadersByBoard": {
+  "pi-pico-w": [
+   "WiFi.h",
+   "WiFiClient.h",
+   "HTTPClient.h"
+  ]
  },
  "severity": {
   "power": "warning",

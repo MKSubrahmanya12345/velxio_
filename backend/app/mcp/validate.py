@@ -15,7 +15,6 @@ from pydantic import ValidationError
 from app.agent import catalog
 from app.agent.analysis import analyse
 from app.agent.models import (
-    BOARD_CAPABILITIES,
     Board,
     Connection,
     Endpoint,
@@ -35,30 +34,56 @@ def _kind_of(component: dict[str, Any]) -> str:
     return catalog.resolve_id(raw) or ""
 # Board shapes seen in the wild: wokwi part type, FQBN, plain agent id.
 _BOARD_MAP = {
-    "wokwi-arduino-uno": "uno",
-    "arduino:avr:uno": "uno",
-    "uno": "uno",
-    "arduino-uno": "uno",
-    "arduino-uno-3v3": "uno",
-    "wokwi-arduino-nano": "uno",   # same AVR core and pin numbering for our rules
-    "arduino-nano": "uno",
+    "wokwi-arduino-uno": "arduino-uno",
+    "arduino:avr:uno": "arduino-uno",
+    "uno": "arduino-uno",
+    "arduino-uno": "arduino-uno",
+    "arduino-uno-3v3": "arduino-uno",
+    "wokwi-arduino-nano": "arduino-nano",
+    "arduino-nano": "arduino-nano",
 }
+
+
+def _canonical_board_kind(raw: str) -> str | None:
+    value = str(raw or "").strip().lower()
+    if not value:
+        return None
+    mapped = _BOARD_MAP.get(value)
+    if mapped:
+        return mapped
+    normalized = catalog.normalize_board_kind(value)
+    if normalized:
+        return normalized
+    for kind, spec in catalog.BOARDS.items():
+        if str(spec.get("fqbn") or "").lower() == value:
+            return kind
+    if value.startswith("wokwi-"):
+        return catalog.normalize_board_kind(value.removeprefix("wokwi-"))
+    return None
 
 
 
 def _board_id_of(circuit: dict[str, Any], components: list[dict[str, Any]]) -> str | None:
-    raw = str(circuit.get("board") or circuit.get("board_fqbn") or "").strip().lower()
-    mapped = _BOARD_MAP.get(raw)
+    raw = str(
+        circuit.get("boardKind") or circuit.get("board") or circuit.get("board_fqbn") or ""
+    ).strip()
+    mapped = _canonical_board_kind(raw)
     if mapped:
         return mapped
-    # Any board component is fine as long as it is one we can check.
+    # Any board component is fine as long as it is one of the generated board
+    # catalog entries, not just the historical Uno subset.
     for component in components:
-        board_raw = str(component.get("type") or component.get("metadataId") or "").lower()
-        if board_raw in _BOARD_MAP:
-            return _BOARD_MAP[board_raw]
-        board_kind = catalog.resolve_id(board_raw)
+        board_raw = str(component.get("type") or component.get("metadataId") or "").strip()
+        mapped = _canonical_board_kind(board_raw)
+        if mapped:
+            return mapped
+        board_kind = catalog.resolve_id(board_raw.lower())
         if board_kind and catalog.get(board_kind) and catalog.get(board_kind).cls == "board":
-            return _BOARD_MAP.get(board_kind, "uno")
+            # Legacy metadata ids can still describe a board; only use it when
+            # the corresponding project board exists in the 30-board table.
+            candidate = catalog.normalize_board_kind(board_kind)
+            if candidate:
+                return candidate
     return None
 
 
@@ -67,7 +92,8 @@ def to_agent_project(circuit: dict[str, Any], files: list[dict[str, str]] | None
 
     Returns (project | None, notes, hard_errors). notes explain parts left out
     of the catalog subset; hard_errors are structural problems (unknown pin
-    names, malformed endpoints) that make the circuit invalid outright.
+    names, malformed endpoints) that make the circuit invalid outright. Board
+    resolution is against all 30 generated Velxio boards, not just Uno.
     """
     notes: list[str] = []
     hard_errors: list[str] = []
@@ -78,19 +104,34 @@ def to_agent_project(circuit: dict[str, Any], files: list[dict[str, str]] | None
     if not isinstance(raw_connections, list):
         return None, ["connections must be a list."], []
 
-    board = _board_id_of(circuit, raw_components)
-    if board is None:
-        return None, ["No Arduino Uno found (board_fqbn/board or a wokwi-arduino-uno part). "
-                      "The agent guarantees only cover the Uno catalog."], []
+    raw_board = str(
+        circuit.get("boardKind") or circuit.get("board") or circuit.get("board_fqbn") or ""
+    ).strip()
+    if raw_board and _canonical_board_kind(raw_board) is None:
+        return None, [], [f"Unsupported board kind {raw_board!r}. Velxio supports "
+                          f"{len(catalog.BOARDS)} board kinds: " + ", ".join(catalog.BOARDS)]
+    board_kind = _board_id_of(circuit, raw_components)
+    if board_kind is None:
+        return None, [f"No supported board found. Velxio supports {len(catalog.BOARDS)} board kinds: "
+                      + ", ".join(catalog.BOARDS)], []
+    # Preserve the imported board component id used by wire endpoints (Wokwi
+    # calls them `uno`, `nano`, etc.) while keeping boardKind canonical.
+    board = "uno" if board_kind == "arduino-uno" else board_kind
+    for component in raw_components:
+        raw_type = str(component.get("type") or component.get("metadataId") or "")
+        component_kind = _canonical_board_kind(raw_type)
+        if component_kind == board_kind and component.get("id"):
+            board = str(component["id"])
+            break
 
     parts: list[Part] = []
     for i, component in enumerate(raw_components):
         # The board part became project.board above — not a catalog candidate.
         raw_type = str(component.get("type") or component.get("metadataId") or "")
-        if raw_type.lower() in _BOARD_MAP:
+        if _canonical_board_kind(raw_type):
             continue
-        board_kind = catalog.resolve_id(raw_type)
-        if board_kind and (spec := catalog.get(board_kind)) and spec.cls == "board":
+        component_board_id = catalog.resolve_id(raw_type)
+        if component_board_id and (spec := catalog.get(component_board_id)) and spec.cls == "board":
             continue  # a board part: the project has one board, this is it
         kind = _kind_of(component)
         if not kind:
@@ -129,12 +170,17 @@ def to_agent_project(circuit: dict[str, Any], files: list[dict[str, str]] | None
             notes.append(f"File {source.get('name')!r} rejected: {exc}")
 
     try:
-        project = Project(board=Board(id=board), components=parts, wires=wires, files=sources)
+        project = Project(
+            board=Board(id=board, boardKind=board_kind),
+            components=parts,
+            wires=wires,
+            files=sources,
+        )
     except ValidationError as exc:
         # describe_error keeps the actionable line ("r1 has pins: 1, 2"); a raw
         # ValidationError repr embeds the whole circuit and buries it.
         hard_errors.append(f"Invalid circuit: {describe_error(exc)}"
-                           + " Board pin names: " + ", ".join(catalog.board_pins()))
+                           + " Board pin names: " + ", ".join(catalog.board_pins(board_kind)))
         return None, notes, hard_errors
     return project, notes, hard_errors
 
@@ -151,7 +197,7 @@ def validate_circuit(circuit: dict[str, Any], files: list[dict[str, str]] | None
                 "message": "Circuit is structurally invalid."}
     if project is None:
         return {"valid": None, "errors": [], "warnings": [], "notes": notes,
-                "message": "Circuit is not in the agent-checkable (Uno catalog) subset."}
+                "message": "Circuit is not in the agent-checkable Velxio board/component catalog subset."}
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -165,10 +211,13 @@ def validate_circuit(circuit: dict[str, Any], files: list[dict[str, str]] | None
     filenames = {str(f.get("name", "")) for f in files or []}
     for source in files or []:
         try:
-            validate_includes(str(source.get("content", "")), filenames)
+            validate_includes(
+                str(source.get("content", "")), filenames, board_id=project.board.boardKind)
         except ValueError as exc:
             errors.append(f"includes: {exc}")
 
+    board_kind = project.board.boardKind
     return {"valid": not errors, "errors": errors, "warnings": warnings, "notes": notes,
-            "pins": catalog.board_pins(),
-            "capabilities": BOARD_CAPABILITIES.get("arduino-uno", {})}
+            "board": board_kind,
+            "pins": catalog.board_pins(board_kind),
+            "capabilities": catalog.board_capabilities(board_kind)}

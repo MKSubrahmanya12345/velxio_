@@ -41,7 +41,7 @@ from app.agent.catalog import DEFAULT_BOARD, PartSpec
 Severity = Literal["error", "warning"]
 
 # Board pins that are never a signal: they are power distribution.
-POWER_PINS = {"5V", "3.3V", "GND", "GND.1", "GND.2", "GND.3", "VIN", "VCC", "AREF", "IOREF"}
+POWER_PINS = {"5V", "3.3V", "3V3", "VBUS", "VSYS", "GND", "GND.1", "GND.2", "GND.3", "VIN", "VCC", "AREF", "IOREF"}
 
 # How many distinct error messages the repair prompt carries (see assert_clean).
 _MAX_ERROR_LINES = 6
@@ -55,9 +55,9 @@ READ_CALLS = {"digitalRead", "analogRead", "pulseIn"}
 _LITERAL = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/')
 _CALL = re.compile(
     r"\b(pinMode|digitalWrite|digitalRead|analogRead|analogWrite|tone|noTone|pulseIn|attach)\s*\(\s*([^,()]+)")
-_CONST = re.compile(r"(?m)^\s*(?:const\s+)?(?:static\s+)?(?:volatile\s+)?(?:unsigned\s+)?(?:int|byte|uint8_t|int8_t|int16_t)\s+([A-Za-z_]\w*)\s*=\s*(\d{1,2}|A[0-7])\s*;")
-_DEFINE = re.compile(r"(?m)^\s*#\s*define\s+([A-Za-z_]\w*)\s+(\d{1,2}|A[0-7])\b")
-_ANALOG_NAME = re.compile(r"^A([0-7])$")
+_CONST = re.compile(r"(?m)^\s*(?:const\s+)?(?:static\s+)?(?:volatile\s+)?(?:unsigned\s+)?(?:int|byte|uint8_t|int8_t|int16_t)\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_][A-Za-z0-9_.]*|\d{1,2})\s*;")
+_DEFINE = re.compile(r"(?m)^\s*#\s*define\s+([A-Za-z_]\w*)\s+([A-Za-z_][A-Za-z0-9_.]*|\d{1,2})\b")
+_ANALOG_NAME = re.compile(r"^A([0-9]+)$")
 
 # Opening/instantiation of a part's own API (servos, libraries) - used for one
 # thing only: noticing that the firmware drives a pin a part also drives.
@@ -130,27 +130,37 @@ def pin_constants(sources: list[str]) -> dict[str, str]:
     return consts
 
 
-def _resolve(arg: str, consts: dict[str, str]) -> str | None:
+def _resolve(arg: str, consts: dict[str, str], known_pins: set[str] | None = None) -> str | None:
     """Resolve a call's first argument to a board pin name, or None if unknown."""
     token = arg.strip().rstrip(";").strip()
+    if known_pins and token in known_pins:
+        return token
     if re.fullmatch(r"\d{1,2}", token):
         return token
     if _ANALOG_NAME.fullmatch(token):
         return token
     if re.fullmatch(r"[A-Za-z_]\w*", token) and token in consts:
-        return consts[token]
+        value = consts[token]
+        if not known_pins or value in known_pins:
+            return value
+        # Keep numeric/A aliases useful for the historical Uno scanner; the
+        # caller will report a board-specific unknown pin if it is not present.
+        return value
     return None
 
 
-def firmware_pin_usage(sources: list[str]) -> tuple[set[str], set[str]]:
+def firmware_pin_usage(
+    sources: list[str], known_pins: Iterable[str] | None = None,
+) -> tuple[set[str], set[str]]:
     """(pins the firmware drives, pins the firmware reads) by board pin name."""
     consts = pin_constants(sources)
+    board_pins = set(known_pins or ())
     driven: set[str] = set()
     read: set[str] = set()
     for source in sources:
         text = _clean(source)
         for name, arg in _CALL.findall(text):
-            pin = _resolve(arg, consts)
+            pin = _resolve(arg, consts, board_pins)
             if pin is None:
                 continue
             if name in WRITE_CALLS:
@@ -192,7 +202,7 @@ class Netlist:
         self.parent: dict[str, str] = {}
         self.kinds: dict[str, str] = {p.id: p.metadataId for p in project.components}
         if project.board:
-            self.kinds[project.board.id] = DEFAULT_BOARD
+            self.kinds[project.board.id] = project.board.boardKind
         self.trace: dict[str, set[str]] = {}
         for wire in project.wires:
             self.union(self.key(wire.start), self.key(wire.end))
@@ -240,19 +250,22 @@ class Netlist:
         return seen
 
     def board_pins_on(self, pins: Iterable[str], include_power: bool = False) -> set[str]:
-        """Board pin names in `pins` (excluding power distribution by default)."""
+        """Board pin names in `pins` (excluding this board's rails by default)."""
         board_id = self.project.board.id if self.project.board else DEFAULT_BOARD
+        board_kind = self.project.board.boardKind if self.project.board else DEFAULT_BOARD
+        power_pins = catalog.board_power_pins(board_kind) | POWER_PINS
         found = set()
         for pin in pins:
             component, _, name = pin.partition(":")
-            if component == board_id and (include_power or name not in POWER_PINS):
+            if component == board_id and (include_power or name not in power_pins):
                 found.add(name)
         return found
 
     def supply_rails(self) -> set[str]:
         """Board pins that count as a supply, plus other parts' power outputs."""
         board_id = self.project.board.id if self.project.board else DEFAULT_BOARD
-        supply, _ = catalog.power_rails(board_id)
+        board_kind = self.project.board.boardKind if self.project.board else DEFAULT_BOARD
+        supply, _ = catalog.power_rails(board_kind)
         return {f"{board_id}:{pin}" for pin in supply}
 
     def ground_rails(self) -> set[str]:
@@ -263,7 +276,8 @@ class Netlist:
         a complete circuit.
         """
         board_id = self.project.board.id if self.project.board else DEFAULT_BOARD
-        _, ground = catalog.power_rails(board_id)
+        board_kind = self.project.board.boardKind if self.project.board else DEFAULT_BOARD
+        _, ground = catalog.power_rails(board_kind)
         rails = {f"{board_id}:{pin}" for pin in ground}
         for part in self.project.components:
             spec = catalog.get(part.metadataId)
@@ -285,14 +299,15 @@ class Netlist:
 
 
 def wired_gpio_pins(project) -> set[str]:
-    """Board pins a wire actually touches, excluding power distribution."""
+    """Board pins a wire actually touches, excluding that board's rails."""
     if not project.board:
         return set()
     board = project.board.id
+    power_pins = catalog.board_power_pins(project.board.boardKind) | POWER_PINS
     pins = set()
     for wire in project.wires:
         for end in (wire.start, wire.end):
-            if end.componentId == board and end.pinName not in POWER_PINS:
+            if end.componentId == board and end.pinName not in power_pins:
                 pins.add(end.pinName)
     return pins
 
@@ -313,7 +328,8 @@ def _expectation_kind_ok(spec: PartSpec, kind: str) -> bool:
 def _pin_satisfies(nets: Netlist, pin: str, capability: str) -> bool:
     if capability == catalog.ANY_CAPABILITY:
         return True
-    return any(catalog.satisfies(bp, capability)
+    board_kind = nets.project.board.boardKind if nets.project.board else DEFAULT_BOARD
+    return any(catalog.satisfies(bp, capability, board_kind)
                for bp in nets.board_pins_on(nets.signal_net(pin)))
 
 
@@ -413,21 +429,23 @@ def analyse(project, expectations=None) -> list[Finding]:
     if not project.board:
         return findings
     board = project.board.id
-    caps = catalog.board_capabilities()
+    board_kind = project.board.boardKind
+    caps = catalog.board_capabilities(board_kind)
     pwm = {str(p) for p in caps.get("pwm", [])}
     analog = {str(p) for p in caps.get("analog", [])}
-    all_pins = set(catalog.board_pins())
+    all_pins = set(catalog.board_pins(board_kind))
+    power_pins = catalog.board_power_pins(board_kind) | POWER_PINS
 
     nets = Netlist(project)
     wired = wired_gpio_pins(project)
     sources = [f.content for f in project.files]
-    driven, read = firmware_pin_usage(sources)
+    driven, read = firmware_pin_usage(sources, all_pins)
 
     # --- firmware ↔ circuit ------------------------------------------------
     for pin in sorted(driven | read):
         if pin not in all_pins:
             findings.append(Finding("error", "unknown-pin",
-                f"Firmware uses pin {pin}, which does not exist on the Arduino Uno."))
+                f"Firmware uses pin {pin}, which does not exist on {catalog.board(board_kind).get('label', board_kind)}."))
         elif pin not in wired:
             verb = "drives" if pin in driven else "reads"
             findings.append(Finding("error", "pin-unwired",
@@ -445,17 +463,18 @@ def analyse(project, expectations=None) -> list[Finding]:
             pin = _resolve(arg, consts)
             if pin is None:
                 continue
+            label = catalog.board(board_kind).get("label", board_kind)
             if call == "analogWrite" and pin in all_pins and pin not in pwm:
                 findings.append(Finding("error", "not-pwm-capable",
-                    f"analogWrite() on pin {pin}: that pin has no PWM output on the Uno. "
-                    f"Use one of {', '.join(sorted(pwm, key=lambda p: int(p)))}."))
+                    f"analogWrite() on pin {pin}: that pin has no PWM output on {label}. "
+                    f"Use {catalog.capability_label('pwm', board_kind)}."))
             if call == "analogRead" and pin in all_pins and pin not in analog:
                 findings.append(Finding("error", "not-analog-capable",
-                    f"analogRead() on pin {pin}: that pin has no ADC input on the Uno. "
-                    f"Use one of {', '.join(sorted(analog))}."))
+                    f"analogRead() on pin {pin}: that pin has no ADC input on {label}. "
+                    f"Use {catalog.capability_label('analog', board_kind)}."))
 
     # --- shorts and contention (raw wire nets: a part in between is a load) --
-    rails = {p for p in ("GND", "GND.1", "GND.2", "GND.3", "5V", "3.3V") if p in all_pins}
+    rails = {p for p in power_pins if p in all_pins}
     for pin in sorted(wired):
         net = nets.net_of(f"{board}:{pin}")
         hit = sorted({p.split(":", 1)[1] for p in net if p.startswith(f"{board}:") and p.split(":", 1)[1] in rails})
@@ -555,10 +574,10 @@ def analyse(project, expectations=None) -> list[Finding]:
                 findings.append(Finding(
                     rule.severity or catalog.SEVERITY.get("signal", "error"), code,
                     f"{spec.name} {part.id} {pin} is not wired to any board pin. Connect it to "
-                    f"{catalog.capability_label(rule.cap)}."))
+                    f"{catalog.capability_label(rule.cap, board_kind)}."))
                 continue
             if rule.cap != catalog.ANY_CAPABILITY and not any(
-                catalog.satisfies(p, rule.cap) for p in board_pins
+                catalog.satisfies(p, rule.cap, board_kind) for p in board_pins
             ):
                 code = {"pwm": "not-pwm-capable", "analog": "not-analog-capable"}.get(
                     rule.cap, f"signal-not-{rule.cap}")
@@ -576,7 +595,7 @@ def analyse(project, expectations=None) -> list[Finding]:
                     findings.append(Finding(
                         rule.severity or "error", code,
                         f"{spec.name} {part.id} {pin} is on {label}. Use "
-                        f"{catalog.capability_label(rule.cap)}."))
+                        f"{catalog.capability_label(rule.cap, board_kind)}."))
             # Direction: `out` means the part is the source on that net, so the
             # firmware must read it. Bus pins are excluded (I2C/SPI are driven by
             # both sides by definition).
@@ -599,7 +618,7 @@ def analyse(project, expectations=None) -> list[Finding]:
                 if not any(_bus_satisfied(nets, spec, bus, key) for bus in buses):
                     bus = buses[0]
                     missing = [
-                        f"{p}->{catalog.capability_label(cap)}"
+                        f"{p}->{catalog.capability_label(cap, board_kind)}"
                         for p, cap in bus.pins.items()
                         if not _pin_satisfies(nets, key(p), cap)
                     ]
@@ -735,7 +754,7 @@ def netlist_summary(project) -> list[dict[str, Any]]:
         for pin in _pins_of(project, part):
             grouped.setdefault(nets.find(f"{part.id}:{pin}"), []).append(f"{part.id}.{pin}")
     if project.board:
-        for pin in catalog.board_pins():
+        for pin in catalog.board_pins(project.board.boardKind):
             key = f"{project.board.id}:{pin}"
             if key in nets.parent:
                 grouped.setdefault(nets.find(key), []).append(f"{project.board.id}.{pin}")

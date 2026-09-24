@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.agent import catalog
 from app.agent.feedback import push as push_feedback
 from app.agent.models import AgentRequest
 from app.agent.runlog import snapshot as run_snapshot
@@ -37,7 +38,7 @@ async def status():
     return {"configured": configured(),
             "providers": providers,
             "model": default.model if configured() else None,
-            "scope": "Arduino Uno · LED · resistor · button · potentiometer · buzzer · servo"}
+            "scope": f"Velxio agent · {len(catalog.BOARDS)} boards · {len(catalog.PARTS)} catalog components · board-aware libraries"}
 
 
 @router.get("/runs/records", dependencies=[Depends(authorize)])

@@ -96,6 +96,70 @@
       ]
     }
   },
+  "boardCoreHeaders": {
+    "default": [
+      "Arduino.h",
+      "math.h",
+      "stdint.h",
+      "string.h",
+      "stdlib.h",
+      "stdio.h"
+    ],
+    "arduino": [
+      "avr/pgmspace.h",
+      "avr/interrupt.h",
+      "avr/io.h",
+      "avr/wdt.h",
+      "util/delay.h",
+      "Servo.h",
+      "Wire.h",
+      "SPI.h",
+      "EEPROM.h",
+      "SoftwareSerial.h",
+      "HID.h"
+    ],
+    "esp32": [
+      "WiFi.h",
+      "WebServer.h",
+      "HTTPClient.h",
+      "WiFiClient.h",
+      "WiFiServer.h",
+      "WiFiUdp.h",
+      "WiFiType.h",
+      "esp_wifi.h",
+      "BluetoothSerial.h",
+      "BLEDevice.h",
+      "BLEUtils.h",
+      "BLEServer.h",
+      "Preferences.h",
+      "FS.h",
+      "LittleFS.h",
+      "Update.h",
+      "ArduinoOTA.h",
+      "ESPmDNS.h",
+      "DNSServer.h",
+      "esp_system.h",
+      "esp_event.h",
+      "esp_netif.h",
+      "esp_err.h",
+      "esp_log.h",
+      "freertos/FreeRTOS.h",
+      "freertos/task.h",
+      "driver/gpio.h",
+      "driver/i2c.h",
+      "driver/spi_master.h",
+      "nvs_flash.h",
+      "esp_camera.h"
+    ],
+    "rp2040": [],
+    "stm32": [
+      "HardwareTimer.h"
+    ],
+    "python": []
+  },
+  "boardCoreHeadersByBoard": {
+    "pi-pico-w": ["WiFi.h", "WiFiClient.h", "HTTPClient.h"]
+  },
   "boards": {
     "arduino-uno": {
       "label": "Arduino Uno",
