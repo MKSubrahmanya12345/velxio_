@@ -249,26 +249,73 @@ def resolve_pin(pins: Iterable[str], name: Any) -> str | None:
 
 
 _BOARD_ALIASES = {
+    # NOTE: keep identical to BOARD_ALIASES in frontend/src/agent/catalog.ts.
+    # All keys are lowercase: lookup lowercases the input first.
     "uno": "arduino-uno",
+    "uno-r3": "arduino-uno",
+    "arduino-uno-r3": "arduino-uno",
+    "arduino uno": "arduino-uno",
     "nano": "arduino-nano",
+    "arduino nano": "arduino-nano",
     "mega": "arduino-mega",
+    "mega2560": "arduino-mega",
+    "mega-2560": "arduino-mega",
+    "arduino-mega-2560": "arduino-mega",
+    "arduino mega": "arduino-mega",
     "esp32dev": "esp32",
+    "esp32devkit": "esp32",
     "esp32-devkit": "esp32",
+    "esp32-devkit-v1": "esp32",
+    "esp32-wroom": "esp32",
+    "esp32-wroom-32": "esp32",
+    "lolin32": "wemos-lolin32-lite",
     "pico": "raspberry-pi-pico",
+    "pi-pico": "raspberry-pi-pico",
+    "rpipico": "raspberry-pi-pico",
     "rp2040": "raspberry-pi-pico",
     "picow": "pi-pico-w",
     "pico-w": "pi-pico-w",
+    "rpipicow": "pi-pico-w",
+    "raspberry-pi-pico-w": "pi-pico-w",
+    "nano-esp32": "arduino-nano-esp32",
+    "xiao-s3": "xiao-esp32-s3",
+    "esp32-s3-devkit": "esp32-s3",
+    "xiao-c3": "xiao-esp32-c3",
+    "esp32-c3-devkit": "esp32-c3",
+    "supermini": "aitewinrobot-esp32c3-supermini",
+    "bluepill": "stm32-bluepill",
+    "blackpill": "stm32-blackpill",
+    "attiny": "attiny85",
 }
 
 
 def normalize_board_kind(value: str | None) -> str | None:
-    """Canonical board id for a model/user spelling, or ``None`` if unknown."""
+    """Canonical board id for a model/user spelling, or ``None`` if unknown.
+
+    Mirrored by normalizeBoardKind in frontend/src/agent/catalog.ts — the
+    browser's agent schema accepts exactly what this accepts.
+    """
     if not value:
         return None
     raw = str(value).strip()
+    if not raw:
+        return None
     if raw in BOARDS:
         return raw
-    return _BOARD_ALIASES.get(raw.lower())
+    # Catalog ids are all lowercase, so a lowercase hit IS the canonical id.
+    # This makes `ESP32`, `Arduino-Uno`, `PI-PICO-W` … resolve like the model
+    # naturally writes them.
+    lowered = raw.lower()
+    if lowered in BOARDS:
+        return lowered
+    direct = _BOARD_ALIASES.get(lowered)
+    if direct:
+        return direct
+    # Underscore spellings (`arduino_uno`) map to the hyphenated catalog ids.
+    hyphenated = lowered.replace("_", "-")
+    if hyphenated in BOARDS:
+        return hyphenated
+    return _BOARD_ALIASES.get(hyphenated)
 
 
 def infer_board_kind(hint: str | None) -> str:
