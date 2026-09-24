@@ -97,6 +97,8 @@ export function loadConfig(env = process.env) {
     concurrency: Math.max(1, num(env.WIREGI_CONCURRENCY, 8)),
     rpm: Math.max(0, num(env.WIREGI_RPM, 0)),
     retries: Math.max(0, num(env.WIREGI_RETRIES, 4)),
+    rateLimitCooldownMs: Math.max(250, num(env.WIREGI_RATE_LIMIT_COOLDOWN_MS, 10000)),
+    reconcileContextChars: Math.max(4000, num(env.WIREGI_RECONCILE_CONTEXT_CHARS, 18000)),
   };
 
   cfg.webSearch = {

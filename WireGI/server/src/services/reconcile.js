@@ -21,6 +21,100 @@ import { withProviderSlot } from './queue.js';
 import { withTimeout } from './gate.js';
 
 const COUPLING_TIMEOUT_MS = 6000;
+const DEFAULT_RECONCILE_CONTEXT_CHARS = 18000;
+
+const clip = (value, limit) => {
+  const text = String(value ?? '');
+  return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1))}…` : text;
+};
+
+function compactValue(value, limit) {
+  if (value == null) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return clip(value, limit);
+  }
+  try {
+    return clip(JSON.stringify(value), limit);
+  } catch {
+    return '[unserialisable]';
+  }
+}
+
+function compactData(data, valueLimit) {
+  if (!data || typeof data !== 'object') return compactValue(data, valueLimit);
+  const entries = Object.entries(data);
+  const priority = ['bomRow', 'wiring', 'config', 'deps', 'interfaces', 'settings', 'checklist'];
+  const orderedKeys = [
+    ...priority.filter((key) => Object.prototype.hasOwnProperty.call(data, key)),
+    ...entries.map(([key]) => key).filter((key) => !priority.includes(key)),
+  ];
+  return Object.fromEntries(
+    orderedKeys
+      .slice(0, 8)
+      .map((key) => [clip(key, 80), compactValue(data[key], valueLimit)]),
+  );
+}
+
+function compactPart(part, mode) {
+  const idea = typeof part.idea === 'string' ? part.idea : part.idea?.summary || part.idea;
+  return {
+    name: clip(part.name, 180),
+    domain: clip(part.domain, 80),
+    ...(mode.idea ? { idea: compactValue(idea, mode.idea) } : {}),
+    gathered: (part.current?.gathered || [])
+      .slice(0, mode.gathered)
+      .map((g) => ({
+        field: clip(g?.field, 100),
+        value: compactValue(g?.value, mode.gatheredValue),
+        source: clip(g?.source, 180),
+      })),
+    data: compactData(part.current?.data || part.data, mode.data),
+    flaggedByResearch: (part.current?.understand?.conflicts || [])
+      .slice(0, mode.questions)
+      .map((q) => clip(q, mode.question)),
+    openQuestions: (part.openQuestions || []).slice(0, mode.questions).map((q) => clip(q, mode.question)),
+  };
+}
+
+/**
+ * Build a bounded integration bundle.
+ *
+ * A six-part run can easily produce more input than Groq's context/ITPM limit
+ * when every gathered field and multiline config is repeated verbatim. The
+ * reconciler needs the cross-part numbers, not every prose sentence, so compact
+ * each field before serialising and tighten it in stages. The returned text is
+ * always valid JSON unless an unusually huge part name exhausts the final hard
+ * cap (in which case the model still gets a clearly marked prefix).
+ */
+export function compactReconcileBundle(parts, maxChars = DEFAULT_RECONCILE_CONTEXT_CHARS) {
+  const max = Math.max(500, Number(maxChars) || DEFAULT_RECONCILE_CONTEXT_CHARS);
+  const modes = [
+    { idea: 360, gathered: 6, gatheredValue: 260, data: 700, questions: 4, question: 260 },
+    { idea: 220, gathered: 4, gatheredValue: 180, data: 460, questions: 3, question: 220 },
+    { idea: 120, gathered: 3, gatheredValue: 120, data: 280, questions: 2, question: 160 },
+    { idea: 0, gathered: 2, gatheredValue: 90, data: 180, questions: 1, question: 120 },
+  ];
+
+  let text = '';
+  let bundle = [];
+  for (const mode of modes) {
+    bundle = parts.map((part) => compactPart(part, mode));
+    text = JSON.stringify(bundle);
+    if (text.length <= max) {
+      return { text, bundle, chars: text.length, approxTokens: Math.ceil(text.length / 4), truncated: mode !== modes[0] };
+    }
+  }
+
+  // This last pass is mostly defensive. Keep every part represented rather
+  // than slicing the JSON halfway through a part and hiding later conflicts.
+  const perPart = Math.max(60, Math.floor(max / Math.max(1, parts.length * 3)));
+  bundle = parts.map((part) =>
+    compactPart(part, { idea: 0, gathered: 1, gatheredValue: perPart, data: perPart, questions: 1, question: perPart }),
+  );
+  text = JSON.stringify(bundle);
+  if (text.length > max) text = `${text.slice(0, Math.max(0, max - 24))}…[bundle clipped]`;
+  return { text, bundle, chars: text.length, approxTokens: Math.ceil(text.length / 4), truncated: true };
+}
 
 const SYS_RECONCILE = (profile) => `You are the integration lead on a build project. Parts were researched independently and in parallel; your job is to find where they CONTRADICT each other and make the project coherent.
 
@@ -86,7 +180,7 @@ function applyPatch(project, parts, patch) {
   return true;
 }
 
-export async function reconcileProject({ project, emit = () => {}, registry, jev, prefer }) {
+export async function reconcileProject({ project, emit = () => {}, registry, jev, prefer, contextChars }) {
   const startedAt = Date.now();
   const profile = getProfile(project.profileId);
   const parts = (project.state.parts || []).filter((p) => p.current?.data && p.status !== 'failed');
@@ -145,22 +239,33 @@ export async function reconcileProject({ project, emit = () => {}, registry, jev
     }
   }
 
-  // ── 2. One LLM pass over the compact bundle. ─────────────────────────────
-  const bundle = parts.map((p) => ({
-    name: p.name,
-    domain: p.domain,
-    idea: p.idea?.summary,
-    gathered: (p.current?.gathered || []).slice(0, 10),
-    data: p.current?.data,
-    flaggedByResearch: (p.current?.understand?.conflicts || []).slice(0, 4),
-    openQuestions: (p.openQuestions || []).slice(0, 4),
-  }));
-
-  const user = `PROJECT GOAL: ${project.goal}
-CONSTRAINTS: ${JSON.stringify(project.constraints || {})}
-
-PARTS AS RESEARCHED (${bundle.length}):
-${JSON.stringify(bundle, null, 2)}`;
+  // ── 2. One LLM pass over a bounded bundle. ───────────────────────────────
+  // The old pretty-printed bundle sent every multiline config and every
+  // gathered source verbatim. On a six-part run that exceeded Groq's 7k input
+  // token budget (HTTP 413) before the model could even start. Keep the goal,
+  // names and cross-part values, but put a hard character budget around the
+  // user message.
+  const maxContextChars = Math.max(
+    4000,
+    Number(contextChars) || Number(process.env.WIREGI_RECONCILE_CONTEXT_CHARS) || DEFAULT_RECONCILE_CONTEXT_CHARS,
+  );
+  const headerBudget = Math.max(400, Math.floor(maxContextChars * 0.3));
+  const constraints = clip(JSON.stringify(project.constraints || {}), Math.min(1800, Math.floor(headerBudget * 0.45)));
+  const prefix = `PROJECT GOAL: ${clip(project.goal, Math.min(1800, Math.floor(headerBudget * 0.45)))}\nCONSTRAINTS: ${constraints}\n\nPARTS AS RESEARCHED (${parts.length}):\n`;
+  const bundleBudget = Math.max(500, maxContextChars - prefix.length);
+  const compacted = compactReconcileBundle(parts, bundleBudget);
+  const user = `${prefix}${compacted.text}`;
+  emit({
+    type: 'reconcile',
+    stage: 'context',
+    chars: user.length,
+    approxTokens: Math.ceil(user.length / 4),
+    budgetChars: maxContextChars,
+    truncated: compacted.truncated,
+    message: `Integration context compacted to ${user.length} chars (~${Math.ceil(user.length / 4)} input tokens)${
+      compacted.truncated ? ' — tight budget' : ''
+    }`,
+  });
 
   const out = await withProviderSlot(() =>
     generateJSON({

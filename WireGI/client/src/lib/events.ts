@@ -10,7 +10,7 @@ export function levelOf(ev: FlowEntry): Level {
   if (ev.type === 'error') return 'error';
   if (ev.type === 'part' && ev.stage === 'failed') return 'error';
   if (ev.type === 'part' && ev.stage === 'done') return ev.humanCheckpoint ? 'warn' : 'success';
-  if (ev.type === 'provider') return ev.stage === 'fail' || ev.stage === 'round' ? 'warn' : 'debug';
+  if (ev.type === 'provider') return ev.stage === 'fail' || ev.stage === 'round' || ev.stage === 'cooldown' ? 'warn' : 'debug';
   if (ev.type === 'phase') return ev.stage === 'end' ? 'info' : 'debug';
   return 'info';
 }

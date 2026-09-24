@@ -126,7 +126,12 @@ export async function researchPart({ part, project, registry, emit, indexer, pre
 
   // ── Prior knowledge: exact topic first, then the part itself (which is what
   // makes cross-project reuse possible — "Battery electronics" hits again).
-  const cached = indexer?.find(topic) || indexer?.find(`${part.name} ${part.domain}`);
+  // Both lookups carry the part identity. Without it, the repeated project goal
+  // can make an old sensor-module entry look like research for a power supply.
+  const indexOptions = { partName: part.name, profileId: profile.id };
+  const cached =
+    indexer?.find(topic, 2, indexOptions) ||
+    indexer?.find(`${part.name} ${part.domain}`, 2, indexOptions);
   let web = null;
   let prior = null;
 
@@ -162,6 +167,7 @@ export async function researchPart({ part, project, registry, emit, indexer, pre
           .slice(0, 1200),
         sources: web.items.map((i) => i.url),
         partName: part.name,
+        domain: part.domain,
         profileId: profile.id,
       });
     } else if (web?.error) {
@@ -242,6 +248,8 @@ ${context}${guidance ? `\n\n${guidance}` : ''}`;
       summary: indexSummary(out) || undefined,
       sources: web?.items?.map((i) => i.url) || prior?.sources || [],
       fields: (out.gathered || []).map((g) => g.field),
+      partName: part.name,
+      domain: part.domain,
       profileId: profile.id,
     });
   } catch {

@@ -17,6 +17,29 @@
 import { buildRequest, extractText, isPermanentFailure, providerDefinition, resolveProviderId } from './catalog.js';
 
 export const DEFAULT_MAX_ROUNDS = 10;
+const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 10000;
+const MAX_RATE_LIMIT_COOLDOWN_MS = 120000;
+const rateLimitCooldowns = new WeakMap();
+
+function cooldownMap(registry) {
+  if (!registry || typeof registry !== 'object') return new Map();
+  let map = rateLimitCooldowns.get(registry);
+  if (!map) {
+    map = new Map();
+    rateLimitCooldowns.set(registry, map);
+  }
+  return map;
+}
+
+function retryAfterMilliseconds(value) {
+  if (value == null || value === '') return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(String(value));
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function keyLabel(entry) {
   const def = providerDefinition(entry.provider);
@@ -26,12 +49,16 @@ export function keyLabel(entry) {
 
 // A provider call failure that keeps its HTTP status (when there was one) so the
 // runner can tell a rejected credential from a rate limit or an outage.
-export function providerError(message, { status = null, provider = '', keyId = '', permanent = false, cause = null } = {}) {
+export function providerError(
+  message,
+  { status = null, provider = '', keyId = '', permanent = false, cause = null, retryAfter = null } = {},
+) {
   const error = new Error(message);
   error.status = status;
   error.provider = provider;
   error.keyId = keyId;
   error.permanent = permanent;
+  if (retryAfter != null) error.retryAfter = retryAfter;
   if (cause) error.cause = cause;
   return error;
 }
@@ -79,9 +106,16 @@ export async function callProviderEntry(entry, { system, user, temperature = 0.2
 
   if (!res.ok) {
     const detail = (await res.text().catch(() => '')).slice(0, 300).replace(/\s+/g, ' ').trim();
+    const retryAfter = res.headers?.get?.('retry-after') ?? null;
     throw providerError(
       `${keyLabel(entry)} returned HTTP ${res.status}${detail ? `: ${detail}` : '.'}`,
-      { status: res.status, provider: entry.provider, keyId: entry.id, permanent: isPermanentFailure(entry, res.status, detail) }
+      {
+        status: res.status,
+        provider: entry.provider,
+        keyId: entry.id,
+        permanent: isPermanentFailure(entry, res.status, detail),
+        retryAfter,
+      },
     );
   }
 
@@ -139,9 +173,20 @@ function permanentRejections(registry) {
  * @param {string}  [opts.operation] label used in logs/events
  * @param {Function}[opts.emit]      progress callback for streamed turns/UI
  * @param {string}  [opts.prefer]    start the loop at this key id or provider id
+ * @param {boolean}[opts.cooldownOnRateLimit]  temporarily skip 429'd keys
+ * @param {number} [opts.rateLimitCooldownMs]  fallback 429 cooldown
  * @returns {Promise<{result:*, used:object, entry:object, attempts:Array, rounds:number, switched:boolean}>}
  */
-export async function runWithFailover({ registry, work, operation = 'generate', emit = () => {}, fetchImpl, prefer } = {}) {
+export async function runWithFailover({
+  registry,
+  work,
+  operation = 'generate',
+  emit = () => {},
+  fetchImpl,
+  prefer,
+  cooldownOnRateLimit = false,
+  rateLimitCooldownMs = DEFAULT_RATE_LIMIT_COOLDOWN_MS,
+} = {}) {
   if (typeof work !== 'function') throw new Error('runWithFailover needs a work function.');
   const settings = registry?.failover || { enabled: true, maxRounds: DEFAULT_MAX_ROUNDS, retryRejected: false };
   const enabled = registry?.candidates?.() || [];
@@ -161,14 +206,43 @@ export async function runWithFailover({ registry, work, operation = 'generate', 
   const rejected = permanentRejections(registry);
   const skipped = new Set([...rejected.keys()]);
   const attempts = [];
+  const cooldowns = cooldownOnRateLimit && settings.enabled !== false ? cooldownMap(registry) : null;
+  const cooldownDefault = Math.min(
+    MAX_RATE_LIMIT_COOLDOWN_MS,
+    Math.max(250, Number(rateLimitCooldownMs) || DEFAULT_RATE_LIMIT_COOLDOWN_MS),
+  );
   let attempt = 0;
   let rounds = 0;
 
-  for (let round = 1; round <= maxRounds; round++) {
+  for (let round = 1; round <= maxRounds; round += 1) {
     rounds = round;
+    let attemptedThisRound = 0;
+    let earliestCooldown = Infinity;
     for (const entry of order) {
       if (skipped.has(entry.id)) continue;
+      const cooledUntil = cooldowns?.get(entry.id) || 0;
+      if (cooledUntil > Date.now()) {
+        earliestCooldown = Math.min(earliestCooldown, cooledUntil);
+        emit({
+          type: 'cooldown',
+          operation,
+          round,
+          maxRounds,
+          candidates: order.length,
+          keyId: entry.id,
+          provider: entry.provider,
+          providerLabel: providerDefinition(entry.provider).label,
+          note: entry.note,
+          model: entry.model,
+          label: keyLabel(entry),
+          cooldownMs: cooledUntil - Date.now(),
+          message: `↷ ${keyLabel(entry)} is cooling down after HTTP 429`,
+        });
+        continue;
+      }
+      if (cooldowns) cooldowns.delete(entry.id);
       attempt += 1;
+      attemptedThisRound += 1;
       const started = Date.now();
       const info = {
         round,
@@ -187,6 +261,7 @@ export async function runWithFailover({ registry, work, operation = 'generate', 
       try {
         const result = await work(entry, info);
         const latencyMs = Date.now() - started;
+        cooldowns?.delete(entry.id);
         await registry.recordSuccess?.(entry.id, { latencyMs, operation });
         emit({ type: 'success', ...info, latencyMs, switched: attempt > 1 });
         return { result, used: info, entry, attempts, rounds: round, switched: attempt > 1, latencyMs };
@@ -198,12 +273,36 @@ export async function runWithFailover({ registry, work, operation = 'generate', 
         const permanent = Boolean(error?.permanent) && settings.retryRejected !== true;
         if (permanent) skipped.add(entry.id);
         const latencyMs = Date.now() - started;
+        let cooldownMs = null;
+        if (cooldowns && status === 429) {
+          const hinted = retryAfterMilliseconds(error?.retryAfter);
+          cooldownMs = Math.min(MAX_RATE_LIMIT_COOLDOWN_MS, Math.max(hinted ?? cooldownDefault, 250));
+          cooldowns.set(entry.id, Date.now() + cooldownMs);
+        }
         await registry.recordFailure?.(entry.id, { status, message, permanent, round, attempt, operation });
-        attempts.push({ ...info, status, message, permanent, latencyMs, at: new Date().toISOString() });
-        emit({ type: 'error', ...info, status, message, permanent, latencyMs });
+        attempts.push({ ...info, status, message, permanent, cooldownMs, latencyMs, at: new Date().toISOString() });
+        emit({ type: 'error', ...info, status, message, permanent, cooldownMs, latencyMs });
       }
     }
     if (order.every(entry => skipped.has(entry.id))) break;
+    // If every remaining key is temporarily rate-limited, waiting is more
+    // useful than burning the round budget without making a request. Do not
+    // count this sleep as a round; a single-provider WireGI setup can recover
+    // instead of failing immediately after its first 429.
+    if (attemptedThisRound === 0 && earliestCooldown < Infinity) {
+      const waitMs = Math.max(1, earliestCooldown - Date.now());
+      emit({
+        type: 'cooldown',
+        operation,
+        round,
+        maxRounds,
+        cooldownMs: waitMs,
+        message: `All providers are rate-limited — retrying in ${waitMs}ms.`,
+      });
+      await sleep(waitMs);
+      round -= 1;
+      continue;
+    }
     if (round < maxRounds) {
       emit({
         type: 'round',
