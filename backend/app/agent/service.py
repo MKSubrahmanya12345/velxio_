@@ -552,9 +552,9 @@ CURSOR-LIKE WORKFLOW (Velxio = Cursor for hardware):
   * When requested to build or edit a circuit, drop all required components ONTO THE CANVAS IMMEDIATELY (x>=470, 120px apart).
   * Return your proposed patch with targeted component upserts and wire connections.
   * Keep plans short and actionable so the user visually sees the components appear and get wired up step-by-step.
-  * You support ALL boards: arduino-uno, arduino-nano, arduino-mega, attiny85, esp32, esp32-s3, esp32-c3,
-    raspberry-pi-pico, pi-pico-w, stm32-bluepill, stm32-blackpill, raspberry-pi-3/4/5 etc. Pick the right board for the task.
-  * You support ALL 157 Velxio components: LEDs, resistors, buttons, potentiometers, servos, motors, displays
+  * You support ALL boards in the generated board table ({board_count} total). Pick the exact boardKind for the task.
+    ESP32-family boards are real build targets: WiFi.h, WebServer.h, BLEDevice.h and the ESP32 core APIs are supported there; Pico W also exposes WiFi.h.
+  * You support ALL {part_count} Velxio components: LEDs, resistors, buttons, potentiometers, servos, motors, displays
     (SSD1306, ILI9341, LCD1602), sensors (DHT22, HC-SR04, MPU6050, BMP280, etc.), logic gates, transistors, etc.
 
 HOW YOU WORK (this is a loop, not a single shot):
@@ -602,9 +602,9 @@ PROJECT EDITING (Cursor-style):
   * For changes return targeted upserts/removals. Preserve existing ids, positions, unrelated parts, wires, files.
   * An upsert contains the WHOLE named item. Remove a part's wires explicitly too.
   * The current project is the source of truth; the conversation is context.
-  * For a new project add board at x=100,y=140 and place parts at x>=470, 120px apart.
-  * Use one .ino plus optional flat .h/.cpp/.c files with Arduino core APIs, readable comments and Serial diagnostics.
-  * Include libraries only from the allowed header list.
+  * For a new project, ALWAYS include `patch.board` with `{{id, boardKind, x, y}}`; do not rely on the default board. Add it at x=100,y=140 and place parts at x>=470, 120px apart.
+  * Use one .ino/.cpp/.c entry file plus optional flat headers with Arduino core APIs, readable comments and Serial diagnostics; Raspberry Pi Python boards use a .py entry file.
+  * Include libraries only from the board-aware allowed header list. Query `board_pinout` for the board's native headers; `WiFi.h` is allowed on ESP32-family boards, not on AVR.
   * Like Cursor's Tab autocomplete, suggest complete, working code.
   * Like Cursor's Composer, you can edit multiple files at once.
 
@@ -647,10 +647,14 @@ def system_prompt() -> str:
         pwm = board.get('pwm', [])
         analog = board.get('analog', [])
         vcc = board.get('vcc', '?')
-        board_lines.append(f"  {board_id}: {board.get('label', board_id)} - {len(pins)} pins, PWM {pwm}, ADC {analog}, {vcc}V")
+        board_lines.append(
+            f"  {board_id}: {board.get('label', board_id)} - family={board.get('family', '?')}, "
+            f"FQBN={board.get('fqbn') or 'python:python:pi'}, {len(pins)} pins, "
+            f"PWM {pwm}, ADC {analog}, {vcc}V")
     boards_text = "\n".join(board_lines)
     index = "\n".join(index_lines)
     return SYSTEM_TEMPLATE.format(
+        board_count=len(catalog.BOARDS),
         tool_calls=4,
         tool_rounds=settings.AGENT_MAX_TOOL_ROUNDS,
         draft_rounds=settings.AGENT_MAX_DRAFT_ROUNDS,
@@ -1741,7 +1745,7 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                     upsert_files=proposal.patch.upsert_files,
                     remove_files=proposal.patch.remove_files,
                 )
-                comp_candidate = apply_patch(request.project, comp_patch)
+                comp_candidate = apply_patch(request.project, comp_patch, board_hint=request.prompt)
                 yield event({
                     "type": "canvas_update",
                     "project": comp_candidate.model_dump(),
@@ -1754,7 +1758,8 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         yield event({"type": "stage", "stage": "validating",
                      "message": "Checking parts, pins, wiring, firmware coherence and source files"})
         try:
-            candidate = apply_patch(request.project, proposal.patch, proposal.expectations)
+            candidate = apply_patch(
+                request.project, proposal.patch, proposal.expectations, board_hint=request.prompt)
 
             # Step 2: Route wires on canvas
             if proposal.patch and (proposal.patch.upsert_wires or proposal.patch.remove_wires):
@@ -1765,7 +1770,11 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                 })
                 await asyncio.sleep(0.10)
 
-            yield event({"type": "stage", "stage": "compiling", "message": "Compiling for Arduino Uno"})
+            yield event({
+                "type": "stage",
+                "stage": "compiling",
+                "message": f"Compiling for {candidate.board.boardKind if candidate.board else 'the selected board'}",
+            })
             record.attempts = attempt + 1
             t0 = time.monotonic()
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PARTS, isPlaceable } from './catalog';
+import { PARTS, catalog, isPlaceable } from './catalog';
 
 const id = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/);
 /**
@@ -22,7 +22,25 @@ const coord = z.number().finite().min(-5000).max(5000);
 const endpoint = z.object({ componentId: id, pinName: z.string().min(1).max(16) }).strict();
 export const projectSchema = z
   .object({
-    board: z.object({ id, boardKind: z.string().min(1).max(64).optional(), x: coord, y: coord }).strict().nullable(),
+    board: z
+      .object({
+        id,
+        // Kept optional for old saved responses; workspace conversion fills it
+        // from a catalog board id when a model omits it. When present it must
+        // be one of the same 30 boards the backend validates.
+        boardKind: z
+          .string()
+          .min(1)
+          .max(64)
+          .optional()
+          .refine((value) => !value || Object.prototype.hasOwnProperty.call(catalog.boards, value), {
+            message: 'Unsupported board kind',
+          }),
+        x: coord,
+        y: coord,
+      })
+      .strict()
+      .nullable(),
     components: z
       .array(
         z

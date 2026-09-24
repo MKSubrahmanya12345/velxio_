@@ -31,6 +31,8 @@ const catalog = JSON.parse(
 ) as {
   version: number;
   boards: Record<string, Record<string, unknown>>;
+  boardCoreHeaders?: Record<string, string[]>;
+  boardCoreHeadersByBoard?: Record<string, string[]>;
   severity: Record<string, string>;
   runtimeProperties: { global: string[]; parts: Record<string, string[]> };
   parts: Record<string, CatalogEntry>;
@@ -157,6 +159,15 @@ describe('agent catalog — generated from the live sources', () => {
     expect(board.pwm).toEqual([3, 5, 6, 9, 10, 11]);
     expect(board.analog).toEqual(['A0', 'A1', 'A2', 'A3', 'A4', 'A5']);
     expect(board.i2c).toEqual({ SDA: 'A4', SCL: 'A5' });
+  });
+
+  it('binds the browser catalog to all 30 boards and scopes WiFi.h', () => {
+    expect(Object.keys(catalog.boards)).toHaveLength(30);
+    expect(catalog.boards['esp32']?.family).toBe('esp32');
+    expect(catalog.boards['raspberry-pi-3']?.family).toBe('python');
+    expect(catalog.boardCoreHeaders?.esp32).toContain('WiFi.h');
+    expect(catalog.boardCoreHeaders?.default).not.toContain('WiFi.h');
+    expect(catalog.boardCoreHeadersByBoard?.['pi-pico-w']).toContain('WiFi.h');
   });
 
   it('only allows headers a part in this catalog needs (or the AVR core)', () => {

@@ -75,11 +75,34 @@ async def test_unknown_pin_names_are_rejected():
 
 
 @pytest.mark.asyncio
-async def test_non_uno_boards_report_as_not_checkable():
+async def test_supported_non_uno_boards_are_checked_with_their_own_pinout():
     report = await validate_circuit({"board_fqbn": "rp2040:rp2040:rpipico",
                                      "components": [], "connections": []})
-    assert report["valid"] is None
-    assert "not in the agent-checkable" in report["message"]
+    assert report["valid"] is True, report
+    assert report["board"] == "raspberry-pi-pico"
+    assert "GP0" in report["pins"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_board_is_rejected_instead_of_becoming_uno():
+    report = await validate_circuit({"boardKind": "invented-board", "components": [], "connections": []})
+    assert report["valid"] is False
+    assert any("Unsupported board kind" in error for error in report["errors"])
+
+
+@pytest.mark.asyncio
+async def test_esp32_wifi_header_is_allowed_but_avr_is_not():
+    esp32 = await validate_circuit(
+        {"boardKind": "esp32", "components": [], "connections": []},
+        files=[{"name": "sketch.ino", "content": "#include <WiFi.h>\nvoid setup(){} void loop(){}"}],
+    )
+    assert esp32["valid"] is True, esp32
+    avr = await validate_circuit(
+        {"board_fqbn": "arduino:avr:uno", "components": [], "connections": []},
+        files=[{"name": "sketch.ino", "content": "#include <WiFi.h>\nvoid setup(){} void loop(){}"}],
+    )
+    assert avr["valid"] is False
+    assert any("WiFi.h" in error for error in avr["errors"])
 
 
 @pytest.mark.asyncio

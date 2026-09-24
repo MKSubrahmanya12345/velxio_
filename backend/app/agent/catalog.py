@@ -27,6 +27,14 @@ VERSION: int = int(_CATALOG.get("version", 1))
 BOARDS: dict[str, dict] = _CATALOG["boards"]
 DEFAULT_BOARD = "arduino-uno"
 SEVERITY: dict[str, str] = _CATALOG.get("severity", {})
+BOARD_CORE_HEADERS: dict[str, tuple[str, ...]] = {
+    str(family): tuple(str(header) for header in headers)
+    for family, headers in (_CATALOG.get("boardCoreHeaders") or {}).items()
+}
+BOARD_CORE_HEADERS_BY_BOARD: dict[str, tuple[str, ...]] = {
+    str(board_id): tuple(str(header) for header in headers)
+    for board_id, headers in (_CATALOG.get("boardCoreHeadersByBoard") or {}).items()
+}
 
 # Capabilities that mean "any board pin will do".
 ANY_CAPABILITY = "any"
@@ -111,6 +119,8 @@ class PartSpec:
             "properties": list(self.properties),
             "defaults": self.defaults,
             "simulated": self.sim,
+            "libraries": list(self.libraries),
+            **({"description": self.description} if self.description else {}),
             **({"notes": self.notes} if self.notes else {}),
         }
 
@@ -238,8 +248,82 @@ def resolve_pin(pins: Iterable[str], name: Any) -> str | None:
     return None
 
 
+_BOARD_ALIASES = {
+    "uno": "arduino-uno",
+    "nano": "arduino-nano",
+    "mega": "arduino-mega",
+    "esp32dev": "esp32",
+    "esp32-devkit": "esp32",
+    "pico": "raspberry-pi-pico",
+    "rp2040": "raspberry-pi-pico",
+    "picow": "pi-pico-w",
+    "pico-w": "pi-pico-w",
+}
+
+
+def normalize_board_kind(value: str | None) -> str | None:
+    """Canonical board id for a model/user spelling, or ``None`` if unknown."""
+    if not value:
+        return None
+    raw = str(value).strip()
+    if raw in BOARDS:
+        return raw
+    return _BOARD_ALIASES.get(raw.lower())
+
+
+def infer_board_kind(hint: str | None) -> str:
+    """Choose a safe board when a first draft omitted ``patch.board``.
+
+    The model is still instructed to return an explicit board. This bounded
+    fallback prevents an empty workspace from getting stuck on the generic
+    "build needs a board" error and handles the unambiguous ESP32/WiFi case the
+    UI exposes. Explicit board patches always win over this inference.
+    """
+    text = str(hint or "").lower()
+    # Most specific variants first: all of these are real catalog ids.
+    for token, board_id in (
+        ("aitewinrobot-esp32c3-supermini", "aitewinrobot-esp32c3-supermini"),
+        ("xiao esp32 c3", "xiao-esp32-c3"),
+        ("xiao-esp32-c3", "xiao-esp32-c3"),
+        ("esp32-c3", "esp32-c3"),
+        ("xiao esp32 s3", "xiao-esp32-s3"),
+        ("xiao-esp32-s3", "xiao-esp32-s3"),
+        ("esp32-s3", "esp32-s3"),
+        ("arduino nano esp32", "arduino-nano-esp32"),
+        ("nano esp32", "arduino-nano-esp32"),
+        ("esp32-cam", "esp32-cam"),
+        ("wemos lolin32", "wemos-lolin32-lite"),
+        ("esp32 devkit c", "esp32-devkit-c-v4"),
+        ("esp32", "esp32"),
+        ("pico w", "pi-pico-w"),
+        ("pico-w", "pi-pico-w"),
+        ("raspberry pi pico w", "pi-pico-w"),
+        ("raspberry pi pico", "raspberry-pi-pico"),
+        ("rp2040", "raspberry-pi-pico"),
+        ("stm32 blue pill", "stm32-bluepill"),
+        ("bluepill", "stm32-bluepill"),
+        ("stm32 black pill", "stm32-blackpill"),
+        ("blackpill", "stm32-blackpill"),
+        ("stm32", "stm32-bluepill"),
+        ("arduino mega", "arduino-mega"),
+        ("arduino nano", "arduino-nano"),
+        ("attiny", "attiny85"),
+    ):
+        if token in text:
+            return board_id
+    # WiFi/BLE sketches are unambiguously ESP32 in the Arduino catalog. Do not
+    # make a generic web request select an ESP32; only board-native headers/APIs
+    # trigger this fallback.
+    if any(token in text for token in ("wifi.h", "esp_wifi", "bluetoothserial", "bledevice", "wifi.begin", "network.wlan")):
+        return "esp32"
+    return DEFAULT_BOARD
+
+
 def board(board_id: str = DEFAULT_BOARD) -> dict[str, Any]:
-    return BOARDS.get(board_id, BOARDS[DEFAULT_BOARD])
+    canonical = normalize_board_kind(board_id)
+    if canonical is None:
+        raise ValueError(f"Unsupported board kind {board_id!r}")
+    return BOARDS[canonical]
 
 
 def board_pins(board_id: str = DEFAULT_BOARD) -> list[str]:
@@ -247,7 +331,43 @@ def board_pins(board_id: str = DEFAULT_BOARD) -> list[str]:
 
 
 def board_capabilities(board_id: str = DEFAULT_BOARD) -> dict[str, Any]:
-    return {k: v for k, v in board(board_id).items() if k not in {"pins", "label"}}
+    return {k: v for k, v in board(board_id).items() if k not in {"pins", "label", "family"}}
+
+
+def board_family(board_id: str = DEFAULT_BOARD) -> str:
+    """Return the generated core family for a supported board."""
+    return str(board(board_id).get("family", "arduino"))
+
+
+def board_core_headers(board_id: str = DEFAULT_BOARD) -> frozenset[str]:
+    """Core headers exposed by this board's Arduino/IDF platform.
+
+    Component-driver headers are added separately by :func:`allowed_headers`.
+    Keeping board APIs here is what makes WiFi.h legal on ESP32/Pico W while
+    still rejecting it on an Uno before a compiler round is wasted.
+    """
+    canonical = normalize_board_kind(board_id)
+    if canonical is None:
+        raise ValueError(f"Unsupported board kind {board_id!r}")
+    family = board_family(canonical)
+    # Linux/Python targets do not expose the Arduino C/C++ core at all. Every
+    # other generated family gets the portable Arduino subset plus its native
+    # headers.
+    headers = set() if family == "python" else set(BOARD_CORE_HEADERS.get("default", ()))
+    headers.update(BOARD_CORE_HEADERS.get(family, ()))
+    headers.update(BOARD_CORE_HEADERS_BY_BOARD.get(canonical, ()))
+    # An ATtiny/Arduino-family board uses the common Arduino core set. The
+    # explicit fallback also keeps catalogs generated before `family` was added
+    # readable during a rolling deploy.
+    if family in {"arduino", "attiny"}:
+        headers.update(BOARD_CORE_HEADERS.get("arduino", ()))
+    return frozenset(headers)
+
+
+def board_power_pins(board_id: str = DEFAULT_BOARD) -> frozenset[str]:
+    """Board pins that are distribution rails rather than GPIO signals."""
+    supply, ground = power_rails(board_id)
+    return frozenset({*supply, *ground, "AREF", "IOREF"})
 
 
 @lru_cache(maxsize=8)
@@ -282,11 +402,22 @@ def satisfies(board_pin: str, capability: str, board_id: str = DEFAULT_BOARD) ->
     return capability in _capability_map(board_id).get(str(board_pin), frozenset())
 
 
+def _pin_sort_key(pin: Any) -> tuple[int, int | str]:
+    """Stable human ordering for numeric, GPIO and MCU port names."""
+    text = str(pin)
+    if text.isdigit():
+        return (0, int(text))
+    match = re.fullmatch(r"([A-Za-z]+)(\d+)", text)
+    if match:
+        return (1, f"{match.group(1).upper()}-{int(match.group(2)):04d}")
+    return (2, text.upper())
+
+
 def capability_label(capability: str, board_id: str = DEFAULT_BOARD) -> str:
     """Human wording for a capability failure ('PWM', 'analog-capable', …)."""
     spec = board(board_id)
     if capability == "pwm":
-        return "a PWM pin, one of " + ", ".join(str(p) for p in sorted(spec.get("pwm", []), key=int))
+        return "a PWM pin, one of " + ", ".join(str(p) for p in sorted(spec.get("pwm", []), key=_pin_sort_key))
     if capability == "analog":
         return "an analog-capable pin, one of " + ", ".join(str(p) for p in spec.get("analog", []))
     if capability.startswith("i2c-"):
@@ -304,10 +435,17 @@ def capability_label(capability: str, board_id: str = DEFAULT_BOARD) -> str:
 
 
 def power_rails(board_id: str = DEFAULT_BOARD) -> tuple[set[str], set[str]]:
-    """(supply, ground) board pin names that count as rails."""
+    """(supply, ground) board pin names that count as rails.
+
+    The original Uno-only table omitted Pico's 3V3/VSYS/VBUS labels. The
+    catalog is now board-aware so the same electrical checks work on all 30
+    supported targets.
+    """
     spec = board(board_id)
-    supply = {str(p) for p in ("5V", "3.3V", "VIN") if str(p) in [str(x) for x in spec.get("pins", [])]}
-    ground = {str(p) for p in spec.get("pins", []) if str(p).startswith("GND")}
+    pin_names = {str(pin) for pin in spec.get("pins", [])}
+    supply_candidates = {"5V", "3.3V", "3V3", "VIN", "VBUS", "VSYS", "VCC"}
+    supply = pin_names & supply_candidates
+    ground = {pin for pin in pin_names if pin.upper().startswith("GND")}
     return supply, ground
 
 
@@ -397,26 +535,28 @@ def iter_parts() -> Iterator[PartSpec]:
     return iter(PARTS.values())
 
 
-def allowed_headers() -> frozenset[str]:
-    """Headers a sketch may include, from the catalog's per-part drivers.
+def allowed_headers(board_id: str = DEFAULT_BOARD) -> frozenset[str]:
+    """Headers a sketch may include for ``board_id``.
 
-    `CORE_HEADERS` ship inside every arduino:avr install (the AVR core and its
-    bundled libraries), so they need no library manager. Everything else is a
-    library a catalog part needs — the build still has to find it, and a missing
-    library fails loudly at compile time rather than being hidden here.
+    The common Arduino core and catalog part drivers are always available to
+    the validator. Board-native APIs are added from the generated board-family
+    table; this is deliberately board-scoped so an AVR project cannot sneak in
+    ``WiFi.h`` and only discover the mistake after compilation.
     """
-    headers = set(CORE_HEADERS)
+    family = board_family(board_id)
+    headers = set() if family == "python" else set(CORE_HEADERS)
+    headers.update(board_core_headers(board_id))
     for spec in PARTS.values():
         headers.update(spec.libraries)
     return frozenset(headers)
 
 
-CORE_HEADERS = frozenset({
+# Headers common to every supported source target. Family-specific core
+# headers (including AVR's avr/*.h) come from the generated board table above;
+# component driver headers are added from the 157-part catalog below.
+CORE_HEADERS = frozenset(BOARD_CORE_HEADERS.get("default", (
     "Arduino.h", "math.h", "stdint.h", "string.h", "stdlib.h", "stdio.h",
-    "avr/pgmspace.h", "avr/interrupt.h", "avr/io.h", "avr/wdt.h", "util/delay.h",
-    # Bundled with the AVR core (no library installation required):
-    "Servo.h", "Wire.h", "SPI.h", "EEPROM.h", "SoftwareSerial.h", "HID.h",
-})
+)))
 
 
 def simulator_coverage() -> dict[str, int]:

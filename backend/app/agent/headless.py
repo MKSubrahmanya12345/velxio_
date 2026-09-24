@@ -102,7 +102,8 @@ def _rail_side(project: Project, component_id: str, pin_name: str) -> bool | Non
     if spec is None:
         return None
     nets = Netlist(project)
-    supply, ground = catalog.power_rails()
+    board_kind = project.board.boardKind if project.board else catalog.DEFAULT_BOARD
+    supply, ground = catalog.power_rails(board_kind)
     board_id = project.board.id
     for a, b in spec.trace_pairs or ():
         if pin_name not in (a, b):

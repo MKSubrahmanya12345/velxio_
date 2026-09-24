@@ -38,20 +38,22 @@ class Board(StrictModel):
 
     @model_validator(mode="after")
     def valid_board_kind(self):
-        # Allow any board from catalog + legacy aliases
+        # A model often uses the board kind as the instance id (`id: "esp32"`)
+        # and omits boardKind. Infer that only when the field was genuinely
+        # omitted; an explicit boardKind remains authoritative.
+        omitted_kind = "boardKind" not in self.model_fields_set
+        normalized = catalog.normalize_board_kind(self.boardKind)
+        if normalized:
+            self.boardKind = normalized
+        if omitted_kind:
+            from_id = catalog.normalize_board_kind(self.id)
+            if from_id:
+                self.boardKind = from_id
         if self.boardKind not in catalog.BOARDS:
-            # Try to resolve common aliases
-            aliases = {
-                "uno": "arduino-uno",
-                "nano": "arduino-nano",
-                "mega": "arduino-mega",
-                "esp32": "esp32",
-                "pico": "raspberry-pi-pico",
-                "rp2040": "raspberry-pi-pico",
-            }
-            if self.boardKind.lower() in aliases:
-                self.boardKind = aliases[self.boardKind.lower()]
-            # Still allow unknown for forward compat, just don't validate pins strictly
+            supported = ", ".join(catalog.BOARDS)
+            raise ValueError(
+                f"Unsupported board kind {self.boardKind!r}. Choose one of the {len(catalog.BOARDS)} "
+                f"Velxio boards: {supported}")
         return self
 
 
@@ -119,7 +121,7 @@ class Connection(StrictModel):
 
 
 class Source(StrictModel):
-    name: str = Field(pattern=r"^[A-Za-z0-9_-]+\.(ino|h|cpp|c)$", max_length=80)
+    name: str = Field(pattern=r"^[A-Za-z0-9_-]+\.(ino|h|cpp|c|py)$", max_length=80)
     content: str = Field(max_length=40000)
 
 
@@ -149,10 +151,11 @@ class Project(StrictModel):
                 raise ValueError(f"Duplicate {key}")
         pins_by_id = {p.id: p.pins for p in self.components}
         if self.board:
-            # Cursor-like: support all 30 boards
-            bkind = getattr(self.board, 'boardKind', catalog.DEFAULT_BOARD) or catalog.DEFAULT_BOARD
+            # Cursor-like: support all 30 boards, but never reinterpret a bad
+            # kind as Uno just to make the graph appear valid.
+            bkind = self.board.boardKind
             if bkind not in catalog.BOARDS:
-                bkind = catalog.DEFAULT_BOARD
+                raise ValueError(f"Unsupported board kind {bkind!r}")
             pins_by_id[self.board.id] = catalog.board_pins(bkind)
         by_id = {p.id: p for p in self.components}
         for wire in self.wires:
@@ -424,29 +427,68 @@ def merge_items(old, new, removed, key):
     return list(result.values())
 
 
-def apply_patch(project: Project, patch: Patch, expectations=None) -> Project:
+def apply_patch(project: Project, patch: Patch, expectations=None, board_hint: str | None = None) -> Project:
     if patch.board and project.board and patch.board.id != project.board.id:
-        # Allow board kind change but preserve ID for continuity (Cursor-like)
-        patch.board.id = project.board.id
+        # Board kind may change in place, but changing the instance id would
+        # orphan every existing wire and file group. Reject it instead of
+        # silently rewriting the model's patch.
+        raise ValueError(
+            f"Cannot change the existing board ID from {project.board.id!r} to "
+            f"{patch.board.id!r}; change boardKind in place.")
+
+    components = merge_items(project.components, patch.upsert_components, patch.remove_components, "id")
+    wires = merge_items(project.wires, patch.upsert_wires, patch.remove_wires, "id")
+    files = merge_items(project.files, patch.upsert_files, patch.remove_files, "name")
+    board = patch.board or project.board
+
+    # A blank canvas has no board id for the model to copy. The model is told to
+    # return `patch.board`, but a first draft that only supplies files/wires used
+    # to die with the opaque "A build needs a board" error. Create the same
+    # deterministic first-board shape as the browser (kind as id), using the
+    # request/source only for an unambiguous family hint. An explicit board
+    # always wins, including an explicitly selected Uno with no WiFi support.
+    if board is None and (components or wires or files):
+        hint = "\n".join([board_hint or "", *(file.content for file in files)])
+        board_kind = catalog.infer_board_kind(hint)
+        board_id = board_kind
+        for endpoint in [end for wire in wires for end in (wire.start, wire.end)]:
+            if catalog.normalize_board_kind(endpoint.componentId) == board_kind:
+                board_id = endpoint.componentId
+                break
+        board = Board(id=board_id, boardKind=board_kind)
+
     candidate = Project(
-        board=patch.board or project.board,
-        components=merge_items(project.components, patch.upsert_components, patch.remove_components, "id"),
-        wires=merge_items(project.wires, patch.upsert_wires, patch.remove_wires, "id"),
-        files=merge_items(project.files, patch.upsert_files, patch.remove_files, "name"),
+        board=board,
+        components=components,
+        wires=wires,
+        files=files,
     )
-    # Velxio = Cursor: support any board, any file type
+    # Velxio = Cursor: support every catalog board and source type. A project
+    # has one entry file (.ino/.cpp/.c for Arduino-style targets or .py for
+    # Linux/Pi) and may add flat headers beside it.
+    if not candidate.board:
+        raise ValueError(
+            "A build needs at least one board. Return patch.board with a boardKind "
+            f"from the {len(catalog.BOARDS)} supported Velxio boards.")
+    sketch_entries = [f for f in candidate.files if f.name.endswith((".ino", ".py"))]
+    native_entries = [f for f in candidate.files if f.name.endswith((".cpp", ".c"))]
+    # A sketch may have helper .cpp/.c files; when there is no sketch entry,
+    # the native C/C++ file itself is the entry (Pi/Linux projects use this).
+    entry_files = sketch_entries if sketch_entries else native_entries
+    if len(entry_files) != 1:
+        raise ValueError(
+            "A build needs exactly one entry source file (.ino, .py, .cpp, or .c); "
+            f"received {[f.name for f in entry_files] or 'none'}.")
     has_code = any(f.name.endswith((".ino", ".py", ".cpp", ".c", ".h")) for f in candidate.files)
-    if not candidate.board or not has_code:
-        # Allow empty initially but require board + code for validation
-        if not candidate.board:
-            raise ValueError("A build needs at least one board (any of 30 supported)")
-        if not has_code:
-            raise ValueError("A build needs at least one source file (.ino, .py, .cpp)")
-    # Restrict user includes to the core and explicit workspace headers. This
-    # is a capability check, NOT a substitute for an OS compiler sandbox.
+    if not has_code:
+        raise ValueError("A build needs at least one source file (.ino, .py, .cpp)")
+    # Restrict user includes to the common core, this board's native core APIs,
+    # catalog part drivers, or explicit workspace headers. This is a capability
+    # check, NOT a substitute for an OS compiler sandbox.
     filenames = {f.name for f in candidate.files}
+    board_kind = candidate.board.boardKind if candidate.board else catalog.DEFAULT_BOARD
     for source in candidate.files:
-        validate_includes(source.content, filenames)
+        validate_includes(source.content, filenames, board_id=board_kind)
     # Coherence/short analysis runs BEFORE validate_electrical so a shorted LED
     # is reported as shorted, not as the vaguer downstream "needs a series
     # resistor". The compiler cannot see that the sketch drives pin 7 while the
@@ -459,12 +501,17 @@ def apply_patch(project: Project, patch: Patch, expectations=None) -> Project:
     return candidate
 
 
-def allowed_include_headers() -> set[str]:
-    """Core headers + every header a catalog part's driver needs."""
-    return set(catalog.allowed_headers())
+def allowed_include_headers(board_id: str = catalog.DEFAULT_BOARD) -> set[str]:
+    """Common/catalog headers plus the native headers for ``board_id``."""
+    return set(catalog.allowed_headers(board_id))
 
 
-def validate_includes(content: str, filenames: set[str], allowed: set[str] | None = None):
+def validate_includes(
+    content: str,
+    filenames: set[str],
+    allowed: set[str] | None = None,
+    board_id: str = catalog.DEFAULT_BOARD,
+):
     # C preprocessing splices lines before replacing comments. Keep literals
     # intact, so a URL or comment-looking text inside a string isn't stripped.
     logical = re.sub(r"\\\r?\n", "", content)
@@ -481,11 +528,12 @@ def validate_includes(content: str, filenames: set[str], allowed: set[str] | Non
         # Core headers and the drivers the catalog's parts need (Servo.h,
         # Wire.h, LiquidCrystal_I2C.h, DHT.h …) are allowed; a header no catalog
         # part uses is rejected before it wastes a compile round.
-        permitted = allowed if allowed is not None else allowed_include_headers()
+        permitted = allowed if allowed is not None else allowed_include_headers(board_id)
         if header not in permitted and not (local and local in filenames):
+            label = catalog.board(board_id).get("label", board_id)
             raise ValueError(
-                f"Unsupported include: {header}. Allowed headers are the Arduino core plus "
-                f"the drivers of parts in the catalog; use one of: "
+                f"Unsupported include: {header} for {label}. Allowed headers are the common Arduino "
+                f"core, this board's native APIs, and the drivers of parts in the catalog; use one of: "
                 + ", ".join(sorted(permitted)))
 
 

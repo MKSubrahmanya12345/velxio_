@@ -167,6 +167,21 @@ const expandPinPatterns = (id, spec, pins) => {
 
 const simulated = simulatedPartIds();
 const parts = {};
+
+/** Board-family labels let the validator add the right core headers without
+ * making ESP32-only APIs legal on AVR boards. The FQBN is the single source of
+ * truth for this classification, so adding a board cannot silently fall back
+ * to the Uno header set. */
+const boardFamily = (board, key = '') => {
+  const fqbn = String(board.fqbn ?? '').toLowerCase();
+  if (String(key).startsWith('raspberry-pi-') && key !== 'raspberry-pi-pico') return 'python';
+  if (fqbn.startsWith('esp32:')) return 'esp32';
+  if (fqbn.startsWith('rp2040:')) return 'rp2040';
+  if (fqbn.startsWith('python:')) return 'python';
+  if (fqbn.startsWith('stmicroelectronics:')) return 'stm32';
+  if (fqbn.startsWith('attinycore:') || fqbn.startsWith('attiny:')) return 'attiny';
+  return 'arduino';
+};
 const unknownRules = Object.keys(rules.parts).filter(
   (id) => !metadata.components.some((c) => c.id === id),
 );
@@ -254,8 +269,10 @@ const catalog = {
   boards: Object.fromEntries(
     Object.entries(rules.boards)
       .filter(([key]) => !key.startsWith('$'))
-      .map(([key, board]) => [key, board]),
+      .map(([key, board]) => [key, { ...board, family: boardFamily(board, key) }]),
   ),
+  boardCoreHeaders: rules.boardCoreHeaders ?? {},
+  boardCoreHeadersByBoard: rules.boardCoreHeadersByBoard ?? {},
   severity: rules.severity,
   // Properties the canvas owns at runtime (render/live state). Never sent to the
   // model, and a patch may not set them — the browser and the backend must agree

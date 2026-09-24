@@ -130,37 +130,34 @@ def list_files(project: Project, args: dict) -> dict:
 def board_pinout(project: Project, args: dict) -> dict:
     from app.agent import catalog as cat
     # Support all boards - check args for board name, or use project board if available
-    board_id = str(args.get("board", ""))[:40] if args.get("board") else None
-    if not board_id:
-        # Try to infer from project
-        if project.board:
-            # Project board id is like 'uno', map to arduino-uno if needed
-            bid = project.board.id
-            if bid in cat.BOARDS:
-                board_id = bid
-            elif "uno" in bid.lower():
-                board_id = "arduino-uno"
-            else:
-                board_id = cat.DEFAULT_BOARD
-        else:
-            board_id = cat.DEFAULT_BOARD
-    
-    if board_id not in cat.BOARDS:
-        # Fuzzy match
-        board_id = cat.DEFAULT_BOARD
-    
+    requested_board = str(args.get("board", ""))[:40] if args.get("board") else None
+    if requested_board:
+        board_id = cat.normalize_board_kind(requested_board)
+        if not board_id:
+            return {"ok": False,
+                    "error": f"Unsupported board {requested_board!r}; choose one of the "
+                             f"{len(cat.BOARDS)} supported boards.",
+                    "all_boards": list(cat.BOARDS)}
+    else:
+        # The instance id is not the board kind on imported/renamed projects;
+        # the backend project model carries the authoritative kind.
+        board_id = project.board.boardKind if project.board else cat.DEFAULT_BOARD
+
     board = cat.board(board_id)
     pins = board.get("pins", [])
-    caps = {k: v for k, v in board.items() if k not in {"pins", "label", "fqbn", "kind"}}
-    
+    caps = {k: v for k, v in board.items() if k not in {"pins", "label", "fqbn", "kind", "family"}}
+
     return {"ok": True, "board": board_id, "label": board.get("label", board_id),
             "pins": pins, "capabilities": caps,
+            "core_headers": sorted(cat.board_core_headers(board_id)),
+            "allowed_headers": sorted(cat.allowed_headers(board_id)),
             "all_boards": list(cat.BOARDS.keys()),
-            "note": f"Pin names must be used verbatim in wires. Board {board_id} has {len(pins)} pins. Use board param to query other boards: {list(cat.BOARDS.keys())[:5]}..."}
+            "note": f"Pin names must be used verbatim in wires. Board {board_id} has {len(pins)} pins. Use board param to query any of the {len(cat.BOARDS)} supported boards."}
 
 
 def component_info(project: Project, args: dict) -> dict:
-    kind = str(args.get("component", ""))[:60]
+    raw_kind = str(args.get("component", ""))[:60]
+    kind = catalog.resolve_id(raw_kind) or raw_kind
     spec = catalog.get(kind)
     if spec is None:
         return {"ok": False, "error": f"Unknown component kind {kind!r}.",
@@ -173,7 +170,9 @@ def component_info(project: Project, args: dict) -> dict:
     # pins=i2c). A flat list handed the model names the validator then rejected,
     # which is a repair loop it cannot win.
     info = {"ok": True, "component": kind, "pins": list(spec.pins_for(properties)),
-            "properties": sorted(spec.properties)}
+            "properties": sorted(spec.properties),
+            "libraries": list(spec.libraries),
+            "notes": spec.notes or spec.description or ""}
     if raw_properties:
         info["for_properties"] = properties
     if spec.pin_variants:
@@ -337,6 +336,10 @@ async def draft_simulate(project: Project, args: dict) -> dict:
     candidate, failure = _candidate(project, args)
     if failure is not None:
         return failure
+    if candidate.board and catalog.board_family(candidate.board.boardKind) not in {"arduino", "attiny"}:
+        return {"ok": False, "stage": "simulate",
+                "error": f"Headless AVR simulation is not available for {candidate.board.boardKind}; "
+                         "use draft_compile for this board and verify behaviour in its board simulator."}
     interactions = args.get("interactions")
     interactions = [i for i in interactions if isinstance(i, dict)][:8] if isinstance(interactions, list) else []
     observe_ms = int(args.get("observe_ms", 2000) or 2000)
@@ -607,10 +610,13 @@ _ROUND_LIMIT = 20000  # max chars of one tool-round results message
 _MEMO_MAX = 512
 
 
-def _run_handler(handler, project: Project, call: ToolCall) -> Any:
-    """Invoke one tool handler; never raises (failures become {'ok': False})."""
+async def _run_handler(handler, project: Project, call: ToolCall) -> Any:
+    """Invoke sync or async handlers; never raise through the tool round."""
     try:
-        return handler(project, dict(call.args))
+        result = handler(project, dict(call.args))
+        if inspect.isawaitable(result):
+            result = await result
+        return result
     except Exception:  # noqa: BLE001 — a tool failure must not kill the run
         logger.exception("tool %s failed", call.tool)
         return {"ok": False, "error": "Tool execution failed on the server."}

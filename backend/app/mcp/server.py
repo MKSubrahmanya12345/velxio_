@@ -19,7 +19,7 @@ Exposes the following tools to MCP-compatible agents (e.g. Claude):
                           press a button / turn a pot while it runs.
   - list_components       Browse/search the 157-part component catalog
   - component_info        Pins, editable properties and wiring notes for one part
-  - board_pinout          Uno pin names and PWM/ADC/I2C/SPI capabilities
+  - board_pinout          Board-aware pins, capabilities and allowed headers for all 30 boards
 
 Transport:
   - stdio  — run `python mcp_server.py` for Claude Desktop / CLI agents
@@ -68,6 +68,20 @@ mcp = FastMCP(
 
 _arduino = ArduinoCLIService()
 
+
+def _board_target(value: str) -> tuple[str, dict[str, Any]] | None:
+    """Resolve a board kind or catalog FQBN without a Uno fallback."""
+    raw = str(value or "").strip()
+    kind = catalog.normalize_board_kind(raw)
+    if kind:
+        return kind, catalog.BOARDS[kind]
+    lowered = raw.lower()
+    for candidate, spec in catalog.BOARDS.items():
+        if str(spec.get("fqbn") or "").lower() == lowered:
+            return candidate, spec
+    return None
+
+
 # ---------------------------------------------------------------------------
 # compile_project
 # ---------------------------------------------------------------------------
@@ -108,8 +122,25 @@ async def compile_project(
                 "stderr": "",
             }
 
+    target = _board_target(board)
+    if target is None:
+        return {
+            "success": False,
+            "error": f"Unsupported board {board!r}; choose one of the {len(catalog.BOARDS)} Velxio boards.",
+            "stdout": "",
+            "stderr": "",
+        }
+    board_kind, spec = target
+    if spec.get("family") == "python":
+        return {
+            "success": False,
+            "error": f"{board_kind} is a Python/Linux target; compile a .py entry file through the Pi runtime, not arduino-cli.",
+            "stdout": "",
+            "stderr": "",
+        }
+    target_fqbn = str(spec.get("fqbn") or "")
     try:
-        result = await _arduino.compile(files, board)
+        result = await _arduino.compile(files, target_fqbn)
         return result
     except Exception as exc:  # pragma: no cover
         return {
@@ -276,6 +307,8 @@ async def component_info(
         "pin_variants": [v for v in spec.pin_variants],
         "properties": list(spec.properties),
         "defaults": spec.defaults,
+        "libraries": list(spec.libraries),
+        "description": spec.description,
         "placeable": spec.placeable,
         "simulated": spec.sim,
         "power_pins": spec.power,
@@ -290,26 +323,36 @@ async def component_info(
 
 
 @mcp.tool()
-async def board_pinout() -> dict[str, Any]:
-    """
-    The Arduino Uno pin names and capabilities used by every other tool.
-
-    Pin names must be used verbatim in component pins and connections.
-    digital/PWM pins are '0'..'13' and 'A0'..'A5' may also be used as digital.
-    """
-    board = catalog.board(catalog.DEFAULT_BOARD)
+async def board_pinout(
+    board: Annotated[
+        str,
+        "Supported board kind or catalog FQBN; defaults to arduino-uno.",
+    ] = catalog.DEFAULT_BOARD,
+) -> dict[str, Any]:
+    """Return the selected supported board's pins, capabilities and headers."""
+    target = _board_target(board)
+    if target is None:
+        return {"ok": False,
+                "error": f"Unsupported board {board!r}; choose one of the {len(catalog.BOARDS)} supported boards.",
+                "all_boards": list(catalog.BOARDS)}
+    board_kind, spec = target
     return {
-        "board": catalog.DEFAULT_BOARD,
-        "fqbn": board.get("fqbn"),
-        "pins": board.get("pins"),
-        "pwm": board.get("pwm"),
-        "analog": board.get("analog"),
-        "i2c": board.get("i2c"),
-        "spi": board.get("spi"),
-        "uart": board.get("uart"),
-        "vcc": board.get("vcc"),
-        "max_pin_ma": board.get("max_pin_ma"),
-        "note": "GPIO 0/1 are the hardware serial pins; A4/A5 are also SDA/SCL.",
+        "ok": True,
+        "board": board_kind,
+        "fqbn": spec.get("fqbn"),
+        "family": spec.get("family"),
+        "pins": spec.get("pins"),
+        "pwm": spec.get("pwm"),
+        "analog": spec.get("analog"),
+        "i2c": spec.get("i2c"),
+        "spi": spec.get("spi"),
+        "uart": spec.get("uart"),
+        "vcc": spec.get("vcc"),
+        "max_pin_ma": spec.get("max_pin_ma"),
+        "core_headers": sorted(catalog.board_core_headers(board_kind)),
+        "allowed_headers": sorted(catalog.allowed_headers(board_kind)),
+        "all_boards": list(catalog.BOARDS),
+        "note": "Pin names must be used verbatim in component pins and connections.",
     }
 
 
@@ -543,8 +586,8 @@ async def validate_circuit(
     circuit: Annotated[
         dict[str, Any],
         "Velxio circuit object (as from create_circuit / import_wokwi_json). "
-        "Only the Arduino Uno catalog (led, resistor, pushbutton, potentiometer, "
-        "buzzer) is fully checkable.",
+        "All 30 generated Velxio boards and the full component catalog are checked "
+        "when their board/component ids are present.",
     ],
     files: Annotated[
         list[dict[str, str]] | None,

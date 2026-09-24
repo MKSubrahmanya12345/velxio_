@@ -1,16 +1,22 @@
 import { useSimulatorStore } from '../store/useSimulatorStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useProjectStore } from '../store/useProjectStore';
-import { PARTS, editableProperties, isPlaceable, runtimePropertiesFor, catalog } from './catalog';
+import {
+  PARTS,
+  editableProperties,
+  isPlaceable,
+  normalizeBoardKind,
+  runtimePropertiesFor,
+  catalog,
+} from './catalog';
 import { projectSchema, stableStringify, type AgentProject } from './protocol';
 
 export type Snapshot = Parameters<
   ReturnType<typeof useSimulatorStore.getState>['loadProjectState']
 >[0];
 
-// Velxio = Cursor: support ALL boards and ALL components
-const SUPPORTED_BOARDS = new Set(Object.keys(catalog.boards));
-
+// Velxio = Cursor: support ALL boards and ALL components; the generated
+// catalog below is the single source of truth for that scope.
 export function scopeKey(): string {
   const project = useProjectStore.getState();
   return project.currentProject?.id ?? project.currentExampleId ?? window.location.pathname;
@@ -85,23 +91,16 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
     );
   }
   
-  // Allow any board kind that exists in catalog or is known Arduino/ESP32/STM32/Pico/Pi
-  const allowedKinds = new Set([
-    'arduino-uno', 'arduino-nano', 'arduino-mega', 'attiny85',
-    'raspberry-pi-pico', 'pi-pico-w',
-    'esp32', 'esp32-devkit-c-v4', 'esp32-cam', 'wemos-lolin32-lite',
-    'esp32-s3', 'xiao-esp32-s3', 'arduino-nano-esp32',
-    'esp32-c3', 'xiao-esp32-c3', 'aitewinrobot-esp32c3-supermini',
-    'stm32-bluepill', 'stm32-blackpill', 'stm32-bluepill-f103cb', 'stm32-blackpill-f401',
-    'stm32-f4-discovery', 'stm32-olimex-h405', 'stm32-netduino-plus2', 'stm32-netduino2',
-    'raspberry-pi-zero', 'raspberry-pi-1', 'raspberry-pi-2', 'raspberry-pi-3', 'raspberry-pi-4', 'raspberry-pi-5',
-    ...Object.keys(catalog.boards)
-  ]);
-  
+  // The generated catalog is the one board allowlist shared with the backend.
+  // Do not silently turn an imported/overlay board into an Uno: that loses its
+  // pinout and is exactly how ESP32 sketches reached the wrong build target.
+  const allowedKinds = new Set(Object.keys(catalog.boards));
   for (const b of snapshot.boards) {
     if (!allowedKinds.has(b.boardKind)) {
-      // Allow unknown but warn - don't block
-      console.warn(`Board kind ${b.boardKind} not in allowlist but permitting`);
+      throw new Error(
+        `The agent supports ${allowedKinds.size} Velxio boards, but not ${b.boardKind}. ` +
+        'Choose a board from the supported board picker; your project is unchanged.',
+      );
     }
   }
   
@@ -112,16 +111,9 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
   
   for (const part of snapshot.components) {
     if (!PARTS[part.metadataId]) {
-      // Instead of blocking, allow unknown parts to pass through if they exist in runtime
-      // This supports all Velxio components including custom ones
-      const isVelxioComponent = part.metadataId.startsWith('velxio-') || 
-                                document.querySelector(part.metadataId) ||
-                                true; // permissive for Velxio = Cursor
-      if (!isVelxioComponent) {
-        throw new Error(
-          `The agent does not know the component ${part.metadataId}. Your project is unchanged.`,
-        );
-      }
+      throw new Error(
+        `The agent does not know the component ${part.metadataId}. Your project is unchanged.`,
+      );
     }
     if (PARTS[part.metadataId] && !isPlaceable(part.metadataId)) {
       throw new Error(
@@ -151,7 +143,7 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
   if (!data.success) {
     console.error(data.error);
     throw new Error(
-      'This workspace exceeds the agent\'s supported limits or contains unsupported source filenames. Use up to 40 parts, 100 wires, and flat Arduino C/C++ files.',
+      'This workspace exceeds the agent\'s supported limits or contains unsupported source filenames. Use up to 40 parts, 100 wires, and flat Arduino C/C++ or supported-board Python files.',
     );
   }
   return data.data;
@@ -159,13 +151,22 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
 
 export function fromAgentProject(project: AgentProject, previous: Snapshot): Snapshot {
   if (!project.board) throw new Error('The agent returned no board.');
-  const b = project.board;
+  const rawBoard = project.board;
+  const explicitKind = rawBoard.boardKind ? normalizeBoardKind(rawBoard.boardKind) : undefined;
+  if (rawBoard.boardKind && !explicitKind) {
+    throw new Error(`The agent returned unsupported board ${rawBoard.boardKind}.`);
+  }
+  const inferredKind = explicitKind ?? normalizeBoardKind(rawBoard.id) ?? 'arduino-uno';
+  if (!Object.prototype.hasOwnProperty.call(catalog.boards, inferredKind)) {
+    throw new Error(`The agent returned unsupported board ${inferredKind}.`);
+  }
+  const b = { ...rawBoard, boardKind: inferredKind };
   const oldBoard = previous.boards[0];
-  // Cursor-like: allow board replacement if user has only one board and agent suggests different
-  // For safety, preserve old board id if exists, but allow kind change via name mapping
+  // An agent patch may change the selected board kind, but it must not replace
+  // the instance id that existing wires and file groups reference. The backend
+  // applies the same continuity rule.
   if (oldBoard && b.id !== oldBoard.id && previous.boards.length === 1) {
-    // Allow ID change for new projects, but keep warning
-    console.log(`Agent changing board id from ${oldBoard.id} to ${b.id} - allowed in Cursor mode`);
+    throw new Error('The agent cannot replace the existing board instance; change boardKind in place.');
   }
   const group = oldBoard?.activeFileGroupId ?? `group-${b.id}`;
   const ids = new Set([b.id]);
@@ -272,7 +273,8 @@ export function describeChanges(before: Snapshot, after: Snapshot): string[] {
   for (const file of files(before))
     if (!files(after).some((f) => f.name === file.name)) changes.push(`− ${file.name}`);
   if (!before.boards.length && after.boards.length) {
-    const boardName = after.boards[0]?.boardKind || 'board';
+    const boardKind = after.boards[0]?.boardKind;
+    const boardName = (boardKind && catalog.boards[boardKind]?.label) || boardKind || 'board';
     changes.unshift(`+ ${boardName}`);
   }
   // Also report board changes
