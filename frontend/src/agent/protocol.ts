@@ -199,6 +199,41 @@ export const eventSchema = z.discriminatedUnion('type', [
   }),
   // Forge project memory (JEV-governed). Informational only: the run continues
   // with or without it, so unknown/absent fields must never break the stream.
+  // Liveness while a provider call is in flight. Provider calls are streamed,
+  // but a long prefill emits no tokens, so the server ticks every few seconds
+  // to prove the run is alive and to report how much has streamed in.
+  z.object({
+    type: z.literal('heartbeat'),
+    stage: z.string().optional(),
+    attempt: z.number().optional(),
+    waited: z.number().optional(),
+    chars: z.number().optional(),
+    provider: z.string().optional(),
+    message: z.string(),
+    ...runId,
+  }),
+  // A provider call failed transiently (429/5xx/stall) and is being retried.
+  // Surfaced so a rate-limited provider is visible instead of looking hung.
+  z.object({
+    type: z.literal('retry'),
+    provider: z.string().optional(),
+    attempt: z.number().optional(),
+    of: z.number().optional(),
+    message: z.string(),
+    ...runId,
+  }),
+  // Per-call latency trace emitted just before the terminal event.
+  z.object({
+    type: z.literal('latency_summary'),
+    calls: z.array(z.record(z.unknown())).optional(),
+    total_ms: z.number().optional(),
+    provider_ms: z.number().optional(),
+    compile_ms: z.number().optional(),
+    prompt_tokens: z.number().optional(),
+    completion_tokens: z.number().optional(),
+    cache_hit_pct: z.number().nullable().optional(),
+    ...runId,
+  }),
   z.object({
     type: z.literal('forge'),
     status: z.enum(['ok', 'unavailable']),
@@ -214,6 +249,29 @@ export const eventSchema = z.discriminatedUnion('type', [
 ]);
 export type AgentEvent = z.infer<typeof eventSchema>;
 
+/**
+ * One NDJSON line -> event, or null when it is not a shape this client knows.
+ *
+ * `eventSchema.parse()` THROWS on an unrecognised discriminator, which would
+ * abort the entire stream mid-run — a server that grows a new event type (or
+ * simply emits `latency_summary`) would take the final result down with it.
+ * Unknown events are ignored instead; a garbled line never ends the stream.
+ */
+function parseEvent(line: string): AgentEvent | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const parsed = eventSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  if (typeof raw === 'object' && raw !== null && 'type' in raw) {
+    console.debug('[agent] ignoring unknown event type', (raw as { type: unknown }).type);
+  }
+  return null;
+}
+
 /** Handles split UTF-8 characters, split lines, and a final line without LF. */
 export async function* readEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<AgentEvent> {
   const reader = body.getReader();
@@ -226,9 +284,16 @@ export async function* readEvents(body: ReadableStream<Uint8Array>): AsyncGenera
       if (buffer.length > 2000000) throw new Error('Agent response exceeded the size limit.');
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
-      for (const line of lines) if (line.trim()) yield eventSchema.parse(JSON.parse(line));
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = parseEvent(line);
+        if (event) yield event;
+      }
       if (done) {
-        if (buffer.trim()) yield eventSchema.parse(JSON.parse(buffer));
+        if (buffer.trim()) {
+          const event = parseEvent(buffer);
+          if (event) yield event;
+        }
         return;
       }
     }
