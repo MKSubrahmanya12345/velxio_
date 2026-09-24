@@ -30,6 +30,8 @@ export function bridgeProviderEvents(emit) {
       candidates: ev.candidates,
       round: ev.round,
       maxRounds: ev.maxRounds,
+      cooldownMs: ev.cooldownMs,
+      retryAfter: ev.retryAfter,
     };
     switch (ev.type) {
       case 'attempt':
@@ -66,6 +68,14 @@ export function bridgeProviderEvents(emit) {
           stage: 'round',
           message: ev.message,
         });
+      case 'cooldown':
+        return emit({
+          ...base,
+          type: 'provider',
+          stage: 'cooldown',
+          cooldownMs: ev.cooldownMs,
+          message: ev.message,
+        });
       default:
         return emit(ev);
     }
@@ -93,6 +103,11 @@ export async function generateWithMeta({
     emit: bridged,
     prefer,
     operation,
+    // A provider 429 is usually a shared account/model quota, not a bad
+    // request. Cool that key for the next few calls so four parallel parts do
+    // not all rediscover the same limit before falling over to Bedrock.
+    cooldownOnRateLimit: true,
+    rateLimitCooldownMs: Number(process.env.WIREGI_RATE_LIMIT_COOLDOWN_MS) || 10000,
     work: (entry) => callProviderEntry(entry, { system, user, temperature, maxTokens }),
   });
   return {
@@ -105,7 +120,10 @@ export async function generateWithMeta({
       latencyMs: res.latencyMs ?? Date.now() - started,
       switched: Boolean(res.switched),
       rounds: res.rounds,
-      attempts: res.attempts?.length || 0,
+      // Forge keeps failed attempts in `res.attempts` and the successful one
+      // in `res.used`. Report the number the caller actually saw, so a first
+      // try is 1 (not 0) and a Groq → Bedrock failover is 2.
+      attempts: res.used?.attempt ?? (res.attempts?.length || 0) + 1,
       operation,
     },
     attempts: res.attempts || [],

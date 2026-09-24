@@ -119,8 +119,7 @@ export function levelFor(ev) {
       if (ev.stage === 'reject') return 'warn';
       return ev.stage === 'approve' ? 'success' : 'info';
     case 'provider':
-      if (ev.stage === 'fail') return 'warn';
-      if (ev.stage === 'round') return 'warn';
+      if (ev.stage === 'fail' || ev.stage === 'round' || ev.stage === 'cooldown') return 'warn';
       return 'debug';
     case 'retry':
       return 'warn';
@@ -204,7 +203,7 @@ export function toLogEntry(ev, limit = 900) {
   for (const k of ['error', 'decision', 'answers', 'provider', 'model', 'keyId', 'status', 'latencyMs',
                    'attempt', 'attempts', 'retries', 'waitMs', 'ok', 'failed', 'total', 'ms', 'profile',
                    'conflicts', 'blocking', 'patchesApplied', 'reason', 'tier', 'note', 'action', 'engine',
-                   'count', 'results', 'name', 'coherent', 'summary', 'text']) {
+                   'count', 'results', 'name', 'coherent', 'summary', 'text', 'cooldownMs', 'approxTokens', 'budgetChars', 'chars', 'truncated']) {
     if (ev[k] === undefined) continue;
     const v = ev[k];
     if (typeof v === 'object' && v !== null) {

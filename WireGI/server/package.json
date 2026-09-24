@@ -8,7 +8,8 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "mock": "node ../scripts/mock-llm.mjs",
-    "check": "node ../scripts/check-imports.cjs"
+    "check": "node ../scripts/check-imports.cjs",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

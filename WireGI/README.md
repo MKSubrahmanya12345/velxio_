@@ -253,6 +253,8 @@ Knobs (all optional; put them in `forge/server/.env` if you want them there):
 | `WIREGI_RETRIES` | `4` | extra attempts after the first |
 | `WIREGI_RETRY_BASE_MS` | `500` | first backoff delay (ms) |
 | `WIREGI_RETRY_MAX_MS` | `30000` | backoff ceiling (ms) |
+| `WIREGI_RATE_LIMIT_COOLDOWN_MS` | `10000` | how long a provider key is cooled after HTTP 429 |
+| `WIREGI_RECONCILE_CONTEXT_CHARS` | `18000` | max reconciliation user-message size; keeps large bundles below provider input limits |
 | `WIREGI_JEV_TIMEOUT_MS` | `8000` | live Jev deadline; slower than this, the decision is routed to the LLM |
 
 ## Gotchas (read before editing)

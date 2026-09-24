@@ -179,6 +179,8 @@ export const TRACKED_KEYS = [
   { key: 'WIREGI_CONCURRENCY', group: 'throughput' },
   { key: 'WIREGI_RPM', group: 'throughput' },
   { key: 'WIREGI_RETRIES', group: 'throughput' },
+  { key: 'WIREGI_RATE_LIMIT_COOLDOWN_MS', group: 'throughput' },
+  { key: 'WIREGI_RECONCILE_CONTEXT_CHARS', group: 'throughput' },
   { key: 'WIREGI_INHERIT_FORGE_ENV', group: 'env' },
 ];
 

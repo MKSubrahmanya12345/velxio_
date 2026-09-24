@@ -316,7 +316,7 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
 
     // light → cheaper model; full → full model.
     const prefer = triage.action === 'light' ? triage.prefer : undefined;
-    const result = await researchPart({
+    let result = await researchPart({
       part,
       project,
       registry,
@@ -356,6 +356,11 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
           }\nResolve every gap yourself now: pick concrete, sensible values and commit to them. Do NOT list these as open questions again, do NOT defer to the human, and set "humanCheckpoint" false unless the build is truly blocked on a preference, a bench fact, or a safety sign-off only the builder can provide.`,
         });
         applyResearch(part, project, repair);
+        // The repair pass is the result the builder will actually see. Keep it
+        // as the return value and use part.meta below; otherwise the trace says
+        // "researched via Groq" even though the final answer came from the
+        // Bedrock failover after Groq hit a 429.
+        result = repair;
       } catch (err) {
         // A failed repair pass must not kill the part — the sufficiency
         // re-check below decides what happens next.
@@ -381,6 +386,7 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
     } else {
       sufDone({ sufficient: true });
     }
+    const totalMs = part.startedAt ? Date.now() - new Date(part.startedAt).getTime() : ms;
     tracer.emit({
       type: 'part',
       stage: 'done',
@@ -389,11 +395,14 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
       data: result.data,
       humanCheckpoint: part.humanCheckpoint,
       needsInput: part.needsInput,
-      ms,
-      provider: result.meta?.provider,
-      model: result.meta?.model,
-      attempts: part.attempts,
-      message: `${part.name} researched via ${result.meta?.provider || '?'}/${result.meta?.model || '?'} in ${ms}ms${
+      ms: totalMs,
+      researchMs: ms,
+      provider: part.meta?.provider || result.meta?.provider,
+      model: part.meta?.model || result.meta?.model,
+      attempts: part.meta?.attempts ?? part.attempts,
+      message: `${part.name} researched via ${part.meta?.provider || result.meta?.provider || '?'}/${
+        part.meta?.model || result.meta?.model || '?'
+      } in ${totalMs}ms${
         part.humanCheckpoint ? ' — needs your eyes' : part.needsInput ? ' — needs your answer' : ''
       }`,
     });
@@ -673,7 +682,13 @@ export function createAgent({ cfg, registry, jev, store, indexer }) {
   async function safeReconcile(project, tracer) {
     const done = tracer.phase('reconcile');
     try {
-      const entry = await reconcileProject({ project, emit: tracer.emit, registry, jev });
+      const entry = await reconcileProject({
+        project,
+        emit: tracer.emit,
+        registry,
+        jev,
+        contextChars: cfg?.throughput?.reconcileContextChars,
+      });
       done({ coherent: entry?.coherent, conflicts: entry?.conflicts?.length || 0 });
       await safeCheckpoint(project);
       return entry;

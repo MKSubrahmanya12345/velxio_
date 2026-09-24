@@ -51,6 +51,7 @@ export interface ErrorAttempt {
   keyId?: string;
   status?: number | null;
   latencyMs?: number | null;
+  cooldownMs?: number | null;
   message?: string;
 }
 
@@ -195,6 +196,12 @@ export interface FlowEntry {
   keyId?: string;
   status?: any;
   latencyMs?: number;
+  cooldownMs?: number;
+  researchMs?: number;
+  approxTokens?: number;
+  budgetChars?: number;
+  chars?: number;
+  truncated?: boolean;
   permanent?: boolean;
   providerMessage?: string;
   ok?: number;
