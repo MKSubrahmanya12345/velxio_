@@ -1,47 +1,37 @@
-import type { ReactNode } from 'react';
-import StepCard from './StepCard';
+const STEPS: Array<[string, string]> = [
+  ['Classify', 'A typed decision (D1) classifies the build and picks a domain profile.'],
+  ['Decompose', 'Split into parts — frame, motors, ESC, FC, props, RX, battery, firmware — with a breadth/risk plan (D2/D3).'],
+  ['Research', 'Each part runs research → gather → understand → data, in parallel, through a Jev triage gate.'],
+  ['Gate', 'Jev picks the cheapest safe path per part: reuse a sibling, skip to you, cheap model, or full pass.'],
+  ['Integrate', 'One cross-part pass hunts contradictions (battery ↔ ESC ↔ props) and patches them.'],
+  ['Verify', 'D4–D6 decides complete / needs-human / stop. Your “approve” is the top rung of the ladder.'],
+];
 
+/**
+ * The explainer.
+ *
+ * Previously six bordered cards using the *part card* styling — which made each
+ * step look clickable when none of them were — plus a second "Debugging"
+ * section and a paragraph about .env precedence. About 250 words of
+ * documentation, rendered in full at the bottom of the landing page on every
+ * visit and again in the Help tab.
+ *
+ * It is now a six-line list. The debugging/env detail lives in the Debug tab,
+ * which is the only place it is ever actionable.
+ */
 export default function HowItWorks() {
-  const steps: Array<[string, ReactNode]> = [
-    ['1 · Classify', 'Prompt → a typed decision (D1) classifies the build and picks a domain profile.'],
-    [
-      '2 · Decompose',
-      <span key="d">
-        The LLM splits it into parts — frame, motors, ESC, FC, props, RX, video, battery, firmware, tools — with a
-        breadth/risk plan from D2/D3.
-      </span>,
-    ],
-    ['3 · Research loop', 'Each part runs research → gather → understand → data, in parallel, through a Jev triage gate.'],
-    ['4 · Gate', 'Jev decides the cheapest safe path per part: reuse a sibling, skip to you, cheap model, or full pass.'],
-    ['5 · Integrate', 'One cross-part pass hunts contradictions (battery ↔ ESC ↔ props) and patches them in code.'],
-    ['6 · Verify', 'D4–D6 decides complete / needs-human / stop. Your “approve” is the top rung of the ladder.'],
-  ];
   return (
-    <div className="panel">
-      <h3>How WireGI works</h3>
-      {steps.map(([t, d]) => (
-        <StepCard key={t} title={t}>
-          <div className="small">{d}</div>
-        </StepCard>
-      ))}
-      <h3 style={{ marginTop: 14 }}>Debugging</h3>
-      <ul className="tight small">
-        <li>
-          <b>Flow</b> — every event with level, timing, part and payload. Provider attempts are shown as attempts, not
-          as failures.
-        </li>
-        <li>
-          <b>Debug</b> — env files, which key came from where, a live LLM test, ports, and this project's runs/errors.
-        </li>
-        <li>
-          <b>Export</b> — download the whole trace as JSON.
-        </li>
-      </ul>
-      <p className="muted small">
-        Keys come from <code>WireGI/server/.env</code> (see <code>.env.example</code>). Forge's{' '}
-        <code>forge/server/.env</code> is only a fallback, and only while <code>WIREGI_INHERIT_FORGE_ENV</code> is not
-        false.
-      </p>
+    <div className="how">
+      <ol className="steps">
+        {STEPS.map(([title, detail], i) => (
+          <li key={title}>
+            <b>
+              {i + 1}. {title}
+            </b>{' '}
+            <span className="muted">{detail}</span>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

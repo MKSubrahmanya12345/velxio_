@@ -14,6 +14,11 @@ import { generateWithMeta } from './llm.js';
 import { getProfile, schemaBlock, ladderText } from './profiles.js';
 import { errorSummary, trimText } from './debug.js';
 
+// Runs that have already been told there is no web-search key. Keyed on the
+// run's `emit` function, so the notice shows up once per run and never again —
+// see researchPart(). Weak, so a finished run's emitter is collectable.
+const noWebKeyWarned = new WeakSet();
+
 // Live web search. Uses TAVILY_API_KEY or BRAVE_API_KEY when present. Returns
 // null when no key is configured — never mocks results.
 export async function webSearch(query, { maxResults = 5, emit } = {}) {
@@ -154,13 +159,19 @@ export async function researchPart({ part, project, registry, emit, indexer, pre
         level: 'warn',
         message: `Web search unavailable (${web.error}) — using model knowledge.`,
       });
-    } else {
+    } else if (!noWebKeyWarned.has(emit)) {
+      // Said once per run, not once per part: twelve identical "no web-search
+      // key" rows push the twelve things you actually wanted to read off the
+      // bottom of the trace. The condition is a property of the run, not of any
+      // single part, so it belongs in the trace once.
+      if (emit) noWebKeyWarned.add(emit);
       emit?.({
         type: 'research',
         stage: 'web',
         partId: part.id,
         part: part.name,
-        message: 'No web-search key configured — using model knowledge.',
+        message:
+          'No web-search key configured — using model knowledge for every part in this run (set TAVILY_API_KEY or BRAVE_API_KEY).',
       });
     }
   }

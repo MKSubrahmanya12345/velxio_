@@ -4,11 +4,15 @@ import { useProject } from '../lib/useProject';
 import TopBar from '../components/TopBar';
 import ChatPanel from '../components/ChatPanel';
 import InspectorPanel, { type InspectorTab } from '../components/InspectorPanel';
+import HowItWorks from '../components/HowItWorks';
 
 /**
  * The workspace: chat on the left, everything else on the right.
- * Chat is the conversation (and the run's live activity); the inspector is the
- * evidence — parts, flow (debugger), decisions, research, integration, env.
+ *
+ * Chat is the conversation and the run's live activity; the inspector is the
+ * evidence — Build (goal, where it stands, every part), Flow (the full trace,
+ * which doubles as the debugger), Evidence (do the parts agree, what was
+ * decided, which sources) and Debug (keys, env, a live provider test).
  */
 export default function ProjectPage({
   projectId,
@@ -20,8 +24,11 @@ export default function ProjectPage({
   onHome: () => void;
 }) {
   const store = useProject(projectId);
-  const [tab, setTab] = useState<InspectorTab>('parts');
+  const [tab, setTab] = useState<InspectorTab>('build');
   const [narrowInfo, setNarrowInfo] = useState(false);
+  // Help used to own a permanent tab. It is reference material you read once,
+  // so it lives behind `?` and gets out of the way.
+  const [help, setHelp] = useState(false);
 
   // Jump to the flow panel when a run fails — that is where the answer is.
   useEffect(() => {
@@ -70,6 +77,7 @@ export default function ProjectPage({
         infoOpen={narrowInfo}
         onRerun={resumeLabel ? store.resume : undefined}
         rerunLabel={resumeLabel}
+        onHelp={() => setHelp(true)}
       />
 
       {store.loadError && <div className="banner bad">Could not load the project: {store.loadError}</div>}
@@ -118,6 +126,25 @@ export default function ProjectPage({
           onClearFlow={store.clearFlow}
         />
       </div>
+
+      {help && (
+        <div className="help-overlay" onClick={() => setHelp(false)}>
+          <div className="help-card" onClick={(e) => e.stopPropagation()}>
+            <div className="row">
+              <h3 style={{ margin: 0 }}>How WireGI works</h3>
+              <div className="spacer" />
+              <button className="ghost tiny" onClick={() => setHelp(false)}>
+                ✕
+              </button>
+            </div>
+            <HowItWorks />
+            <p className="muted small">
+              Stuck on a run? The <b>Flow</b> tab is the full trace, and <b>Debug</b> shows which keys are configured
+              and can fire a live provider test.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

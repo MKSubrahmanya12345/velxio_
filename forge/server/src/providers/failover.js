@@ -118,6 +118,19 @@ export async function testProviderEntry(entry, { timeoutMs = 20000, fetchImpl } 
 }
 
 /**
+ * The registry-scoped set of credentials rejected outright (401/403/404).
+ *
+ * Stored on the registry (lazily) rather than in module scope so it lives and
+ * dies with the credentials it describes, stays inspectable at runtime
+ * (`registry.permanentRejections`), and can be cleared to force a retry.
+ */
+function permanentRejections(registry) {
+  if (!registry || typeof registry !== 'object') return new Map();
+  if (!(registry.permanentRejections instanceof Map)) registry.permanentRejections = new Map();
+  return registry.permanentRejections;
+}
+
+/**
  * Run `work(entry, info)` against every enabled credential until one succeeds.
  *
  * @param {object}   opts
@@ -139,7 +152,14 @@ export async function runWithFailover({ registry, work, operation = 'generate', 
   // loop stays behind it, so the same failure handling applies to every entry.
   const order = preferredOrder(settings.enabled === false ? enabled.slice(0, 1) : enabled, prefer);
   const maxRounds = settings.enabled === false ? 1 : Math.max(1, Number(settings.maxRounds) || DEFAULT_MAX_ROUNDS);
-  const skipped = new Set();
+  // Credentials that failed PERMANENTLY — 401/403/404, i.e. a revoked key or a
+  // model name that no longer exists — are sidelined for the life of the
+  // registry, not merely for this call. Without this, every call re-discovers
+  // the same dead key: one wasted round-trip and two trace rows, on every part,
+  // forever. The first rejection is still emitted with its status, so the trace
+  // keeps the evidence; later calls just stop repeating it.
+  const rejected = permanentRejections(registry);
+  const skipped = new Set([...rejected.keys()]);
   const attempts = [];
   let attempt = 0;
   let rounds = 0;

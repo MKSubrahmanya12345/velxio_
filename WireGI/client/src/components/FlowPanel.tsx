@@ -38,7 +38,12 @@ export default function FlowPanel({
   health: Health | null;
   onClear: () => void;
 }) {
-  const [minLevel, setMinLevel] = useState<'all' | Level>('all');
+  // 'info', not 'all'. Provider attempts are logged at `debug`, and one run
+  // emits four of them per LLM call — a twelve-part build produced ~110 events
+  // of which half were "tried a key, it answered". Defaulting to info+ shows
+  // the run's shape; the failures are still there (a failed attempt is `warn`),
+  // and `all` is one click away when you are actually debugging the plumbing.
+  const [minLevel, setMinLevel] = useState<'all' | Level>('info');
   const [query, setQuery] = useState('');
   const [unit, setUnit] = useState('all');
   const [open, setOpen] = useState<Record<number, boolean>>({});
@@ -71,6 +76,13 @@ export default function FlowPanel({
 
   const errorCount = flow.filter((e) => levelOf(e) === 'error').length;
   const warnCount = flow.filter((e) => levelOf(e) === 'warn').length;
+  // Counted against the level floor only, not the search box — otherwise the
+  // "N hidden" affordance lies as soon as you type in the filter.
+  const hiddenByLevel = useMemo(() => {
+    if (minLevel === 'all') return 0;
+    const floor = RANK[minLevel] ?? 0;
+    return flow.filter((ev) => (RANK[levelOf(ev)] ?? 1) < floor).length;
+  }, [flow, minLevel]);
   const runs = project?.state.runs || [];
 
   useEffect(() => {
@@ -142,7 +154,20 @@ export default function FlowPanel({
 
       <div className="flow-meta muted small">
         {flow.length} events · {errorCount} error(s) · {warnCount} warning(s) · showing {filtered.length}
-        {health?.debug?.level ? ` · server level ${health.debug.level}` : ''}
+        {minLevel === 'all' ? (
+          ''
+        ) : (
+          <>
+            {' · '}
+            <button
+              className="link"
+              onClick={() => setMinLevel('all')}
+              title="Provider attempts are logged at debug level and hidden by default"
+            >
+              {hiddenByLevel} hidden — show all
+            </button>
+          </>
+        )}
       </div>
 
       <div className="flow-list" ref={listRef}>
@@ -151,7 +176,10 @@ export default function FlowPanel({
           const lvl = levelOf(ev);
           const isOpen = open[ev.seq ?? i] ?? lvl === 'error';
           const err = typeof ev.error === 'object' ? ev.error : null;
-          const payload = payloadOf(ev);
+          // Only stringified for the one or two rows you actually expanded —
+          // this used to run for every row on every render, which is 2 500
+          // JSON.stringify calls a keypress later.
+          const payload = isOpen ? payloadOf(ev) : null;
           return (
             <div className={`flow-row lvl-${lvl}`} key={ev.seq ?? `${i}-${ev.receivedAt ?? 0}`}>
               <button
@@ -212,7 +240,7 @@ export default function FlowPanel({
                       )}
                     </div>
                   )}
-                  {Object.keys(payload).length > 0 && (
+                  {payload && Object.keys(payload).length > 0 && (
                     <details>
                       <summary className="muted small">payload</summary>
                       <pre className="code small">{JSON.stringify(payload, null, 2)}</pre>
