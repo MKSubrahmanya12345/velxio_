@@ -23,8 +23,10 @@
  * identical trajectory, in the browser and in Node. No Math.random anywhere.
  */
 
-import {
+import type {
   Quat, Vec3,
+} from './math';
+import {
   qIntegrate, qNormalize, qRotate, qConjugate,
   vAdd, vCross, vLength, vNormalize, vScale, vSub,
   vec3,
