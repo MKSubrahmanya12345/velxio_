@@ -94,11 +94,13 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
   // The generated catalog is the one board allowlist shared with the backend.
   // Do not silently turn an imported/overlay board into an Uno: that loses its
   // pinout and is exactly how ESP32 sketches reached the wrong build target.
-  const allowedKinds = new Set(Object.keys(catalog.boards));
+  // Same leniency as the backend Board model: exact catalog id plus the short
+  // aliases (`uno` → `arduino-uno`), whitespace-tolerant.
+  const boardCount = Object.keys(catalog.boards).length;
   for (const b of snapshot.boards) {
-    if (!allowedKinds.has(b.boardKind)) {
+    if (!normalizeBoardKind(b.boardKind)) {
       throw new Error(
-        `The agent supports ${allowedKinds.size} Velxio boards, but not ${b.boardKind}. ` +
+        `The agent supports ${boardCount} Velxio boards, but not '${b.boardKind}'. ` +
         'Choose a board from the supported board picker; your project is unchanged.',
       );
     }
@@ -123,7 +125,14 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
   }
   
   const data = projectSchema.safeParse({
-    board: board ? { id: board.id, boardKind: board.boardKind, x: board.x, y: board.y } : null,
+    board: board
+      ? {
+          id: board.id,
+          boardKind: normalizeBoardKind(board.boardKind) ?? board.boardKind,
+          x: board.x,
+          y: board.y,
+        }
+      : null,
     components: snapshot.components.map((c) => ({
       ...c,
       properties: Object.fromEntries(

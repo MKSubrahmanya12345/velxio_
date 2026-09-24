@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PARTS, catalog, isPlaceable } from './catalog';
+import { PARTS, catalog, isPlaceable, normalizeBoardKind } from './catalog';
 
 const id = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/);
 /**
@@ -27,15 +27,26 @@ export const projectSchema = z
         id,
         // Kept optional for old saved responses; workspace conversion fills it
         // from a catalog board id when a model omits it. When present it must
-        // be one of the same 30 boards the backend validates.
+        // be one of the same 30 boards the backend validates — including the
+        // short aliases the backend Board model accepts (`uno` →
+        // `arduino-uno`). Parse canonicalizes to the catalog id, so an
+        // AgentProject always carries a canonical kind like the backend's
+        // model_dump(), and the error names the offending value.
         boardKind: z
           .string()
+          .trim()
           .min(1)
           .max(64)
           .optional()
-          .refine((value) => !value || Object.prototype.hasOwnProperty.call(catalog.boards, value), {
-            message: 'Unsupported board kind',
-          }),
+          .superRefine((value, ctx) => {
+            if (value && !normalizeBoardKind(value)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `Unsupported board kind '${value}'. Choose one of the ${Object.keys(catalog.boards).length} Velxio boards.`,
+              });
+            }
+          })
+          .transform((value) => (value ? (normalizeBoardKind(value) ?? value) : value)),
         x: coord,
         y: coord,
       })

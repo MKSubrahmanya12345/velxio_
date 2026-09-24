@@ -86,23 +86,62 @@ export const catalog = raw as unknown as CatalogFile;
 export const PARTS: Record<string, PartSpec> = catalog.parts;
 export const BOARD: BoardSpec = catalog.boards['arduino-uno'];
 
+// NOTE: keep identical to _BOARD_ALIASES in backend/app/agent/catalog.py.
+// All keys are lowercase: lookup lowercases the input first.
 const BOARD_ALIASES: Record<string, string> = {
   uno: 'arduino-uno',
+  'uno-r3': 'arduino-uno',
+  'arduino-uno-r3': 'arduino-uno',
+  'arduino uno': 'arduino-uno',
   nano: 'arduino-nano',
+  'arduino nano': 'arduino-nano',
   mega: 'arduino-mega',
+  mega2560: 'arduino-mega',
+  'mega-2560': 'arduino-mega',
+  'arduino-mega-2560': 'arduino-mega',
+  'arduino mega': 'arduino-mega',
   esp32dev: 'esp32',
+  esp32devkit: 'esp32',
   'esp32-devkit': 'esp32',
+  'esp32-devkit-v1': 'esp32',
+  'esp32-wroom': 'esp32',
+  'esp32-wroom-32': 'esp32',
+  lolin32: 'wemos-lolin32-lite',
   pico: 'raspberry-pi-pico',
+  'pi-pico': 'raspberry-pi-pico',
+  rpipico: 'raspberry-pi-pico',
   rp2040: 'raspberry-pi-pico',
   picow: 'pi-pico-w',
   'pico-w': 'pi-pico-w',
+  rpipicow: 'pi-pico-w',
+  'raspberry-pi-pico-w': 'pi-pico-w',
+  'nano-esp32': 'arduino-nano-esp32',
+  'xiao-s3': 'xiao-esp32-s3',
+  'esp32-s3-devkit': 'esp32-s3',
+  'xiao-c3': 'xiao-esp32-c3',
+  'esp32-c3-devkit': 'esp32-c3',
+  supermini: 'aitewinrobot-esp32c3-supermini',
+  bluepill: 'stm32-bluepill',
+  blackpill: 'stm32-blackpill',
+  attiny: 'attiny85',
 };
 
 /** Canonical board kind shared with backend Board normalization. */
 export function normalizeBoardKind(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  if (Object.prototype.hasOwnProperty.call(catalog.boards, value)) return value;
-  return BOARD_ALIASES[value.toLowerCase()];
+  // Mirror backend normalize_board_kind exactly: strip whitespace, accept an
+  // exact catalog id (case-insensitively — catalog ids are all lowercase),
+  // else resolve the short aliases, else retry with underscores as hyphens.
+  const raw = value.trim();
+  if (!raw) return undefined;
+  if (Object.prototype.hasOwnProperty.call(catalog.boards, raw)) return raw;
+  const lowered = raw.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(catalog.boards, lowered)) return lowered;
+  const direct = BOARD_ALIASES[lowered];
+  if (direct) return direct;
+  const hyphenated = lowered.replace(/_/g, '-');
+  if (Object.prototype.hasOwnProperty.call(catalog.boards, hyphenated)) return hyphenated;
+  return BOARD_ALIASES[hyphenated];
 }
 
 /** Every part a patch may place, sorted by id. */
