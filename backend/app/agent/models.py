@@ -206,9 +206,17 @@ def describe_error(exc: BaseException, limit: int = 8) -> str:
     errors = getattr(exc, "errors", None)
     if not callable(errors):
         return str(exc)
-    lines = [f"- {'.'.join(str(part) for part in item.get('loc') or ()) or 'patch'}: "
-             f"{str(item.get('msg') or 'invalid').replace('Value error, ', '')}"
-             for item in errors()[:limit]]
+    lines: list[str] = []
+    seen: set[str] = set()
+    for item in errors()[:limit]:
+        line = (f"- {'.'.join(str(part) for part in item.get('loc') or ()) or 'patch'}: "
+                f"{str(item.get('msg') or 'invalid').replace('Value error, ', '')}")
+        # The same finding repeated (one per validator pass) reads as noise and
+        # teaches the model nothing it didn't know from the first copy.
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
     return "\n".join(lines) or str(exc)
 
 

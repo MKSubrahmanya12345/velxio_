@@ -687,9 +687,10 @@ _run_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar(
 # Queue the retry loop appends UI events to; drained by the heartbeat loop.
 _retry_sink: contextvars.ContextVar[list | None] = contextvars.ContextVar(
     "velxio_agent_retry_sink", default=None)
-# Called with the char count as a reply streams in, so the UI can show the
-# model is alive rather than merely "waiting".
-_stream_sink: contextvars.ContextVar[Callable[[int], None] | None] = (
+# Called with the char count (and the latest text delta) as a reply streams in,
+# so the UI can show the model is alive — and show the actual code arriving, not
+# merely a character count.
+_stream_sink: contextvars.ContextVar[Callable[[int, str], None] | None] = (
     contextvars.ContextVar("velxio_agent_stream_sink", default=None))
 
 
@@ -706,12 +707,12 @@ def _http_timeout(ceiling: float) -> float:
     return max(1.0, min(ceiling, deadline - time.monotonic()))
 
 
-def _report_progress(chars: int) -> None:
-    """Report streamed output size to whoever is waiting. Never fatal."""
+def _report_progress(chars: int, piece: str = "") -> None:
+    """Report streamed output size + latest text to whoever waits. Never fatal."""
     sink = _stream_sink.get()
     if sink is not None:
         try:
-            sink(chars)
+            sink(chars, piece)
         except Exception:  # noqa: BLE001 - progress is decoration
             pass
 
@@ -859,7 +860,7 @@ async def _stream_chat_completion(spec: ProviderSpec, url: str, headers: dict,
                         if isinstance(piece, str) and piece:
                             pieces.append(piece)
                             total += len(piece)
-                            _report_progress(total)
+                            _report_progress(total, piece)
                         reason = choice.get("finish_reason")
                         if isinstance(reason, str) and reason:
                             finish_reason = reason
@@ -1856,32 +1857,57 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         alive. Between ticks this drains any retry events `propose()` queued.
         """
         retries: list[dict] = []
-        live = {"chars": 0}
+        # chars = how much has arrived; buf = the streamed text itself, so the
+        # UI can show the code landing character by character, not just a count.
+        live: dict = {"chars": 0, "buf": []}
         retry_token = _retry_sink.set(retries)
-        stream_token = _stream_sink.set(lambda n: live.__setitem__("chars", n))
+
+        def _sink(n: int, piece: str = "") -> None:
+            live["chars"] = n
+            if piece:
+                live["buf"].append(piece)
+
+        stream_token = _stream_sink.set(_sink)
         task = asyncio.ensure_future(
             propose_counted(messages, max_tokens=max_tokens, stage=stage,
                             attempt=attempt))
         tick = max(0.5, settings.AGENT_HEARTBEAT_S)
+        # While tokens are flowing the panel wants the code live, so poll fast
+        # and beat on new text; while the model is still in prefill, keep the
+        # slow alive-check cadence.
+        poll = 0.5
         waited = 0.0
+        since_beat = 0.0
+        last_chars = -1
         try:
             while True:
-                done, _pending = await asyncio.wait({task}, timeout=tick)
+                step = poll if live["chars"] > 0 else tick
+                done, _pending = await asyncio.wait({task}, timeout=step)
                 if task in done:
                     # Re-raises ProviderError / MalformedResponse /
                     # ValidationError into the caller's `async for`.
                     call_result["proposal"] = task.result()
                     return
-                waited += tick
+                waited += step
+                since_beat += step
                 for payload in retries:
                     yield event(payload)
                 retries.clear()
                 chars = live["chars"]
+                # Beat on schedule, or immediately when fresh code arrived.
+                if since_beat < tick and chars == last_chars:
+                    continue
+                since_beat = 0.0
+                last_chars = chars
                 detail = (f"generating · {chars:,} chars" if chars
                           else "waiting for the first token")
+                # Tail of the actual reply so the panel can render the code
+                # arriving live; bounded so a long generation stays a small SSE
+                # frame. Empty until the first token lands.
+                preview = "".join(live["buf"])[-1500:]
                 yield event({"type": "heartbeat", "stage": stage,
                              "attempt": attempt, "waited": round(waited),
-                             "chars": chars, "provider": spec.id,
+                             "chars": chars, "text": preview, "provider": spec.id,
                              "message": f"{spec.label} is {detail} · {int(waited)}s"})
         finally:
             _retry_sink.reset(retry_token)

@@ -189,6 +189,13 @@ const unknownRules = Object.keys(rules.parts).filter(
 for (const component of [...metadata.components].sort((a, b) => a.id.localeCompare(b.id))) {
   const id = component.id;
   const spec = specFor(id);
+  // A component that is ALSO a supported board (id present in the `boards`
+  // table) is a placeable MCU board, derived straight from the board data — no
+  // per-part rule needed, and a new board added to `boards` + the component
+  // metadata becomes placeable automatically. Its pins are the BOARD's pin
+  // names (the ones the simulator wires to), not the art's element pins.
+  const boardDef = rules.boards[id];
+  const isBoardPart = Boolean(boardDef) && component.category === 'boards';
   const runtimeFor = new Set([
     ...(rules.runtimeProperties.global ?? []),
     ...(rules.runtimeProperties.parts?.[id] ?? []),
@@ -257,6 +264,21 @@ for (const component of [...metadata.components].sort((a, b) => a.id.localeCompa
   if (bad.length) throw new Error(`${id}: unknown interaction(s) ${bad.join(', ')}`);
   if (entry.interactions.includes('stimulus') && !entry.stimulusKeys?.length)
     throw new Error(`${id}: declares a 'stimulus' interaction without stimulusKeys`);
+  if (isBoardPart) {
+    // Supported boards are always placeable — that is what being in the
+    // `boards` table means for a component entry.
+    entry.class = 'board';
+    entry.placeable = true;
+    entry.pins = [...boardDef.pins];
+    delete entry.pinVariants;
+    delete entry.why;
+    // AVR boards emulate live in the browser, so a placed board of that
+    // family is verifiable; other families keep the measured sim coverage.
+    if (boardFamily(boardDef, id) === 'arduino') entry.sim = true;
+    entry.notes =
+      spec.notes ??
+      `Place as an extra ${component.name}: an independent MCU board with its own pins, sketch group and simulation. Wire it pin-to-pin to the primary board or components; the first board stays the build target.`;
+  }
   parts[id] = entry;
 }
 

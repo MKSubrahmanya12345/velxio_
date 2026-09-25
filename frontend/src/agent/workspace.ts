@@ -124,6 +124,23 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
     }
   }
   
+  // Extra boards on the canvas travel to the model as board COMPONENTS: the
+  // agent protocol carries one `board` field, so boards 2..N are exposed
+  // through their placeable catalog part (class 'board') and materialized
+  // back into real boards by fromAgentProject. Only kinds the catalog knows
+  // as parts round-trip this way; any other secondary board is preserved
+  // untouched on apply. Driven purely by the catalog — nothing per-board here.
+  const extraBoardParts = snapshot.boards
+    .slice(1)
+    .filter((b) => PARTS[b.boardKind] && isPlaceable(b.boardKind))
+    .map((b) => ({
+      id: b.id,
+      metadataId: b.boardKind as string,
+      x: b.x,
+      y: b.y,
+      properties: {} as Record<string, string | number | boolean>,
+    }));
+
   const data = projectSchema.safeParse({
     board: board
       ? {
@@ -133,14 +150,17 @@ export function toAgentProject(snapshot: Snapshot): AgentProject {
           y: board.y,
         }
       : null,
-    components: snapshot.components.map((c) => ({
-      ...c,
-      properties: Object.fromEntries(
-        Object.entries(c.properties).filter(([key]) =>
-          PARTS[c.metadataId] ? editableProperties(c.metadataId).includes(key) : true,
+    components: [
+      ...extraBoardParts,
+      ...snapshot.components.map((c) => ({
+        ...c,
+        properties: Object.fromEntries(
+          Object.entries(c.properties).filter(([key]) =>
+            PARTS[c.metadataId] ? editableProperties(c.metadataId).includes(key) : true,
+          ),
         ),
-      ),
-    })),
+      })),
+    ],
     wires: snapshot.wires.map((w) => ({
       id: w.id,
       start: { componentId: w.start.componentId, pinName: w.start.pinName },
@@ -178,6 +198,16 @@ export function fromAgentProject(project: AgentProject, previous: Snapshot): Sna
     throw new Error('The agent cannot replace the existing board instance; change boardKind in place.');
   }
   const group = oldBoard?.activeFileGroupId ?? `group-${b.id}`;
+
+  // Components whose catalog entry is a board (`class: 'board'`) are extra MCU
+  // boards, not canvas parts — `toAgentProject` serializes boards 2..N that way.
+  // Split them out so they materialize as real, independently simulated boards
+  // (addBoard-equivalent) instead of inert art. Everything below is driven by
+  // the catalog's `class`, never by a specific board id.
+  const isBoardPart = (metadataId: string) => PARTS[metadataId]?.class === 'board';
+  const boardParts = project.components.filter((c) => isBoardPart(c.metadataId));
+  const regularParts = project.components.filter((c) => !isBoardPart(c.metadataId));
+
   const ids = new Set([b.id]);
   for (const c of project.components) {
     if (ids.has(c.id)) throw new Error('Duplicate component ID in agent response.');
@@ -187,38 +217,46 @@ export function fromAgentProject(project: AgentProject, previous: Snapshot): Sna
     if (!ids.has(wire.start.componentId) || !ids.has(wire.end.componentId))
       throw new Error('Dangling wire in agent response.');
   }
-  
-  // Preserve all boards, not just first - multi-board support like Cursor multi-file
-  const newBoards = previous.boards.length > 1 ? previous.boards.map((board, idx) => {
-    if (idx === 0) {
-      return {
-        ...board,
-        ...b,
-        activeFileGroupId: group,
-      };
-    }
-    return board;
-  }) : [
-    {
-      ...(oldBoard ?? {
-        boardKind: 'arduino-uno' as const,
-        languageMode: 'arduino' as const,
-        running: false,
-        compiledProgram: null,
-        serialOutput: '',
-        serialBaudRate: 0,
-        serialMonitorOpen: false,
-      }),
-      ...b,
-      activeFileGroupId: group,
-    },
-  ];
-  
+
+  const defaultBoardShape = {
+    languageMode: 'arduino' as const,
+    running: false,
+    compiledProgram: null,
+    serialOutput: '',
+    serialBaudRate: 0,
+    serialMonitorOpen: false,
+  };
+  const mainBoard = {
+    ...(oldBoard ?? { boardKind: 'arduino-uno' as const, ...defaultBoardShape }),
+    ...b,
+    activeFileGroupId: group,
+  };
+  // Extra boards returned by the agent. Reuse the previous instance when the id
+  // matches (keeps its file group / per-board state); otherwise mint a fresh one.
+  const extraBoards = boardParts.map((c) => {
+    const prev = previous.boards.find((pb) => pb.id === c.id);
+    return {
+      ...(prev ?? defaultBoardShape),
+      id: c.id,
+      boardKind: c.metadataId,
+      x: c.x,
+      y: c.y,
+      activeFileGroupId: prev?.activeFileGroupId ?? `group-${c.id}`,
+    };
+  });
+  // Secondary boards the protocol cannot represent (no placeable catalog part
+  // for their kind) survive untouched rather than being silently deleted.
+  const retained = previous.boards
+    .slice(1)
+    .filter((pb) => !isBoardPart(pb.boardKind))
+    .filter((pb) => !extraBoards.some((eb) => eb.id === pb.id));
+  const newBoards = [mainBoard, ...extraBoards, ...retained];
+
   return {
     boards: newBoards as any,
     fileGroups: { ...previous.fileGroups, [group]: project.files },
     folderGroups: previous.folderGroups,
-    components: project.components.map((c) => ({
+    components: regularParts.map((c) => ({
       ...c,
       properties: {
         ...Object.fromEntries(
@@ -286,6 +324,15 @@ export function describeChanges(before: Snapshot, after: Snapshot): string[] {
     const boardName = (boardKind && catalog.boards[boardKind]?.label) || boardKind || 'board';
     changes.unshift(`+ ${boardName}`);
   }
+  // Extra (secondary) boards added or removed — agent-placeable board parts.
+  const boardLabelOf = (kind?: string) =>
+    (kind && catalog.boards[kind]?.label) || kind || 'board';
+  for (const nb of after.boards.slice(1))
+    if (!before.boards.some((ob) => ob.id === nb.id))
+      changes.push(`+ ${boardLabelOf(nb.boardKind)} (extra board)`);
+  for (const ob of before.boards.slice(1))
+    if (!after.boards.some((nb) => nb.id === ob.id))
+      changes.push(`− ${boardLabelOf(ob.boardKind)} (extra board)`);
   // Also report board changes
   if (before.boards.length && after.boards.length) {
     if (before.boards[0].boardKind !== after.boards[0].boardKind) {

@@ -182,6 +182,10 @@ export function AgentPanel() {
   const [stage, setStage] = useState('');
   const [step, setStep] = useState<'think' | 'parts' | 'check' | 'code'>('think');
   const [heartbeat, setHeartbeat] = useState('');
+  // Tail of the model's actual reply, streamed live in the progress card —
+  // the user watches the code arrive instead of a character counter.
+  const [liveText, setLiveText] = useState('');
+  const liveStreamRef = useRef<HTMLPreElement>(null);
   const [plan, setPlan] = useState<string[]>([]);
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
@@ -383,6 +387,22 @@ export function AgentPanel() {
     }
   };
 
+  /** Append a repair-log entry, folding an exact repeat of the previous one:
+   *  the self-repair loop can hit the same wall 3× and three identical
+   *  "needs a series resistor" blocks read as a bug, not a history. */
+  function pushDiagnostic(text: string) {
+    setDiagnostics((v) => {
+      if (v.length > 0 && v[v.length - 1] === text) return v;
+      return [...v, text];
+    });
+  }
+
+  // Keep the live-stream pane pinned to the newest code as it arrives.
+  useEffect(() => {
+    const el = liveStreamRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [liveText]);
+
   async function submit(text = prompt, opts?: { mode?: 'chat' | 'composer' | 'inline' | 'agent'; skip?: boolean }) {
     if (!text.trim() || controller.current) return;
     if (!status?.configured) {
@@ -405,6 +425,7 @@ export function AgentPanel() {
     setTab('chat');
     setStep('think');
     setHeartbeat('');
+    setLiveText('');
     setStage('Reading the current circuit');
     feedbackSent.current = new Set();
     const abort = new AbortController();
@@ -426,12 +447,19 @@ export function AgentPanel() {
             setStep(stepFor(event.stage));
             setStage(msg);
             setHeartbeat('');
+            // A new stage starts a fresh provider call — drop the previous
+            // reply's tail so stale JSON never lingers in the live pane.
+            setLiveText('');
             setActivities((prev) => [...prev, msg]);
           }
           if (event.type === 'heartbeat') {
             setHeartbeat(event.message);
+            if (typeof event.text === 'string' && event.text.length > 0) {
+              setLiveText(event.text);
+            }
           }
           if (event.type === 'retry') {
+            setLiveText('');
             const msg = event.message;
             setActivities((prev) => [...prev, msg]);
           }
@@ -455,17 +483,16 @@ export function AgentPanel() {
             );
             void checkForge();
           }
-          if (event.type === 'diagnostic') setDiagnostics((v) => [...v, event.message]);
+          if (event.type === 'diagnostic') pushDiagnostic(event.message);
           if (event.type === 'compile' && !event.success && event.stderr)
-            setDiagnostics((v) => [...v, event.stderr]);
+            pushDiagnostic(event.stderr);
           if (event.type === 'note') {
             if (!feedbackSent.current.has(event.message)) {
               feedbackSent.current.add(event.message);
               journal.addMessage({ role: 'user', content: event.message, scope: requestScope });
             }
           }
-          if (event.type === 'error' && event.diagnostics)
-            setDiagnostics((v) => [...v, event.diagnostics!]);
+          if (event.type === 'error' && event.diagnostics) pushDiagnostic(event.diagnostics);
         },
       });
       journal.addMessage({ role: 'assistant', content: answer, scope: requestScope });
@@ -908,6 +935,18 @@ export function AgentPanel() {
                   <span>{stage}</span>
                 </div>
                 {heartbeat && <small className="agent-muted">{heartbeat}</small>}
+
+                {liveText && (
+                  <div className="agent-livestream-wrap">
+                    <div className="agent-livestream-title">
+                      <span className="agent-live-dot" /> Live reply — code as it arrives
+                    </div>
+                    <pre className="agent-livestream" ref={liveStreamRef} aria-label="Live model output">
+                      {liveText}
+                      <span className="agent-livestream-caret" />
+                    </pre>
+                  </div>
+                )}
 
                 {activities.length > 0 && (
                   <div className="agent-activity-feed">

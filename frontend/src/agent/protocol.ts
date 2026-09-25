@@ -209,6 +209,9 @@ export const eventSchema = z.discriminatedUnion('type', [
     attempt: z.number().optional(),
     waited: z.number().optional(),
     chars: z.number().optional(),
+    /** Tail of the actual streamed reply — rendered live so the user watches
+     *  the code arrive, not just a character counter. */
+    text: z.string().optional(),
     provider: z.string().optional(),
     message: z.string(),
     ...runId,

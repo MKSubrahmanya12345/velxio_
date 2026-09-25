@@ -1080,3 +1080,47 @@
   margin: 4px 0;
   font-size: 11px;
 }
+
+/* Live model reply: the actual code/JSON as it streams in, not a char count. */
+.agent-livestream-wrap {
+  margin: 8px 0 4px;
+  border: 1px solid #2b2f36;
+  border-radius: 8px;
+  background: #0d1117;
+  overflow: hidden;
+}
+.agent-livestream-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--agent-muted);
+  border-bottom: 1px solid #21262d;
+}
+.agent-livestream {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #c9d1d9;
+  scroll-behavior: smooth;
+}
+.agent-livestream-caret {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: #58a6ff;
+  animation: agent-livestream-blink 1s steps(2, start) infinite;
+}
+@keyframes agent-livestream-blink {
+  to { visibility: hidden; }
+}

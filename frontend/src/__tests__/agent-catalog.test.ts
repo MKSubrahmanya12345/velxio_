@@ -84,7 +84,11 @@ describe('agent catalog — generated from the live sources', () => {
       ...mappedMetadataIds(),
       ...Object.keys(PASSIVE_PRESETS),
     ]);
-    const claimed = entries.filter(([, e]) => e.sim).map(([id]) => id).sort();
+    // Board-class parts (arduino-uno …) are not part-registry simulations: a
+    // placed board materializes as a real boards[] entry with its own MCU
+    // simulation. Their `sim` claim is backed by the board, not the registry.
+    const nonBoard = entries.filter(([, e]) => e.class !== 'board');
+    const claimed = nonBoard.filter(([, e]) => e.sim).map(([id]) => id).sort();
     const real = [...live].filter((id) => id in catalog.parts).sort();
     expect(claimed).toEqual(real);
     // A part the canvas can simulate must be placeable, otherwise the claim is
@@ -96,6 +100,9 @@ describe('agent catalog — generated from the live sources', () => {
 
   it('names only the pin names the frozen pin map measured', () => {
     for (const [id, entry] of entries) {
+      // Board parts carry the BOARD header pins (the ones the simulator wires
+      // to), taken from the catalog's boards table — not the element's art pins.
+      if (entry.class === 'board') continue;
       const frozen = frozenPins.components[id];
       expect(frozen, `${id} missing from scripts/agent-pins.json`).toBeDefined();
       expect(entry.pins, `${id} pins drifted from scripts/agent-pins.json`).toEqual(frozen.pins);
