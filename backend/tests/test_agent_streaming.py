@@ -14,6 +14,12 @@ import httpx
 import pytest
 
 from app.agent import service
+
+
+@pytest.fixture(autouse=True)
+def no_forge_memory(monkeypatch):
+    from app.agent import forge
+    monkeypatch.setattr(forge, "is_enabled", lambda: False)
 from app.core.config import ProviderSpec
 
 

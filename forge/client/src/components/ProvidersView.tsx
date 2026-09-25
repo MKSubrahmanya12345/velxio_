@@ -63,7 +63,7 @@ export function ProvidersView({ onBack, onChanged }: { onBack: () => void; onCha
   const [tests, setTests] = useState<Record<string, ProviderTestResult>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editNote, setEditNote] = useState('');
-  const [copied, setCopied] = useState('');
+
 
   const load = useCallback(async () => {
     try {
@@ -141,16 +141,6 @@ export function ProvidersView({ onBack, onChanged }: { onBack: () => void; onCha
     setDraft(d => emptyDraft(d.provider, catalog));
   };
 
-  const copy = async (key: ProviderKey) => {
-    try {
-      await navigator.clipboard?.writeText(key.apiKey);
-      setCopied(key.id);
-      setTimeout(() => setCopied(c => (c === key.id ? '' : c)), 1500);
-    } catch {
-      setNotice('Copy blocked by the browser — select the key text instead.');
-    }
-  };
-
   const testKey = async (key: ProviderKey) => {
     setBusy(`test:${key.id}`);
     setError('');
@@ -226,7 +216,7 @@ export function ProvidersView({ onBack, onChanged }: { onBack: () => void; onCha
               <input
                 id="provider-key"
                 className="fg-input fg-input-mono"
-                type="text"
+                type="password"
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
@@ -237,7 +227,7 @@ export function ProvidersView({ onBack, onChanged }: { onBack: () => void; onCha
                 aria-describedby="provider-key-hint"
               />
               <small id="provider-key-hint" className="fg-field-hint">
-                Typed and stored in plain text — never dotted out, so you can read back exactly what is saved.
+                Stored on the server. The page does not show the saved secret.
               </small>
             </div>
 
@@ -247,7 +237,7 @@ export function ProvidersView({ onBack, onChanged }: { onBack: () => void; onCha
                 <input
                   id={`provider-${extra.field}`}
                   className="fg-input fg-input-mono"
-                  type="text"
+                  type={extra.field === 'region' ? 'text' : 'password'}
                   autoComplete="off"
                   spellCheck={false}
                   placeholder={extra.placeholder}
@@ -438,13 +428,7 @@ export function ProvidersView({ onBack, onChanged }: { onBack: () => void; onCha
 
                     <div className="fg-key-row">
                       <label>Key</label>
-                      {/* Plain text on purpose: this is the value that will be sent. */}
-                      <code className="fg-key-plain" title="Stored and shown in plain text">{key.apiKey || '— no key —'}</code>
-                      {key.apiKey && (
-                        <button className="fg-btn fg-btn-ghost" onClick={() => void copy(key)} aria-label={`Copy ${key.providerLabel} key`}>
-                          {copied === key.id ? 'Copied' : 'Copy'}
-                        </button>
-                      )}
+                      <code className="fg-key-plain">{key.apiKey || '— no key —'}</code>
                     </div>
 
                     {key.provider === 'bedrock' && (
@@ -528,8 +512,8 @@ export function ProvidersView({ onBack, onChanged }: { onBack: () => void; onCha
           )}
 
           <p className="fg-muted fg-providers-warning">
-            Keys are stored as plain text in <code>{state?.storage.file || 'forge/server/data/providers.json'}</code> and sent to this server without
-            encryption at rest. Forge has no authentication, so keep it on localhost or a trusted network — anyone who can reach the API can read these keys.
+            Full keys stay in <code>{state?.storage.file || 'forge/server/data/providers.json'}</code>. This page shows a mask, not the secret.
+            Forge has no authentication, so keep it on localhost — anyone who can read that file can read the keys.
           </p>
         </section>
       </div>

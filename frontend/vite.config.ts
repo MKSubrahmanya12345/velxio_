@@ -45,7 +45,9 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     host: '0.0.0.0',
-    allowedHosts: ['.e2b.app'],
+    // A phone on the same WiFi opens this page by the computer's LAN address.
+    // An allowlist that only names known hosts rejects that Host header.
+    allowedHosts: true,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8001',

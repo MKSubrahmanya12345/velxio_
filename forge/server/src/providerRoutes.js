@@ -1,14 +1,14 @@
 // Forge — provider management API (the Providers page).
 //
-// Keys are stored exactly as entered and returned exactly as stored: the UI
-// shows full plain-text credentials with their notes, never dots. This server
-// has no authentication, so anyone who can reach it can read these keys — keep
-// it on localhost or a trusted network (see README "Providers and keys").
+// Keys are stored on the server for calls. HTTP responses return a masked
+// form only — the browser cannot read the secret back. This server still has
+// no authentication, so keep it on localhost or a trusted network.
 
 import { Router } from 'express';
 
 import { PROVIDER_IDS } from './providers/catalog.js';
 import { testProviderEntry } from './providers/failover.js';
+import { publicEntry } from './providers/registry.js';
 
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
@@ -21,8 +21,8 @@ export function createProviderRouter(deps) {
     try { res.json(await fn(req, res)); } catch (e) { next(e); }
   };
 
-  // Full state: catalog metadata for the form, every key (plain text), the
-  // selected one, failover settings, loop order, and the recent attempt log.
+  // Catalog, masked keys, the selected id, failover settings, and the attempt log.
+  // Secrets stay on the server.
   r.get('/api/providers', wrap(async () => registry.state()));
 
   r.post('/api/providers/keys', wrap(async req => {
@@ -42,7 +42,7 @@ export function createProviderRouter(deps) {
       model: body.model,
       enabled: body.enabled !== false,
     });
-    return { ok: true, key: entry, state: registry.state() };
+    return { ok: true, key: publicEntry(entry), state: registry.state() };
   }));
 
   r.patch('/api/providers/keys/:id', wrap(async req => {
@@ -52,7 +52,7 @@ export function createProviderRouter(deps) {
     if (!Object.keys(patch).length) throw bad('Nothing to update.');
     if (patch.note !== undefined && String(patch.note).length > 240) throw bad('Note must be 240 characters or fewer.');
     const key = await registry.update(req.params.id, patch);
-    return { ok: true, key, state: registry.state() };
+    return { ok: true, key: publicEntry(key), state: registry.state() };
   }));
 
   r.delete('/api/providers/keys/:id', wrap(async req => {
@@ -65,7 +65,7 @@ export function createProviderRouter(deps) {
     const id = String(req.body?.id || '');
     if (!id) throw bad('id is required.');
     const key = await registry.setActive(id);
-    return { ok: true, activeId: registry.activeId, key, state: registry.state() };
+    return { ok: true, activeId: registry.activeId, key: publicEntry(key), state: registry.state() };
   }));
 
   // Live probe of exactly one credential — no failover, no switching.

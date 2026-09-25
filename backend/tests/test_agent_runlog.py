@@ -6,6 +6,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.agent import service
+
+
+@pytest.fixture(autouse=True)
+def no_forge_memory(monkeypatch):
+    from app.agent import forge
+    monkeypatch.setattr(forge, "is_enabled", lambda: False)
 from app.agent.models import AgentRequest, Proposal, Project
 from app.agent.runlog import snapshot, start
 from app.api.routes import agent

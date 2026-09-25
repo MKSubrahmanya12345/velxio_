@@ -88,9 +88,12 @@ async def main():
             # The simulator runs Python directly, not via hex
             has_py = any(f.name.endswith('.py') for f in project.files)
             if has_py:
-                result = {"success": True, "hex_content": ":00000001FF\n", "stdout": f"Python board {board_kind}: no compilation needed", "stderr": ""}
+                # Pi runs the .py file. An empty hex is success, not a fake Intel hex record.
+                result = {"success": True, "kind": "python", "hex_content": "",
+                          "stdout": f"Python board {board_kind}: ready to run the .py file", "stderr": ""}
             else:
-                result = {"success": False, "error": f"Pi board {board_kind} needs a .py file, got: {[f.name for f in project.files]}"}
+                result = {"success": False, "kind": "python",
+                          "error": f"Pi board {board_kind} needs a .py file, got: {[f.name for f in project.files]}"}
         elif not shutil.which(compiler.cli_path):
             result = {"success": False, "error_kind": "toolchain_unavailable",
                       "error": "arduino-cli is not installed or not on the backend PATH."}

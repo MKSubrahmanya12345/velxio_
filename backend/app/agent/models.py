@@ -390,8 +390,12 @@ class AgentRequest(StrictModel):
     # Which server-side provider routes this run. Only ids listed in
     # Settings.providers() are accepted; the id never carries credentials.
     provider: Literal["opencode", "gemini", "bedrock"] = "bedrock"
-    # Fast progressive build mode: stream canvas updates & bypass long toolchain compilation delays
-    fast_mode: bool = True
+    # chat explains, composer edits, agent may use tools, inline edits the selection.
+    mode: Literal["agent", "chat", "composer", "inline"] = "agent"
+    # User already chose to build. Do not stop on a JEV clarify-first decision.
+    skip_clarify: bool = False
+    # True shortens the compile timeout. Default is a real compile.
+    fast_mode: bool = False
     # Optional forge-memory session key (stable per browser workspace). Absent
     # or null disables nothing — "default" is used when forge is enabled.
     forge_session: Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_-]{1,80}$")] | None = None

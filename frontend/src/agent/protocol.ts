@@ -191,7 +191,8 @@ export const eventSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('result'),
     project: projectSchema,
-    hex: z.string().min(1).max(1000000),
+    hex: z.string().max(1000000).optional(),
+    runtime: z.enum(['hex', 'python']).optional(),
     summary: z.string(),
     attempts: z.number(),
     expectations: expectationsSchema.nullable().optional(),
@@ -243,6 +244,7 @@ export const eventSchema = z.discriminatedUnion('type', [
       .nullable(),
     message: z.string().optional(),
     clarification: z.string().optional(),
+    decision: z.string().optional(),
     pending_questions: z.array(z.string()).optional(),
     ...runId,
   }),

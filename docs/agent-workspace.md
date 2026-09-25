@@ -7,7 +7,7 @@ sidebar shows setup instructions. No canned circuit generator is used in product
 
 ## Supported scope
 
-- One **Arduino Uno**, Arduino C++, one `.ino` and optional flat `.h/.c/.cpp` files.
+- Catalog boards are build targets: Arduino, ESP32, RP2040, STM32, and Raspberry Pi. One entry file (`.ino` or `.py`) plus optional flat headers.
 - **The whole canvas catalog**: every one of the 157 components in
   `frontend/public/components-metadata.json` (148 of them placeable — boards,
   breadboards and junctions are the board/wiring layer, not parts) up to 40 parts
@@ -26,49 +26,42 @@ sidebar shows setup instructions. No canned circuit generator is used in product
 - Arduino core APIs and the libraries the catalog's own parts need (for example
   `Servo.h`, `Wire.h`, `LiquidCrystal_I2C.h`, `Adafruit_NeoPixel.h`); no automatic
   third-party library installation.
-- Automatic component placement, pin-level wiring, firmware generation, compilation,
-  bounded validation/compiler repair, electrical pre-flight, simulation launch, and
-  **live behavioural verification** of the agent's own declared expectations.
+- Automatic component placement, pin-level wiring, firmware generation, compilation
+  when that board's core is installed, bounded validation/compiler repair, and
+  electrical pre-flight.
+- **Live headless simulation is AVR only** (Uno, Nano, Mega, ATtiny). Raspberry Pi
+  boards take a `.py` file and do not produce hex. Other boards compile only if
+  that core is installed; a missing toolchain is reported, not papered over with
+  a fake hex file.
 - Follow-up edits read **live code and wiring**, including manual edits.
-- Explanations and clarification responses do not mutate the project.
-
-Boards other than the Arduino Uno are still out of scope (the compiler, emulator and
-pin analysis are AVR-Uno specific): a project already on another board is rejected
-rather than silently converted. Start a new Uno project to use the agent with it.
+- Explanations and a JEV clarify-first decision do not mutate the project.
 
 ## The agent loop
 
-The loop is deliberately not "propose once, then repair". A model that can only
-write a patch and wait for the compiler is guessing; this one works the problem:
+The path is a JEV decision, then one coding loop. It is not a Forge essay turn.
 
-1. **Research rounds** (`AGENT_MAX_TOOL_ROUNDS`, default 5) — read-only tools:
-   `search_catalog` (find a part by description), `component_info` (exact pins,
-   properties, wiring notes), `board_pinout`, `netlist` (what is connected to
-   what right now), `read_file`/`list_files`, `check_design` (static analysis of
-   the current project), `library_api`/`search_libraries`. Results are appended
-   to the conversation and the model is asked again; nothing is applied. The
-   calls in one round run concurrently, and identical (tool, args, project)
-   results are memoized for the run so repeats return instantly.
-2. **Draft rounds** (`AGENT_MAX_DRAFT_ROUNDS`, default 4) — the model passes a
-   candidate patch *inline* to `draft_validate` (full schema + electrical +
-   static analysis), `draft_compile` (the real `arduino-cli` build) and
-   `draft_simulate` (the real AVR emulator, with the declared interactions
-   translated into electrical stimuli, returning per-pin transitions with
-   simulated timestamps, serial output and the stimulus actually delivered).
-   Nothing is written to the workspace, and the model is expected to iterate
-   until the observation matches its claim.
-3. **Commit** — only then does it return the response: plan, summary, target
-   patch and `expectations`. The server-side validator, the compiler and the
-   browser verification act as the same deterministic gates as before.
-
-Both budgets are separate because research is a catalog lookup and drafting is a
-compile plus a simulation. A model that runs out simply gets one final "return the
-response now" message instead of another loop.
+1. **Decision** — one System One call (`POST /api/chat/:id/decide`). Code applies
+   the answers. If the trusted mode is clarify-first, the run stops and asks a
+   question the code wrote. Otherwise the accepted rules are injected and the
+   coding model starts. A decision that does not return in time is cancelled;
+   the run designs without memory.
+2. **Optional tool rounds** (`AGENT_MAX_TOOL_ROUNDS`, default 3; chat and inline
+   cap at 2) — catalog, pinout, netlist, and `read_file`. Tools are optional.
+   The catalog index is already in the prompt, so a known part does not need a
+   lookup. Chat cannot call `draft_*`.
+3. **Optional draft rounds** (`AGENT_MAX_DRAFT_ROUNDS`, default 2; composer and
+   inline cap at 1; chat is 0). `draft_simulate` is the AVR emulator. On any
+   other board it compiles and reports that it did not simulate. Do not
+   `draft_compile` a patch that is about to be committed — the commit path
+   compiles it, and identical projects are memoized.
+4. **Commit** — plan, summary, patch, and expectations. The validator and the
+   real compiler are the gates. The browser live-checks expectations only when
+   the result is AVR hex.
 
 ## Setup
 
 Use Python **3.11+** (the existing Docker backend uses 3.12), Node 20.19+ or 22.12+,
-and a working Arduino CLI with the AVR core. You do not need ESP32/QEMU for this scope.
+and a working Arduino CLI. Install the core for the board you want to compile. AVR is enough for live simulation. Pi does not need a core.
 
 ```sh
 # From the repository root
@@ -91,9 +84,9 @@ AWS_REGION=us-east-1
 # AGENT_GEMINI_API_KEY=your-google-ai-studio-api-key
 # AGENT_GEMINI_MODEL=gemini-2.5-flash
 # Optional loop bounds / resilience:
-# AGENT_MAX_ATTEMPTS=3            repair attempts (proposal -> validate/compile)
-# AGENT_MAX_TOOL_ROUNDS=5        research rounds before a patch is required
-# AGENT_MAX_DRAFT_ROUNDS=4       draft test rounds (compile/simulate a candidate)
+# AGENT_MAX_ATTEMPTS=4            repair attempts (proposal -> validate/compile)
+# AGENT_MAX_TOOL_ROUNDS=3        optional research rounds
+# AGENT_MAX_DRAFT_ROUNDS=2       optional draft rounds (AVR simulate, or compile)
 # AGENT_RUN_TIMEOUT_S=240        whole-run budget (also what the UI waits for)
 # AGENT_PROVIDER_TIMEOUT_S=120   ceiling for one provider call (clipped to time left)
 # AGENT_PROVIDER_RETRIES=2       retries on 429/5xx/transport errors (backoff + jitter)
@@ -171,14 +164,13 @@ restart/rebuild after changing settings.
 
 ## Forge project memory (JEV) — optional, opt-out
 
-The agent can be governed by [Velxio Forge](../forge/README.md): every user
-prompt first runs one guarded Forge turn — the same generation LLM proposes
-atomic project notes, JEV (TypeSafe's System One decision model) evaluates
-grounding, conflicts, scope and rule-change authorization, and only
-JEV-accepted, user-quoted notes become **active project memory**. That memory is
-injected into the agent's prompt ("rules are binding"), and the agent run itself
-is checked against it. `GET /agent/forge` reports the state; the panel's
-settings show connected / starting / disabled plus the active notes.
+The agent asks [Velxio Forge](../forge/README.md) for one JEV decision before it
+designs. JEV (TypeSafe's System One) does not write firmware and is not the
+chat. Code applies the decision: a trusted clarify-first mode stops the run
+with a question the code wrote; otherwise accepted rules are injected as
+binding project memory and the coding model runs one loop. The Forge UI can
+still run a full `/messages` turn. The agent does not. `GET /agent/forge`
+reports the state.
 
 - **Direct connection, no copies.** `app/agent/forge.py` speaks the live Forge
   HTTP API (`FORGE_BASE_URL`, default `http://127.0.0.1:4321`). Nothing from

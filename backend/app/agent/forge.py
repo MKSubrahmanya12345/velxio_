@@ -267,6 +267,77 @@ def _turn_summary(conversation: dict, response: dict) -> dict:
     }
 
 
+async def _session_conversation(session: str, title: str) -> str:
+    """Reuse this session's forge conversation, creating an empty one on first use.
+
+    Unlike ``_conversation_for``, this does not run a generation turn. The
+    hardware agent decides with JEV, then designs. A full chat turn here would
+    be a second agent.
+    """
+    sessions = _sessions()
+    conv_id = sessions.get(session)
+    if isinstance(conv_id, str) and conv_id:
+        return conv_id
+    data = await _request("POST", "/api/chat/session", {"title": title[:60] or "Hardware project"},
+                          timeout=8.0)
+    conv = data.get("conversation") if isinstance(data.get("conversation"), dict) else data
+    conv_id = str(conv.get("id") or data.get("id") or "")
+    if not conv_id:
+        raise ForgeUnavailable("forge created a conversation without an id")
+    state = _load_state()
+    state.setdefault("sessions", {})[session] = conv_id
+    _save_state(state)
+    return conv_id
+
+
+async def run_decision(prompt: str, session: str = "default") -> dict:
+    """One JEV decision for the hardware agent. Never raises.
+
+    Returns the same shape as ``run_turn`` plus ``clarify`` and ``decision``.
+    ``clarification`` is set only when JEV's mode is clarify_first. It is not
+    a generator essay.
+    """
+    empty = {"ok": False, "context": "", "summary": {}, "clarification": "",
+             "pending_questions": [], "clarify": False, "decision": "answer"}
+    if not is_enabled() or not str(prompt or "").strip():
+        return {**empty, "error": "forge memory is disabled"}
+    live, _health = await ensure_live()
+    if not live:
+        return {**empty, "error": "forge service is not reachable and autostart is off or failed"}
+    try:
+        conv_id = await _session_conversation(session, prompt)
+        data = await _request("POST", f"/api/chat/{conv_id}/decide",
+                              {"text": prompt[:12000]}, timeout=min(25.0, settings.FORGE_TURN_TIMEOUT_S))
+        conversation = data.get("conversation") if isinstance(data.get("conversation"), dict) else {}
+        decision = data.get("decision") if isinstance(data.get("decision"), dict) else {}
+        notes = _notes_of(conversation)
+        active = [n for n in notes if n.get("status") == "active"]
+        tentative = [n for n in notes if n.get("status") in ("pending", "proposed")]
+        clarify = bool(decision.get("clarify"))
+        question = str(decision.get("question") or "")[:1000] if clarify else ""
+        return {
+            "ok": True,
+            "context": _context_block(active, tentative),
+            "summary": {
+                "conversation_id": conv_id,
+                "active_notes": len(active),
+                "open_notes": len(tentative),
+                "withheld": False,
+                "jev_calls": decision.get("jevCalls"),
+                "guard": str(decision.get("gateSummary") or "")[:400],
+                "mode": decision.get("mode") or "answer",
+            },
+            "clarification": question,
+            "pending_questions": [question] if question else [],
+            "clarify": clarify,
+            "decision": "clarify" if clarify else str(decision.get("mode") or "answer"),
+        }
+    except ForgeUnavailable as exc:
+        return {**empty, "error": str(exc)[:300]}
+    except Exception as exc:  # a decision layer must never sink a build run
+        return {**empty, "error": f"forge decision failed: {type(exc).__name__}"}
+
+
 async def run_turn(prompt: str, session: str = "default") -> dict:
     """One guarded forge turn for the agent's user prompt.
 

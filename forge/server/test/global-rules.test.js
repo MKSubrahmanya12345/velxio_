@@ -159,7 +159,7 @@ test('applyPreTurn: only an explicit, named, authorized removal is autonomous', 
   // Adds/modifies steer the generator but never auto-mutate the store.
   const add = applyPreTurn({ rule_op: choice('add') }, candidates);
   assert.equal(add.ruleChange.op, 'add');
-  assert.equal(add.ruleChange.autonomous, undefined);
+  assert.equal(add.ruleChange.autonomous, false);
   const mod = applyPreTurn({ rule_op: choice('modify'), rule_target: choice('g1'), rule_change_authorized: ans(0.98) }, candidates);
   assert.equal(mod.ruleChange.op, 'modify');
   assert.equal(mod.ruleChange.autonomous, false);

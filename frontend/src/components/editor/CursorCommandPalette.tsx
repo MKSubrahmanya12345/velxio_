@@ -149,7 +149,7 @@ export function CursorCommandPalette() {
             ref={inputRef}
             value={query}
             onChange={e => { setQuery(e.target.value); setSelected(0); }}
-            placeholder="Type a command or search... (Velxio = Cursor) • ⌘P files • ⇧⌘P commands • @ mentions"
+            placeholder="Type a command or search"
             style={{
               flex: 1,
               background: 'transparent',
@@ -220,7 +220,7 @@ export function CursorCommandPalette() {
           <span><b>↑↓</b> Navigate</span>
           <span><b>↵</b> Select</span>
           <span><b>Esc</b> Close</span>
-          <span style={{ marginLeft: 'auto', color: '#007acc' }}>Velxio = Cursor • {Object.keys(catalog.boards).length} boards • {Object.keys(catalog.parts).length} parts</span>
+          <span style={{ marginLeft: 'auto' }}>{Object.keys(catalog.boards).length} boards · {Object.keys(catalog.parts).length} parts</span>
         </div>
       </div>
     </div>

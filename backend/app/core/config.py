@@ -96,11 +96,11 @@ class Settings(BaseSettings):
     # before answering — the "the agent is taking too much time" experience.
     # A good run needs 1-3; the defaults now cut it off early and honestly.
     # All are env-overridable for hard problems.
-    AGENT_MAX_ATTEMPTS: int = 6
-    # Research rounds are cheap (catalog lookups) and are what make the loop
-    # agentic; draft rounds compile and may simulate, so they are separate.
-    AGENT_MAX_TOOL_ROUNDS: int = 8
-    AGENT_MAX_DRAFT_ROUNDS: int = 4
+    AGENT_MAX_ATTEMPTS: int = 4
+    # Ceilings, not a ritual. A task the catalog index already answers should
+    # commit on the first call. Research and draft rounds are optional tools.
+    AGENT_MAX_TOOL_ROUNDS: int = 3
+    AGENT_MAX_DRAFT_ROUNDS: int = 2
     # Wall-clock budget for ONE agent run. The route's deadline and the
     # per-call HTTP timeouts are both derived from this, so raising it is a
     # one-line change that nothing else has to be told about.
@@ -139,7 +139,9 @@ class Settings(BaseSettings):
     # Set AGENT_MAX_TOKENS_TOOL_ROUNDS to the proposal value for the old
     # single-ceiling behavior.
     AGENT_MAX_TOKENS_PROPOSAL: int = 10000
-    AGENT_MAX_TOKENS_TOOL_ROUNDS: int = 4000
+    # The call after a tool round is often the commit. A 4k cap truncated the
+    # patch and forced a repair. Same ceiling as a proposal.
+    AGENT_MAX_TOKENS_TOOL_ROUNDS: int = 10000
     # Optional small/fast model dedicated to the JSON repair sub-call. The
     # fixer only repairs JSON syntax — it never designs — so it should never
     # pay frontier-model latency in the user's critical path (Cursor routes
@@ -156,6 +158,9 @@ class Settings(BaseSettings):
     # before the next round (a single-shot run then misses it — raise this to
     # trade serial wait for first-call memory inclusion).
     AGENT_FORGE_GRACE_S: float = 0.0
+    # How long the agent waits for the JEV decision before designing without it.
+    # This is one System One call, not a second chat. A timeout fails open.
+    AGENT_FORGE_DECIDE_WAIT_S: float = 20.0
     # Live Arduino library search from the agent's search_libraries tool.
     AGENT_ALLOW_LIBRARY_SEARCH: bool = True
     # Forge project memory (JEV-governed) for the agent — a direct connection to

@@ -116,7 +116,8 @@ async def test_run_turn_fails_open_when_forge_down(monkeypatch):
         raise forge.ForgeUnavailable("forge is not reachable")
     monkeypatch.setattr(forge, "_request", dead)
     result = await forge.run_turn("anything")
-    assert result == {"ok": False, "context": "", "summary": {}, "error": "forge is not reachable"}
+    assert result["ok"] is False and result["error"] == "forge is not reachable"
+    assert result["clarification"] == "" and result["pending_questions"] == []
 
 
 @pytest.mark.asyncio
@@ -210,48 +211,64 @@ def test_agent_request_accepts_forge_session():
 
 
 @pytest.mark.asyncio
-async def test_run_agent_yields_forge_event_and_survives_failures(monkeypatch):
-    """Memory no longer blocks the first provider call: the turn runs as a
-    background task, its verdict is yielded when it lands, and a dead forge
-    degrades to an 'unavailable' event instead of a crash."""
+async def test_run_agent_waits_for_the_decision_before_designing(monkeypatch):
+    """JEV decides first. The coding model sees the rules, or the run stops to ask."""
     import app.agent.service as service
 
     turns = {"count": 0}
+    seen: list[str] = []
 
-    async def fake_run_turn(prompt, session="default"):
+    async def fake_decision(prompt, session="default"):
         turns["count"] += 1
-        await asyncio.sleep(0)
-        return {"ok": True, "context": "PROJECT MEMORY (user-established, JEV-reviewed; rules are binding):\n- [rule] Use a red LED only.",
-                "summary": {"conversation_id": "c", "active_notes": 1, "open_notes": 0,
-                            "withheld": False, "jev_calls": 3, "guard": "Passed"}}
+        return {
+            "ok": True,
+            "context": "PROJECT MEMORY (user-established, JEV-reviewed; rules are binding):\n- [rule] Use a red LED only.",
+            "summary": {"conversation_id": "c", "active_notes": 1, "open_notes": 0,
+                        "withheld": False, "jev_calls": 1, "guard": "Passed"},
+            "clarify": False,
+            "decision": "answer",
+            "clarification": "",
+        }
 
-    async def dead_turn(prompt, session="default"):
+    async def dead_decision(prompt, session="default"):
         turns["count"] += 1
-        await asyncio.sleep(0)
         raise forge.ForgeUnavailable("forge is not reachable")
 
+    async def clarify_decision(prompt, session="default"):
+        turns["count"] += 1
+        return {
+            "ok": True,
+            "context": "- [rule] Use a red LED only.",
+            "summary": {"active_notes": 1},
+            "clarify": True,
+            "decision": "clarify",
+            "clarification": "A decision is needed before designing. Which pin?",
+        }
+
     async def llm(messages, spec=None, max_tokens=None):
-        # A real provider call yields to the loop (network I/O); the sleep is
-        # the parity for that, letting the forge task run during the call.
-        await asyncio.sleep(0)
+        seen.append("\n".join(m["content"] for m in messages))
         return Proposal(summary="ok")
 
-    monkeypatch.setattr(forge, "run_turn", fake_run_turn)
+    monkeypatch.setattr(forge, "run_decision", fake_decision)
     monkeypatch.setattr(service, "propose", llm)
 
     request = _minimal_request()
     events = [e async for e in service.run_agent(request)]
-    kinds = [e["type"] for e in events]
-    assert kinds[0] == "run_started"
-    assert "forge" in kinds
+    assert events[0]["type"] == "run_started"
     forge_ev = [e for e in events if e["type"] == "forge"][0]
     assert forge_ev["status"] == "ok" and forge_ev["summary"]["active_notes"] == 1
-    # The terminal event stays last for consumers that key on events[-1].
     assert events[-1]["type"] == "answer"
+    assert seen and "Use a red LED only." in seen[0]
 
-    # fail-open: an unavailable forge yields an 'unavailable' event, not a crash.
-    # `count` is deliberately not reset: it proves both runs attempted the turn.
-    monkeypatch.setattr(forge, "run_turn", dead_turn)
+    monkeypatch.setattr(forge, "run_decision", dead_decision)
     events = [e async for e in service.run_agent(request)]
     assert [e for e in events if e["type"] == "forge"][0]["status"] == "unavailable"
-    assert turns["count"] == 2  # both runs attempted the turn, neither propagated an error
+    assert events[-1]["type"] == "answer"
+
+    monkeypatch.setattr(forge, "run_decision", clarify_decision)
+    seen.clear()
+    events = [e async for e in service.run_agent(request)]
+    assert events[-1]["type"] == "answer"
+    assert "Which pin?" in events[-1]["summary"]
+    assert not seen
+    assert turns["count"] == 3

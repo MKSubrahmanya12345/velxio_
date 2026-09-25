@@ -57,7 +57,7 @@ beforeEach(() => {
 });
 
 describe('providers page', () => {
-  it('offers the four providers and keeps the key in plain text with a note', async () => {
+  it('offers the four providers and does not show the saved key', async () => {
     render(<App />);
     await openProviders();
 
@@ -65,17 +65,18 @@ describe('providers page', () => {
       expect(screen.getByRole('button', { name: new RegExp(label) })).toBeInTheDocument();
     }
 
-    // The credential field is a text input, so what you type is what you see.
     const keyField = screen.getByLabelText('Gemini API key');
-    expect(keyField).toHaveAttribute('type', 'text');
+    expect(keyField).toHaveAttribute('type', 'password');
     await userEvent.type(keyField, 'AIza-plain-visible');
     expect(keyField).toHaveValue('AIza-plain-visible');
+    expect(screen.queryByText(/Typed and stored in plain text/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /copy/i })).not.toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText('Note'), 'main key · free tier');
     vi.mocked(api.providers.addKey).mockResolvedValue({
       ok: true,
-      key: key('pk_1', 'gemini', 'main key · free tier', { apiKey: 'AIza-plain-visible' }),
-      state: stateWith([key('pk_1', 'gemini', 'main key · free tier', { apiKey: 'AIza-plain-visible' })]),
+      key: key('pk_1', 'gemini', 'main key · free tier', { apiKey: 'AIza…in' }),
+      state: stateWith([key('pk_1', 'gemini', 'main key · free tier', { apiKey: 'AIza…in' })]),
     });
 
     await userEvent.click(screen.getByRole('button', { name: 'Add key' }));
@@ -83,10 +84,10 @@ describe('providers page', () => {
       provider: 'gemini', apiKey: 'AIza-plain-visible', note: 'main key · free tier', model: 'gemini-2.5-flash',
     })));
 
-    // The saved card shows the whole key and the note — no masking, no dots.
-    const card = (await screen.findByText('AIza-plain-visible', { selector: 'code' })).closest('li')!;
+    const card = (await screen.findByText('AIza…in', { selector: 'code' })).closest('li')!;
     expect(within(card).getByText('main key · free tier')).toBeInTheDocument();
-    expect(within(card).queryByText(/•+/)).not.toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: /copy/i })).not.toBeInTheDocument();
+    expect(screen.queryByText('AIza-plain-visible')).not.toBeInTheDocument();
     expect(screen.getByText(/Saved Google Gemini key/i)).toBeInTheDocument();
   });
 
@@ -105,7 +106,7 @@ describe('providers page', () => {
     render(<App />);
     await openProviders();
     await userEvent.click(screen.getByRole('button', { name: /Ollama \(local\)/ }));
-    expect(screen.getByLabelText(/API key \(Ollama needs none/i)).toHaveAttribute('type', 'text');
+    expect(screen.getByLabelText(/API key \(Ollama needs none/i)).toHaveAttribute('type', 'password');
     expect(screen.getByLabelText('Ollama URL')).toHaveValue('http://localhost:11434');
     expect(screen.getByLabelText('Model')).toHaveValue('llama3.2');
   });

@@ -100,25 +100,17 @@ async def run(body: AgentRequest, request: Request):
     await _slots.acquire()
 
     async def stream():
-        canvas_touched = False
         try:
             async with asyncio.timeout(settings.AGENT_RUN_TIMEOUT_S):
                 async for event in run_agent(body):
                     if await request.is_disconnected():
                         return
-                    # Progressive canvas updates already called loadWorkspace()
-                    # in the browser, so a timeout may not claim "unchanged".
-                    if event.get("type") == "canvas_update":
-                        canvas_touched = True
                     yield json.dumps(event, allow_nan=False) + "\n"
         except TimeoutError:
-            tail = (" Parts already dropped on the canvas are kept — use Checkpoints "
-                    "to undo." if canvas_touched else
-                    " Your workspace is unchanged.")
             yield json.dumps({"type": "error",
                               "message": f"Agent time limit reached after "
-                                         f"{int(settings.AGENT_RUN_TIMEOUT_S)}s."
-                                         f"{tail} Try a smaller request."}) + "\n"
+                                         f"{int(settings.AGENT_RUN_TIMEOUT_S)}s. "
+                                         f"Your workspace is unchanged. Try a smaller request."}) + "\n"
         except Exception as exc:
             # Only explicitly safe provider errors may be shown to the browser.
             message = str(exc) if isinstance(exc, ProviderError) else "Agent service failed. Check backend connectivity and model configuration, then retry."

@@ -528,6 +528,57 @@
   display: block;
 }
 
+.phone-page-card {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 40;
+  width: min(420px, calc(100vw - 32px));
+  padding: 12px 14px;
+  background: var(--wb-2);
+  color: var(--wb-12);
+  border: 1px solid var(--wb-7);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.phone-page-card-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.phone-page-card-bar strong {
+  color: var(--wb-13);
+}
+
+.phone-page-card-hide,
+.phone-page-card-copy {
+  background: var(--wb-6);
+  color: var(--wb-12);
+  border: 1px solid var(--wb-8);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.phone-page-card-url {
+  display: block;
+  margin: 0 0 8px;
+  color: var(--color-feedback-info, #7dd3fc);
+  word-break: break-all;
+}
+
+.phone-page-card p {
+  margin: 8px 0 0;
+  color: var(--wb-10);
+}
+
 /* WiFi status colours */
 .canvas-wifi-initializing {
   color: var(--color-feedback-warning);
