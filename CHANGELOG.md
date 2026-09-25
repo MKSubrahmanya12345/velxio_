@@ -37,7 +37,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the serial batcher, and `lib/proHardwareSerial.ts` lets an installed monitor
   intercept a board's serial input while attached
 
+- Agent **built-in offline planner** (`backend/app/agent/planner.py`, `AGENT_BUILTIN`, default on):
+  with no provider key, no network and no setup a plain-English request — "blink an LED",
+  "button and LED", "read a potentiometer", "HC-SR04 distance", "DHT22 on pin 2", "sweep a servo",
+  "NeoPixel strip", "I2C OLED", "7-segment counter", "RGB LED" — is parsed against the generated
+  catalog and turned into the same `Proposal` a model returns: board, parts, 220-1000 Ω series
+  resistors where the rules require one, pin-level wiring, firmware and falsifiable expectations.
+  It passes the identical gates (schema validation, deterministic analysis, the real compiler, the
+  browser's electrical pre-flight and live-simulation checks) and appears as `local` /
+  "Built-in (offline)" in the provider dropdown. A configured keyed provider is still preferred;
+  a run whose provider has no key falls back to the planner with a `note` instead of failing, and
+  `AGENT_BUILTIN=false` restores the old "not configured" behaviour. It refuses honestly — and says
+  why — what it cannot do: a bare stepper coil or relay (needs a driver), a Raspberry Pi target
+  (Python, not Arduino C++), a part the catalog has no wiring rules for, or a question
+
 ### Changed
+- `/api/agent/status` reports a local-server provider (OpenCode) as not ready when nothing is
+  listening on its base URL, and marks the built-in planner with `"local": true`. The browser used
+  to auto-select OpenCode on a box where `opencode serve` was never started, so every run died on a
+  refused connection with no circuit produced
 - The agent no longer uses a workspace access token. `AGENT_ACCESS_TOKEN` /
   `AGENT_ALLOW_ANONYMOUS` are gone: with `AGENT_ENABLED=true` and a configured
   provider the agent endpoints (`/api/agent/runs`, `records`, `forge/*`,
@@ -46,6 +64,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   reverse proxy when exposing it
 
 ### Fixed
+- Agent analysis (`firmware_pin_usage`) re-read the **first** `pinMode(` in a source file for every
+  later `pinMode` call, so any sketch that set one pin `OUTPUT` and another `INPUT` — a TRIG/ECHO
+  ultrasonic, a button with an LED — was reported as "Pin 3 is driven by the firmware and also driven
+  by HC-SR04 ECHO" and the repair attempts were spent on a design that was correct
 - Forge/WireGI: AWS Bedrock with `BEDROCK_MODEL=moonshotai.kimi-k2.5` failed every
   call with HTTP 400 `{"message":"Operation not allowed"}` — native Converse does not
   serve Kimi/Moonshot ids. Those ids now go to the Bedrock Mantle chat-completions

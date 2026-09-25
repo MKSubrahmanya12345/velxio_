@@ -21,6 +21,7 @@ import os
 import random
 import re
 import signal
+import socket
 import sys
 import time
 import uuid
@@ -31,9 +32,10 @@ from typing import Callable, Tuple
 import httpx
 from pydantic import ValidationError
 
-from app.agent import catalog, jsonrepair
+from app.agent import catalog, jsonrepair, planner
 from app.agent.feedback import register as register_feedback, push as push_feedback, unregister
 from app.agent.models import AgentRequest, Proposal, apply_patch, describe_error
+from app.agent.planner import PlannerError
 from app.agent.phone_page import phone_page_note, phone_page_problems
 from app.agent.runlog import RunRecord, start as start_run_record
 from app.agent.models import DRAFT_TOOLS
@@ -877,6 +879,11 @@ class ProviderTransientError(ProviderError):
 
 async def _propose_once(messages: list[dict], spec: ProviderSpec,
                         max_tokens: int | None = None) -> Proposal:
+    if spec.kind == "local":
+        # The built-in planner is not a chat endpoint: it answers from the
+        # request, not from a message list. _run calls it directly and never
+        # reaches here; a call would mean the loop was entered by mistake.
+        raise ProviderError("The built-in planner does not accept chat messages.")
     if spec.kind == "opencode":
         return await _propose_once_opencode(messages, spec, max_tokens)
     if spec.kind == "bedrock":
@@ -1349,8 +1356,52 @@ async def _propose_once_converse(messages: list[dict], spec: ProviderSpec,
     return proposal
 
 
+def _is_builtin(provider_id: str) -> bool:
+    """True when this run is served by the offline planner, not a model.
+
+    A built-in run has nothing to retry, nothing to research and nothing to
+    fix: no JEV decision, no tool rounds, no draft rounds and no repair loop.
+    Skipping all of it is the whole point — one deterministic proposal straight
+    to validation and the compiler.
+    """
+    spec = settings.provider(provider_id)
+    return spec is not None and spec.kind == "local"
+
+
+def _reachable(url: str, timeout: float = 0.4) -> bool:
+    """True when a TCP connect to this endpoint succeeds within `timeout`."""
+    from urllib.parse import urlsplit
+    text = url if "//" in url else f"//{url}"
+    parts = urlsplit(text)
+    host = parts.hostname or "127.0.0.1"
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def provider_available(spec: ProviderSpec) -> bool:
+    """Usable right now: configured, and for a local server, listening.
+
+    OpenCode needs no key, so its `configured` is just "a base URL and a model
+    are set" — true on a box where `opencode serve` was never started. Without
+    this probe the browser auto-selected OpenCode, every run died on a refused
+    connection, and the user saw an error instead of a circuit.
+    """
+    if spec.kind == "opencode":
+        return bool(spec.configured and _reachable(spec.base_url))
+    return spec.configured
+
+
 def _resolve_provider(provider_id: str) -> ProviderSpec:
-    """The configured provider for a request, or a user-safe error."""
+    """The configured provider for a request, or a user-safe error.
+
+    Deliberately does NOT probe: an explicitly requested local-server provider
+    is attempted, and its own transport error is what the user sees. The probe
+    belongs to /status, which is what decides the browser's default selection.
+    """
     spec = settings.provider(provider_id)
     if spec is None:
         raise ProviderError(
@@ -1695,7 +1746,9 @@ async def run_agent(request: AgentRequest):
     forge_task: asyncio.Task | None = None
     try:
         from app.agent import forge as forge_bridge
-        if forge_bridge.is_enabled():
+        # A built-in run has no memory to consult and no decision to wait for;
+        # the JEV wait used to be the first thing that delayed an offline run.
+        if not _is_builtin(request.provider) and forge_bridge.is_enabled():
             forge_task = asyncio.create_task(_forge_turn(request))
     except Exception:  # noqa: BLE001 — the bridge import itself must not kill a run
         forge_task = None
@@ -1747,11 +1800,22 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
     try:
         spec = _resolve_provider(request.provider)
     except ProviderError as exc:
-        logger.error("run %s: %s", run_id, exc)
-        record.finish("error", str(exc))
-        yield event({"type": "error", "message": str(exc)})
-        return
+        # A browser that has not picked a provider yet, or one whose key was
+        # removed, must not lose the whole run: fall back to the built-in
+        # planner, which needs nothing configured and spends nothing.
+        fallback = settings.provider("local")
+        if fallback is None:
+            logger.error("run %s: %s", run_id, exc)
+            record.finish("error", str(exc))
+            yield event({"type": "error", "message": str(exc)})
+            return
+        logger.info("run %s: %s — using the built-in planner", run_id, exc)
+        yield event({"type": "note",
+                     "message": "No model provider is configured for this run — using the "
+                                "built-in offline planner (no key, no cost)."})
+        spec = fallback
     record.provider = spec.id
+    builtin = spec.kind == "local"
 
     async def propose_counted(messages: list[dict], max_tokens: int | None = None,
                               stage: str = "", attempt: int = 0) -> Proposal:
@@ -1911,7 +1975,7 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         })
         pending_notes.clear()
 
-    if forge_task is not None:
+    if forge_task is not None and not builtin:
         yield event({"type": "stage", "stage": "planning",
                      "message": "Deciding this turn"})
         if not forge_task.done():
@@ -1968,7 +2032,7 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
     else:
         tool_rounds_left = settings.AGENT_MAX_TOOL_ROUNDS
         draft_rounds_left = settings.AGENT_MAX_DRAFT_ROUNDS
-    final_attempt = settings.AGENT_MAX_ATTEMPTS - 1
+    final_attempt = (0 if builtin else settings.AGENT_MAX_ATTEMPTS - 1)
     # One memo for the whole run: identical (tool, args, project) is executed
     # once — repeats across rounds return instantly, identical calls batched
     # in the same round share a single in-flight execution (single-flight).
@@ -1978,7 +2042,8 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
     commit_reserve = min(settings.AGENT_COMMIT_RESERVE_S,
                          settings.AGENT_RUN_TIMEOUT_S * 0.4)
 
-    for attempt in range(settings.AGENT_MAX_ATTEMPTS):
+    attempts = 1 if builtin else settings.AGENT_MAX_ATTEMPTS
+    for attempt in range(attempts):
         # Consume any mid-run notes the user sent while the previous attempt
         # was in flight. Notes are folded into a user turn just before the
         # next propose so the model sees them as a clarification.
@@ -1991,8 +2056,10 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         apply_forge_note()
         stage = "planning" if attempt == 0 else "repairing"
         yield event({"type": "stage", "stage": stage, "attempt": attempt + 1,
-                     "message": "Designing circuit and firmware" if attempt == 0
-                     else "Repairing from diagnostics"})
+                     "message": "Building from the catalog with the built-in planner"
+                     if builtin else
+                     ("Designing circuit and firmware" if attempt == 0
+                      else "Repairing from diagnostics")})
         # ProviderError (non-transient, after retries) ends the run gracefully;
         # MalformedResponse (from JSON salvage/validation) falls through to the
         # repair path below with specific, actionable diagnostics.
@@ -2001,12 +2068,26 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         user_short = ""  # short human-readable label for the diagnostic event
         while proposal is None:
             try:
+                if builtin:
+                    # No provider call, no tool rounds, no draft rounds: the
+                    # planner reads the request and the catalog and returns the
+                    # same Proposal shape a model would. It is deterministic, so
+                    # a retry would produce byte-identical output — anything the
+                    # gates reject below is reported, not looped on.
+                    proposal = planner.plan(request)
+                    break
                 call_result.clear()
                 async for _ev in _propose_stream(
                         messages, max_tokens=settings.AGENT_MAX_TOKENS_PROPOSAL,
                         stage=stage, attempt=attempt + 1):
                     yield _ev
                 proposal = call_result.get("proposal")
+            except PlannerError as exc:
+                # An honest "I cannot build that offline" beats an empty canvas.
+                logger.info("run %s builtin planner declined: %s", run_id, exc)
+                record.finish("explained")
+                yield event({"type": "answer", "summary": f"{exc}"})
+                return
             except ProviderError as exc:
                 logger.error("run %s: %s", run_id, exc)
                 record.finish("error", str(exc))

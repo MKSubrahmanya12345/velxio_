@@ -389,7 +389,8 @@ class AgentRequest(StrictModel):
     messages: list[Message] = Field(default_factory=list, max_length=12)
     # Which server-side provider routes this run. Only ids listed in
     # Settings.providers() are accepted; the id never carries credentials.
-    provider: Literal["opencode", "gemini", "bedrock"] = "bedrock"
+    # "local" is the built-in planner: no endpoint, no key, no cost.
+    provider: Literal["opencode", "gemini", "bedrock", "local"] = "bedrock"
     # chat explains, composer edits, agent may use tools, inline edits the selection.
     mode: Literal["agent", "chat", "composer", "inline"] = "agent"
     # User already chose to build. Do not stop on a JEV clarify-first decision.

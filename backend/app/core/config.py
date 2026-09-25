@@ -25,6 +25,10 @@ class ProviderSpec:
 
     @property
     def configured(self) -> bool:
+        if self.kind == "local":
+            # The built-in planner: no endpoint, no key, no cost. It is the
+            # reason the agent produces output on a box with no credentials.
+            return True
         if self.kind == "opencode":
             # Local server talks to the model for us; credentials live in
             # opencode, not here. Ready whenever a base URL is wired up.
@@ -57,6 +61,12 @@ class Settings(BaseSettings):
 
     # Explicitly opt-in: shared provider credits must not be exposed anonymously.
     AGENT_ENABLED: bool = False
+    # The built-in offline planner needs no provider and spends nothing: it
+    # reads the generated catalog and emits a real Proposal (parts, wiring,
+    # firmware) that still goes through validation, the real compiler and the
+    # live-simulation checks. On by default so the agent works with no setup;
+    # set AGENT_BUILTIN=false to require a model provider.
+    AGENT_BUILTIN: bool = True
     # Providers: OpenCode (local), Gemini and Amazon Bedrock. There is no
     # generic OpenAI-compatible provider — every endpoint this ships with is
     # one we actually run. Groq was removed (its free tier 429'd mid-run and
@@ -198,7 +208,15 @@ class Settings(BaseSettings):
     # left over from pre-split .env files or from the velxio-prod overlay so the
     # OSS image starts cleanly instead of crashing with extra_forbidden.
     def providers(self) -> list[ProviderSpec]:
-        """Every provider the agent can route to, in dropdown order."""
+        """Every provider the agent can route to, in dropdown order.
+
+        The built-in planner is listed LAST so a configured model provider is
+        always the default and nothing silently downgrades a deployment that
+        has credentials.
+        """
+        builtin = ([ProviderSpec(id="local", label="Built-in (offline)", kind="local",
+                                 model="velxio-planner")]
+                   if self.AGENT_BUILTIN else [])
         return [
             ProviderSpec(id="opencode", label="OpenCode", kind="opencode",
                          base_url=self.AGENT_OPENCODE_BASE_URL,
@@ -208,6 +226,7 @@ class Settings(BaseSettings):
             ProviderSpec(id="bedrock", label="Amazon Bedrock", kind="bedrock",
                          model=self.BEDROCK_MODEL_ID, api_key=self.BEDROCK_API_KEY,
                          region=self.AWS_REGION or self.BEDROCK_REGION),
+            *builtin,
         ]
 
     def provider(self, provider_id: str) -> ProviderSpec | None:

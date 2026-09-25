@@ -159,7 +159,8 @@ def firmware_pin_usage(
     read: set[str] = set()
     for source in sources:
         text = _clean(source)
-        for name, arg in _CALL.findall(text):
+        for match in _CALL.finditer(text):
+            name, arg = match.group(1), match.group(2)
             pin = _resolve(arg, consts, board_pins)
             if pin is None:
                 continue
@@ -169,7 +170,12 @@ def firmware_pin_usage(
             elif name in READ_CALLS:
                 read.add(pin)
             else:  # pinMode: the mode argument decides the direction
-                mode = text[text.find(name + "(") :]
+                # Slice from the END OF THIS match: searching for the first
+                # "pinMode(" in the file reported the mode of the FIRST pinMode
+                # call for every later call, so a sketch with one OUTPUT and one
+                # INPUT pinMode claimed the input pin was driven too ("Pin 3 is
+                # driven by the firmware and also driven by HC-SR04 ECHO").
+                mode = text[match.end():]
                 if "OUTPUT" in mode.split(")")[0]:
                     driven.add(pin)
                 else:

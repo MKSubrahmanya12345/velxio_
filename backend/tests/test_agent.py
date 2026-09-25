@@ -304,8 +304,14 @@ def test_runs_open_and_no_secret_leaks(client, monkeypatch):
     payload = AgentRequest(prompt="hi", project=Project()).model_dump()
     assert client.post("/api/agent/runs", json=payload).status_code == 200
     assert "server-secret" not in client.get("/api/agent/status").text
+    # Opt-in still gates keyed providers: AGENT_ENABLED=False + no built-in
+    # planner = 503. With the built-in planner (on by default) the run is
+    # served locally and costs nothing, so it stays open.
     monkeypatch.setattr(agent.settings, "AGENT_ENABLED", False)
+    monkeypatch.setattr(agent.settings, "AGENT_BUILTIN", False)
     assert client.post("/api/agent/runs", json=payload).status_code == 503
+    monkeypatch.setattr(agent.settings, "AGENT_BUILTIN", True)
+    assert client.post("/api/agent/runs", json=payload).status_code == 200
 
 
 def test_stream_endpoint_and_slot_release(client, monkeypatch):

@@ -10,7 +10,8 @@ from app.agent import catalog
 from app.agent.feedback import push as push_feedback
 from app.agent.models import AgentRequest
 from app.agent.runlog import snapshot as run_snapshot
-from app.agent.service import ProviderError, agent_run_budget_s, run_agent
+from app.agent.service import (
+    ProviderError, agent_run_budget_s, provider_available, run_agent)
 from app.core.config import settings
 
 router = APIRouter()
@@ -18,8 +19,16 @@ _slots = asyncio.Semaphore(2)
 
 
 def configured():
-    return (settings.AGENT_ENABLED
-            and any(spec.configured for spec in settings.providers()))
+    """Whether the agent can serve a run at all.
+
+    The built-in planner is local and deterministic — no endpoint, no key, no
+    cost — so it works with nothing configured. AGENT_ENABLED still gates every
+    *keyed* provider, so a shared deployment cannot leak paid credits to
+    anonymous users.
+    """
+    if not settings.AGENT_ENABLED:
+        return settings.provider("local") is not None
+    return any(provider_available(spec) for spec in settings.providers())
 
 
 def authorize():
@@ -72,11 +81,18 @@ async def tools_invoke(body: ToolInvokeBody):
 @router.get("/status")
 async def status():
     # The browser reads model names/ids only; credentials never leave the server.
-    providers = [{"id": p.id, "label": p.label, "model": p.model, "configured": p.configured}
+    # `configured` here means usable NOW: a local-server provider (OpenCode)
+    # that is not listening reports false, so the browser does not auto-select
+    # it and then fail every run on a refused connection.
+    providers = [{"id": p.id, "label": p.label, "model": p.model,
+                  "configured": provider_available(p), "local": p.kind == "local"}
                  for p in settings.providers()]
     default = settings.provider("bedrock")
+    if default is None or not provider_available(default):
+        default = next((spec for spec in settings.providers()
+                        if spec.kind != "local" and provider_available(spec)), None)
     if default is None:
-        default = next((spec for spec in settings.providers() if spec.configured), None)
+        default = settings.provider("local")
     return {"configured": configured(),
             "providers": providers,
             "model": default.model if configured() else None,

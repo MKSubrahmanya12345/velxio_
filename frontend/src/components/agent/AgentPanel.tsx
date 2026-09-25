@@ -51,6 +51,8 @@ interface ProviderInfo {
   label: string;
   model: string;
   configured: boolean;
+  /** The built-in offline planner: no key, no network, no cost. */
+  local?: boolean;
 }
 interface Status {
   configured: boolean;
