@@ -263,6 +263,22 @@ def resolve_pin(pins: Iterable[str], name: Any) -> str | None:
             alias_hits = by_key.get(alias)
             if alias_hits and len(alias_hits) == 1:
                 return alias_hits[0]
+    # Diode/LED convention: A = anode, K = cathode (German "Kathode"). The
+    # catalog names the cathode "C", so training data that wires `led1:K`
+    # burned a whole repair round per LED. Map K->C (and the word forms)
+    # ONLY on parts that carry the A+C pair and no real "K" pin — the
+    # lcd1602 backlight cathode and the JK flip-flop's K input keep working.
+    raw_key = _pin_key(raw)
+    if raw_key in ("k", "cathode"):
+        has_k = any(_pin_key(pin) == "k" for pin in known)
+        a_pin = next((pin for pin in known if _pin_key(pin) == "a"), None)
+        c_pin = next((pin for pin in known if _pin_key(pin) == "c"), None)
+        if not has_k and a_pin and c_pin:
+            return c_pin
+    if raw_key == "anode":
+        a_hits = [pin for pin in known if _pin_key(pin) == "a"]
+        if len(a_hits) == 1:
+            return a_hits[0]
     return None
 
 

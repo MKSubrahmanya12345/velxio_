@@ -4686,18 +4686,18 @@
     },
     "arduino-uno": {
       "class": "board",
-      "placeable": false,
-      "why": "the board is the project's `board` field, not a component"
+      "placeable": true,
+      "notes": "Placeable as an extra MCU board: it lands on the canvas as a second, independently wired Arduino Uno (multi-board). The project's primary build target remains the `board` field; this instance is a wired companion board."
     },
     "arduino-nano": {
       "class": "board",
-      "placeable": false,
-      "why": "only the Arduino Uno is supported as a build target right now"
+      "placeable": true,
+      "notes": "Placeable as an extra MCU board: it lands on the canvas as a second, independently wired Arduino Nano (multi-board). The project's primary build target remains the `board` field."
     },
     "arduino-mega": {
       "class": "board",
-      "placeable": false,
-      "why": "only the Arduino Uno is supported as a build target right now"
+      "placeable": true,
+      "notes": "Placeable as an extra MCU board: it lands on the canvas as a second, independently wired Arduino Mega (multi-board). The project's primary build target remains the `board` field."
     },
     "esp32-devkit-v1": {
       "class": "board",
