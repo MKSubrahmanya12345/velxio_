@@ -121,8 +121,30 @@ URL/model/key.
 
 Any provider with its key/config configured appears in the chat panel's **provider dropdown**
 in the composer; the selection is per-session and sent as a provider id in each run
-(`opencode`, `gemini` or `bedrock`, default `bedrock`). Keys never reach the
-browser, and the browser cannot change provider URLs/keys.
+(`opencode`, `gemini`, `bedrock` or `local`, default `bedrock`). Keys never reach the
+browser, and the browser cannot change provider URLs/keys. A keyed provider that is
+configured is always preferred.
+
+### Built-in planner — no key, no network (`local`)
+
+`backend/app/agent/planner.py` is a deterministic planner that needs no provider at
+all (`AGENT_BUILTIN`, default on). It parses the prompt against the same generated
+catalog the model reads and returns the same `Proposal`: board, parts, pin
+assignment, wiring, firmware and falsifiable expectations. Because it spends nothing,
+it is the one provider available while `AGENT_ENABLED=false`; `AGENT_BUILTIN=false`
+restores the old "agent is not configured" behaviour, and a run whose provider has no
+key falls back to it with a `note` instead of failing.
+
+It is not a shortcut past the gates: the patch still goes through schema validation,
+the deterministic analysis, the real compiler and the browser's electrical pre-flight
+and live-simulation checks, and it refuses (with a reason) what it cannot do honestly —
+a bare stepper coil, a relay without a driver, a Python target, a question.
+
+Working today: LED / RGB LED, button (+LED), buzzer, servo, potentiometer and the
+analog inputs, photoresistor, DHT22, HC-SR04, I2C OLED, parallel and I2C LCD,
+NeoPixel, 7-segment, switches/tilt/PIR, an I2C bus scan for any other I2C part, and
+`board_pinout`-style answers about any catalog part. Anything it places still counts
+against the same 40 parts / 100 wires limits.
 
 ```sh
 # Terminal 1, from repo root. Start in backend so .env and Python modules resolve.

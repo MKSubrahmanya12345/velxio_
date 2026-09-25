@@ -166,8 +166,30 @@ async def test_run_uses_the_requested_provider(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_provider_is_a_graceful_error(monkeypatch):
+async def test_unconfigured_provider_falls_back_to_the_builtin_planner(monkeypatch):
+    """A run must not die because a provider has no key: build it offline.
+
+    Without this the browser (which defaults to a keyed provider) produced no
+    output at all on a box with no credentials, which is the state a fresh
+    clone is in.
+    """
     monkeypatch.setattr(service.settings, "AGENT_GEMINI_API_KEY", "")
+    events = await collect(AgentRequest(prompt="blink an LED", project=Project(),
+                                       provider="gemini"))
+    assert any(event["type"] == "note" and "built-in" in event["message"]
+               for event in events)
+    # It reached a real proposal (the plan event is emitted after the patch
+    # passed validation). Any terminal error must be the missing toolchain in a
+    # unit-test environment — never "provider is not configured".
+    assert any(event["type"] == "plan" for event in events)
+    if events[-1]["type"] == "error":
+        assert "toolchain" in events[-1]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_provider_is_a_graceful_error_without_the_builtin(monkeypatch):
+    monkeypatch.setattr(service.settings, "AGENT_GEMINI_API_KEY", "")
+    monkeypatch.setattr(service.settings, "AGENT_BUILTIN", False)
     events = await collect(AgentRequest(prompt="blink", project=Project(), provider="gemini"))
     assert events[-1]["type"] == "error"
     assert "'gemini' is not configured" in events[-1]["message"]
