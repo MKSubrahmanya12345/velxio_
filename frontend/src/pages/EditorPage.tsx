@@ -9,6 +9,7 @@ import { useSEO } from '../utils/useSEO';
 import { getLocaleFromPath, localizedPath } from '../i18n/path';
 import { restoreStashedWorkspace } from '../utils/workspaceDraft';
 import { CodeEditor } from '../components/editor/CodeEditor';
+import { AgentTypingOverlay } from '../agent/AgentTypingOverlay';
 import { EditorToolbar } from '../components/editor/EditorToolbar';
 import { FileExplorer } from '../components/editor/FileExplorer';
 
@@ -717,6 +718,10 @@ export const EditorPage: React.FC = () => {
               style={{ flex: 1, overflow: 'hidden', minHeight: 0, position: 'relative' }}
             >
               <CodeEditor />
+              {/* Agent reveal: while the agent's checkpoint plays back, the
+                  changed files type out here; the overlay unmounts to reveal
+                  the real (already complete) editor. */}
+              <AgentTypingOverlay />
               {/* The compile card lives over the simulator canvas, which is
                   where the build's result appears. In code-only view (and on
                   a phone showing the editor) that pane is display:none, so it

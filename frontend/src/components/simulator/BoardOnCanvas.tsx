@@ -1,5 +1,6 @@
 import React from 'react';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
+import { useAgentReveal } from '../../agent/reveal';
 import { isBoardSeated } from '../../utils/socketSnap';
 import { getProBoard } from '../../lib/proBoardRegistry';
 import type { BoardInstance } from '../../types/board';
@@ -137,6 +138,8 @@ export const BoardOnCanvas = ({
   );
   // Drag-to-front rank: 0 = never dragged (static layering applies).
   const zRaise = useSimulatorStore((st) => st.zOrders[id] ?? 0);
+  // Agent reveal: when this run created the first board, fade it in.
+  const revealBoardId = useAgentReveal((s) => s.boardId);
 
   // Status dot color: green=running, amber=compiled, gray=idle
   const statusColor = board.running ? '#22c55e' : board.compiledProgram ? '#f59e0b' : '#6b7280';
@@ -230,6 +233,9 @@ export const BoardOnCanvas = ({
     // sibling of PinOverlay) made moving onto a pin fire mouseleave, which
     // cleared the hover and hid the pins before you could click one.
     <div
+      // Agent reveal: the board this run created fades in before its parts
+      // drop on top. Cosmetic only — the board is already in the store.
+      className={revealBoardId === id ? 'velxio-reveal-board' : undefined}
       // Stacking: boards normally sit BELOW components (z 0 vs their 1/2) —
       // a resistor next to an Arduino must be visible on top, and a blanket
       // z bump here once hid it behind the board in every ordinary example.

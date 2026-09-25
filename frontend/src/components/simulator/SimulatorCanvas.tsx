@@ -30,6 +30,8 @@ import { BoardSensorControls } from './BoardSensorControls';
 import { WireLayer } from './WireLayer';
 import type { SegmentHandle, WaypointHandle, AlignmentGuide } from './WireLayer';
 import { ElectricalOverlay } from '../analog-ui/ElectricalOverlay';
+import { useAgentReveal } from '../../agent/reveal';
+import '../../agent/AgentReveal.css';
 import { BoardOnCanvas } from './BoardOnCanvas';
 import { PartSimulationRegistry } from '../../simulation/parts';
 import { PROPERTY_CHANGE_EVENT, type PropertyChangeDetail } from '../../simulation/parts/partUtils';
@@ -269,6 +271,11 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
   const setSelectedWire = useSimulatorStore((s) => s.setSelectedWire);
   const updateWire = useSimulatorStore((s) => s.updateWire);
   const wires = useSimulatorStore((s) => s.wires);
+
+  // Agent reveal: parts the agent just placed drop in on a per-part delay.
+  // Empty map on every non-reveal frame — the lookup below is a no-op.
+  const partDelays = useAgentReveal((s) => s.partDelays);
+  const revealActive = useAgentReveal((s) => s.active);
 
   // Recorded canvas actions — these wrap the raw mutators above with an
   // undoable CanvasCommand. Use these at the *commit* point of a user
@@ -2554,7 +2561,9 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
       return (
         <React.Fragment key={component.id}>
           <div
-            className="component-interactive-group"
+            className={`component-interactive-group${
+              partDelays[component.id] != null ? ' velxio-reveal-part' : ''
+            }`}
             onMouseEnter={() => setHoveredComponentId(component.id)}
             onMouseLeave={() =>
               setHoveredComponentId((curr) => (curr === component.id ? null : curr))
@@ -2576,6 +2585,10 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
                   ? 2
                   : 1,
               pointerEvents: 'auto',
+              // Agent reveal drop-in delay (cosmetic only — see reveal.ts).
+              ...(partDelays[component.id] != null
+                ? { animationDelay: `${partDelays[component.id]}ms` }
+                : {}),
             }}
           >
             <InstrumentComponent
@@ -2659,7 +2672,9 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
     return (
       <React.Fragment key={component.id}>
         <div
-          className="component-interactive-group"
+          className={`component-interactive-group${
+            partDelays[component.id] != null ? ' velxio-reveal-part' : ''
+          }`}
           onMouseEnter={() => setHoveredComponentId(component.id)}
           onMouseLeave={() =>
             setHoveredComponentId((curr) => (curr === component.id ? null : curr))
@@ -2677,6 +2692,10 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
             top: 0,
             zIndex: groupZIndex,
             pointerEvents: 'auto',
+            // Agent reveal drop-in delay (cosmetic only — see reveal.ts).
+            ...(partDelays[component.id] != null
+              ? { animationDelay: `${partDelays[component.id]}ms` }
+              : {}),
           }}
         >
           <DynamicComponent
@@ -2738,6 +2757,31 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
 
   return (
     <div className="simulator-canvas-container">
+      {/* Agent reveal in progress: one click skips the playback (canvas
+          interaction anywhere does the same, via the capture handler below). */}
+      {revealActive && (
+        <button
+          type="button"
+          className="velxio-reveal-skip"
+          onClick={() => useAgentReveal.getState().skip()}
+        >
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <polygon points="5 4 15 12 5 20 5 4" fill="currentColor" stroke="none" />
+            <line x1="19" y1="5" x2="19" y2="19" />
+          </svg>
+          Skip
+        </button>
+      )}
+
       {/* ESP32 crash notification */}
       {esp32CrashBoardId && (
         <div
@@ -2779,7 +2823,14 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
       )}
 
       {/* Main Canvas */}
-      <div className="simulator-canvas">
+      <div
+        className="simulator-canvas"
+        // The moment the user reaches for the canvas during the agent's
+        // playback, finish the reveal instantly — the user is taking over.
+        onMouseDownCapture={() => {
+          if (useAgentReveal.getState().active) useAgentReveal.getState().skip();
+        }}
+      >
         {(() => {
           const headerJsx = (
             <div className={`canvas-header${headerSlot ? ' canvas-header--portaled' : ''}`}>

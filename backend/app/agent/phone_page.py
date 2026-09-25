@@ -35,6 +35,9 @@ static const int SCL_PIN = 22;
 
 WebServer server(80);
 String shown = "Velxio";
+// Bumped on every real change to `shown`; the phone page polls /sync and
+// only redraws its preview when this moves.
+static unsigned seq = 0;
 
 // 3x5 glyphs, '#' on, '.' off, five rows. ASCII 32..90. Lower case is drawn as capitals.
 static const char GLYPHS[][16] = {
@@ -184,17 +187,68 @@ String htmlEscape(const String &in) {
   return out;
 }
 
+String jsonEscape(const String &in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (unsigned i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '\"' || c == '\\') { out += '\\'; out += c; }
+    else if ((unsigned char)c < 32) out += ' ';
+    else out += c;
+  }
+  return out;
+}
+
+void syncJson() {
+  server.send(200, "application/json",
+    "{\"seq\":" + String((unsigned)seq) + ",\"shown\":\"" + jsonEscape(shown) + "\"}");
+}
+
+// One keystroke from the phone page: /key?msg=... (or the same via POST).
+// Redraws the OLED IMMEDIATELY — this is the real-time path.
+void handleKey() {
+  String msg;
+  if (server.hasArg("msg")) msg = server.arg("msg");
+  msg.replace("\r", "");
+  msg.replace("\n", " ");
+  if (msg.length() > 64) msg.remove(64);
+  if (msg != shown) {
+    shown = msg;
+    seq++;
+    drawMessage(shown);
+  }
+  syncJson();
+}
+
+// Live preview feed for the phone page, re-polled every ~300 ms. Plain HTTP
+// on purpose: the IoT gateway forwards HTTP only (no WebSocket upgrade), so
+// a fast poll is the reliable realtime channel.
+void handleSync() {
+  server.sendHeader("Cache-Control", "no-store");
+  syncJson();
+}
+
 void sendPage() {
   String page;
-  page.reserve(480);
+  page.reserve(1400);
   page += F("<!doctype html><html><head><meta charset=utf-8>");
   page += F("<meta name=viewport content=\"width=device-width,initial-scale=1\">");
   page += F("<title>OLED</title></head><body>");
+  page += F("<p>Anything you type shows on the OLED in the simulator, live.</p>");
   page += F("<form method=POST action=/text>");
-  page += F("<p>Type something. It shows on the OLED while the simulation is running.</p>");
-  page += F("<input name=msg maxlength=64 value=\"");
+  page += F("<input name=msg id=in maxlength=64 value=\"");
   page += htmlEscape(shown);
-  page += F("\"><button>Show</button></form></body></html>");
+  page += F("\" style=\"font-size:18px;width:80%\" placeholder=\"Type here...\" autofocus oninput=key(this.value)>");
+  page += F("<button>Show</button></form>");
+  page += F("<p id=oled>");
+  page += htmlEscape(shown);
+  page += F("</p>");
+  page += F("<script>");
+  page += F("var last=\"\";");
+  page += F("function key(v){try{var fd=new URLSearchParams();fd.set(\"msg\",v);fetch(\"/key\",{method:\"POST\",body:fd}).catch(function(){})}catch(e){}}");
+  page += F("function sync(){fetch(\"/sync\").then(function(r){return r.json()}).then(function(d){if(d&&d.shown!==last){last=d.shown;var o=document.getElementById(\"oled\");if(o)o.textContent=d.shown;var i=document.getElementById(\"in\");if(i&&document.activeElement!==i)i.value=d.shown;}}).catch(function(){})}");
+  page += F("setInterval(sync,300);sync();");
+  page += F("</script></body></html>");
   server.send(200, "text/html", page);
 }
 
@@ -204,6 +258,7 @@ void handleText() {
     shown.replace("\r", "");
     shown.replace("\n", " ");
     if (shown.length() > 64) shown.remove(64);
+    seq++;
     drawMessage(shown);
   }
   sendPage();
@@ -218,6 +273,9 @@ void setup() {
   server.on("/", HTTP_GET, sendPage);
   server.on("/text", HTTP_GET, handleText);
   server.on("/text", HTTP_POST, handleText);
+  server.on("/key", HTTP_GET, handleKey);
+  server.on("/key", HTTP_POST, handleKey);
+  server.on("/sync", HTTP_GET, handleSync);
   server.begin();
 }
 
@@ -257,6 +315,7 @@ def phone_page_note(prompt: str) -> str:
             "On esp32 those signal pins are 21 and 22. If the board's I2C pins differ, use those pins in the wires and in Wire.begin.",
             "Do not include Adafruit_SSD1306.h or Adafruit_GFX.h. The canvas paints Wire bytes. Those libraries are not required.",
             "Use the sketch below as sketch.ino. If the user asked for extra controls, keep this WiFi, server, and Wire path and add only those controls.",
+            "The page is live: every keystroke posts /key and the OLED redraws immediately, and the phone's preview is fed by the /sync poll. Keep both endpoints; the gateway forwards HTTP only, so never replace them with WebSockets.",
             "If the board I2C pins are not 21 and 22, change SDA_PIN and SCL_PIN to match. Do not redirect the form to /. Return the HTML page from the POST handler.",
             "SKETCH:",
             OLED_SKETCH.rstrip(),

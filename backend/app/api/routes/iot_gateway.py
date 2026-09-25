@@ -354,6 +354,12 @@ async def gateway_proxy(client_id: str, path: str, request: Request) -> Response
 async def _proxy_esp32(inst, path: str, request: Request) -> Response:
     """Reverse-proxy to an ESP32 web server via QEMU slirp hostfwd."""
     target_url = f'http://127.0.0.1:{inst.wifi_hostfwd_port}/{path}'
+    # FastAPI hands us the path WITHOUT the query string, but sketches read
+    # their parameters from it (server.arg -> /key?msg=...); dropping it here
+    # makes every parameterised route on the board arrive empty.
+    query = request.url.query
+    if query:
+        target_url += '?' + query.decode('utf-8', 'replace')
     body = await request.body()
 
     # Forward relevant headers (skip hop-by-hop)

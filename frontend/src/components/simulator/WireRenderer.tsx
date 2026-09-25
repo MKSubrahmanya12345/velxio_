@@ -16,6 +16,12 @@ interface WireRendererProps {
   previewWaypoints?: { x: number; y: number }[];
   /** Override the full SVG path string (used during segment drag preview) */
   overridePath?: string;
+  /**
+   * Agent reveal: ms before this wire draws itself in (pin-to-pin).
+   * Absent/undefined = a normal wire. Purely cosmetic — the wire already
+   * exists in the store and in the simulation.
+   */
+  revealDelayMs?: number;
 }
 
 export const WireRenderer: React.FC<WireRendererProps> = ({
@@ -24,6 +30,7 @@ export const WireRenderer: React.FC<WireRendererProps> = ({
   isHovered,
   previewWaypoints,
   overridePath,
+  revealDelayMs,
 }) => {
   // Breadboard seating wires are pure connectivity — the part visually
   // sits in the holes, so there is nothing to draw.
@@ -45,21 +52,45 @@ export const WireRenderer: React.FC<WireRendererProps> = ({
   const outlineW = isSelected ? 6 : 5;
   const opacity = isSelected || isHovered ? 1 : 0.85;
 
+  // Draw-in: pathLength=1 + dasharray 1 + dashoffset 1 -> 0 (AgentReveal.css).
+  // The reveal path skips hover/selection decorations — no one inspects a
+  // wire mid-draw.
+  const revealing = revealDelayMs != null && revealDelayMs >= 0;
+  const drawStyle = revealing ? { animationDelay: `${revealDelayMs}ms` } : undefined;
+  const dotDelay = revealing ? revealDelayMs + 380 : undefined;
+
   return (
     <g style={{ pointerEvents: 'none' }} strokeLinecap="round" strokeLinejoin="round">
       {/* Contrast outline, so wires stay readable where they cross */}
-      <path d={path} stroke={outline} strokeWidth={outlineW} fill="none" />
+      <path
+        d={path}
+        stroke={outline}
+        strokeWidth={outlineW}
+        fill="none"
+        pathLength={revealing ? 1 : undefined}
+        className={revealing ? 'velxio-reveal-wire' : undefined}
+        style={drawStyle}
+      />
 
       {/* Hover highlight (below wire) */}
-      {isHovered && !isSelected && (
+      {!revealing && isHovered && !isSelected && (
         <path d={path} stroke={marker} strokeWidth="6" fill="none" opacity="0.2" />
       )}
 
       {/* Visible wire */}
-      <path d={path} stroke={color} strokeWidth={strokeW} fill="none" opacity={opacity} />
+      <path
+        d={path}
+        stroke={color}
+        strokeWidth={strokeW}
+        fill="none"
+        opacity={revealing ? 1 : opacity}
+        pathLength={revealing ? 1 : undefined}
+        className={revealing ? 'velxio-reveal-wire' : undefined}
+        style={drawStyle}
+      />
 
       {/* Selection dashed highlight */}
-      {isSelected && (
+      {!revealing && isSelected && (
         <path
           d={path}
           stroke={marker}
@@ -78,8 +109,19 @@ export const WireRenderer: React.FC<WireRendererProps> = ({
         fill={color}
         stroke="#1a1a1a"
         strokeWidth="1"
+        className={revealing ? 'velxio-reveal-dot' : undefined}
+        style={revealing ? { animationDelay: `${dotDelay}ms` } : undefined}
       />
-      <circle cx={wire.end.x} cy={wire.end.y} r="3" fill={color} stroke="#1a1a1a" strokeWidth="1" />
+      <circle
+        cx={wire.end.x}
+        cy={wire.end.y}
+        r="3"
+        fill={color}
+        stroke="#1a1a1a"
+        strokeWidth="1"
+        className={revealing ? 'velxio-reveal-dot' : undefined}
+        style={revealing ? { animationDelay: `${dotDelay}ms` } : undefined}
+      />
     </g>
   );
 };
