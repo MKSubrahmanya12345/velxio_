@@ -101,7 +101,7 @@ async def run(body: AgentRequest, request: Request):
 
     async def stream():
         try:
-            async with asyncio.timeout(240):
+            async with asyncio.timeout(600):
                 async for event in run_agent(body):
                     if await request.is_disconnected():
                         return

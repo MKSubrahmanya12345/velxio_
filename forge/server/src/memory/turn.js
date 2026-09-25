@@ -2,6 +2,7 @@ import { makeConversation, makeMessage, nowIso } from '../schema.js';
 import { createReasoner } from './reasoner.js';
 import { normalizeMemory, normalizeProposals, activeNotes, id, COMMIT_KINDS } from './model.js';
 import { memoryQuestions, outputQuestions, applyReview, evaluateOutput } from './decisions.js';
+import { gateCandidates, runPreTurnGate, directivePrompt, directiveCheckNotes } from './preturn.js';
 import { handleChatMessage } from '../pipeline.js';
 import { listProviders, unresolvedError } from '../providers/registry.js';
 

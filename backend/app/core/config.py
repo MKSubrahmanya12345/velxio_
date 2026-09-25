@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     # agentic; draft rounds compile and may simulate, so they are separate.
     AGENT_MAX_TOOL_ROUNDS: int = 8
     AGENT_MAX_DRAFT_ROUNDS: int = 4
-    AGENT_PROVIDER_TIMEOUT_S: float = 500.0
+    AGENT_PROVIDER_TIMEOUT_S: float = 600.0
     AGENT_PROVIDER_RETRIES: int = 15
     # Output budget per provider call type (a ceiling, not a target — the
     # model stops when its response is complete). Tool-round calls usually
