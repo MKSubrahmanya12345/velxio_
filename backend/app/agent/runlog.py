@@ -21,7 +21,7 @@ class RunRecord:
     started_at: float = field(default_factory=time.time)  # wall clock (epoch s)
     finished: float | None = None
     outcome: str = "running"  # compiled | explained | failed | error | cancelled
-    provider: str = ""  # which provider spec routed this run (opencode | groq | gemini)
+    provider: str = ""  # which provider spec routed this run (opencode | gemini | bedrock)
     attempts: int = 0
     provider_calls: int = 0
     tool_calls: int = 0

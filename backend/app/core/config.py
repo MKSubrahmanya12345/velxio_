@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings
 class ProviderSpec:
     """One model endpoint the agent can route to.
 
-    kind "openai": OpenAI-compatible chat completions (Groq default, Gemini's
+    kind "openai": OpenAI-compatible chat completions (any endpoint, Gemini's
                    OpenAI-compatible layer). Uses base_url/model/api_key.
     kind "bedrock": Amazon Bedrock. Native Converse via boto3, except
                    moonshotai.kimi-k2.5 which must use the Bedrock Mantle Chat
@@ -57,9 +57,10 @@ class Settings(BaseSettings):
 
     # Explicitly opt-in: shared provider credits must not be exposed anonymously.
     AGENT_ENABLED: bool = False
-    AGENT_API_KEY: str = ""
-    AGENT_BASE_URL: str = "https://api.groq.com/openai/v1"
-    AGENT_MODEL: str = "openai/gpt-oss-120b"
+    # Providers: OpenCode (local), Gemini and Amazon Bedrock. There is no
+    # generic OpenAI-compatible provider — every endpoint this ships with is
+    # one we actually run. Groq was removed (its free tier 429'd mid-run and
+    # it rotated model ids without notice); Bedrock is the default.
     # OpenCode provider: talks to a local `opencode serve` instance (the same
     # one the TUI uses), routing to the free big-pickle Zen model through the
     # server's OpenAI-style message API. No API key is stored here — opencode
@@ -100,8 +101,39 @@ class Settings(BaseSettings):
     # agentic; draft rounds compile and may simulate, so they are separate.
     AGENT_MAX_TOOL_ROUNDS: int = 8
     AGENT_MAX_DRAFT_ROUNDS: int = 4
+<<<<<<< HEAD
     AGENT_PROVIDER_TIMEOUT_S: float = 600.0
+=======
+    # Wall-clock budget for ONE agent run. The route's deadline and the
+    # per-call HTTP timeouts are both derived from this, so raising it is a
+    # one-line change that nothing else has to be told about.
+    AGENT_RUN_TIMEOUT_S: float = 240.0
+    # Ceiling for a single provider call. It used to be 500s — larger than the
+    # whole run budget, so it could never fire and every slow call was instead
+    # killed by the run deadline with a generic "time limit reached". Every
+    # call is additionally clipped to the time LEFT in the run (see
+    # service._http_timeout), so this is only an upper bound.
+    AGENT_PROVIDER_TIMEOUT_S: float = 120.0
+    # Liveness reporting while a provider call is in flight. Provider calls
+    # are streamed, but a long prefill produces no tokens, so the UI still
+    # needs a periodic "we are alive" tick between chunks.
+    AGENT_HEARTBEAT_S: float = 5.0
+    # Streaming liveness: bail out when the provider is silent rather than
+    # slow. TTFB covers "accepted the connection and never answered" (long
+    # prompts legitimately take a while to prefill); STALL covers "started
+    # generating and then went quiet" mid-reply.
+    AGENT_STREAM_TTFB_S: float = 45.0
+    AGENT_STREAM_STALL_S: float = 20.0
+    # Graceful degradation: once less than this much of the run budget is
+    # left, tool rounds stop and the model is told to commit its best answer
+    # now, so the deadline cannot kill a run that had a usable design.
+    AGENT_COMMIT_RESERVE_S: float = 45.0
+>>>>>>> 16aa5a44b9943b92eea5296ae72e560e66c9cfd0
     AGENT_PROVIDER_RETRIES: int = 15
+    # Total time ONE call may spend backing off and retrying. 15 retries of
+    # capped backoff is over a minute of the run asleep with nothing to show
+    # for it, so the retry COUNT is also bounded by a retry BUDGET.
+    AGENT_RETRY_TIME_BUDGET_S: float = 30.0
     # Output budget per provider call type (a ceiling, not a target — the
     # model stops when its response is complete). Tool-round calls usually
     # answer with tool_calls only or a small patch, so they get the lower
@@ -170,8 +202,6 @@ class Settings(BaseSettings):
             ProviderSpec(id="opencode", label="OpenCode", kind="opencode",
                          base_url=self.AGENT_OPENCODE_BASE_URL,
                          model=self.AGENT_OPENCODE_MODEL),
-            ProviderSpec(id="groq", label="Groq", base_url=self.AGENT_BASE_URL,
-                         model=self.AGENT_MODEL, api_key=self.AGENT_API_KEY),
             ProviderSpec(id="gemini", label="Gemini", base_url=self.AGENT_GEMINI_BASE_URL,
                          model=self.AGENT_GEMINI_MODEL, api_key=self.AGENT_GEMINI_API_KEY),
             ProviderSpec(id="bedrock", label="Amazon Bedrock", kind="bedrock",

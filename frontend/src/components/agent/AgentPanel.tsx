@@ -398,7 +398,7 @@ export function AgentPanel() {
       const answer = await runAgent({
         prompt: content,
         messages: context,
-        provider: providerId || 'groq',
+        provider: providerId || 'bedrock',
         fastMode,
         signal: abort.signal,
         onEvent: (event: AgentEvent) => {
@@ -406,6 +406,24 @@ export function AgentPanel() {
             const msg = `${event.message}${event.attempt ? ` · attempt ${event.attempt}` : ''}`;
             setStage(msg);
             setActivities((prev) => [...prev, `⚙️ ${msg}`]);
+          }
+          if (event.type === 'heartbeat') {
+            // Ticks every few seconds while a provider call is in flight.
+            // The stage line carries the live detail; the feed keeps ONE
+            // heartbeat row (updated in place) so real actions are not pushed
+            // out of the 4-line window by noise.
+            const msg = `⏳ ${event.message}`;
+            setStage(msg);
+            setActivities((prev) =>
+              prev.length > 0 && prev[prev.length - 1].startsWith('⏳')
+                ? [...prev.slice(0, -1), msg]
+                : [...prev, msg],
+            );
+          }
+          if (event.type === 'retry') {
+            const msg = `⟳ ${event.message}`;
+            setStage(msg);
+            setActivities((prev) => [...prev, msg]);
           }
           if (event.type === 'canvas_update') {
             const msg = event.label || '🧩 Updating canvas live...';
@@ -768,7 +786,7 @@ export function AgentPanel() {
             <summary>Server setup</summary>
             <pre>
               AGENT_ENABLED=true{'\n'}AGENT_OPENCODE_BASE_URL=http://127.0.0.1:4096{'\n'}AGENT_OPENCODE_MODEL=big-pickle{'\n'}
-              AGENT_API_KEY=your-groq-api-key{'\n'}AGENT_MODEL=openai/gpt-oss-120b{'\n'}
+              BEDROCK_MODEL_ID=your-bedrock-model-id{'\n'}AWS_REGION=us-east-1{'\n'}
             </pre>
           </details>
         </section>

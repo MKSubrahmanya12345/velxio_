@@ -389,7 +389,7 @@ class AgentRequest(StrictModel):
     messages: list[Message] = Field(default_factory=list, max_length=12)
     # Which server-side provider routes this run. Only ids listed in
     # Settings.providers() are accepted; the id never carries credentials.
-    provider: Literal["opencode", "groq", "gemini", "bedrock"] = "opencode"
+    provider: Literal["opencode", "gemini", "bedrock"] = "bedrock"
     # Fast progressive build mode: stream canvas updates & bypass long toolchain compilation delays
     fast_mode: bool = True
     # Optional forge-memory session key (stable per browser workspace). Absent

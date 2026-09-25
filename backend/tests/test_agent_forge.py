@@ -204,7 +204,7 @@ def test_agent_request_accepts_forge_session():
     request = _minimal_request()
     assert request.forge_session == "ws-1"
     bad = json.loads(json.dumps({"prompt": "p", "project": request.project.model_dump(),
-                                 "provider": "groq", "forge_session": "no spaces allowed!!"}))
+                                 "provider": "bedrock", "forge_session": "no spaces allowed!!"}))
     with pytest.raises(Exception):
         AgentRequest.model_validate(bad)
 
