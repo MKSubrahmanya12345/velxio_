@@ -1,0 +1,174 @@
+/* ── Agent reveal — "watch the agent work" playback ─────────────────────
+   Purely cosmetic: the stores already hold the full, verified project.
+   These rules only decide WHEN a freshly added element becomes visible.
+   Placement + wiring animate on the canvas (SimulatorCanvas / WireLayer /
+   BoardOnCanvas); the typing overlay lives in the editor pane. */
+
+/* A new part: drop in from above and settle. The class lands on the
+   zero-size positioning GROUP (not the rotated inner wrapper), so the
+   animation may only translate + fade — never scale — or a rotated part
+   would fly around the canvas origin. */
+@keyframes velxio-part-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-16px);
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(2px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.velxio-reveal-part {
+  animation: velxio-part-in 460ms cubic-bezier(0.22, 0.9, 0.3, 1.2) both;
+}
+
+/* A first board: gentle fade (no transform — the board wrapper is the
+   zero-size group at the canvas origin). */
+@keyframes velxio-board-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.velxio-reveal-board {
+  animation: velxio-board-in 620ms ease both;
+}
+
+/* A new wire draws itself pin-to-pin. The paths are rendered with
+   pathLength=1 + dasharray 1, and dashoffset animates 1 -> 0. */
+@keyframes velxio-wire-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.velxio-reveal-wire {
+  stroke-dasharray: 1;
+  animation: velxio-wire-draw 620ms cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+
+/* Endpoint dots pop in once their wire has nearly reached them. */
+@keyframes velxio-dot-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.velxio-reveal-dot {
+  animation: velxio-dot-in 300ms ease both;
+}
+
+/* ── Typing overlay (editor pane) ─────────────────────────────────────── */
+
+@keyframes velxio-caret-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.velxio-typing-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: var(--wb-0, #111111);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.velxio-typing-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--wb-7, #333);
+  color: var(--wb-11, #9d9d9d);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.velxio-typing-header strong {
+  color: var(--wb-12, #e6e6e6);
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.velxio-typing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4ade80;
+  animation: velxio-caret-blink 900ms steps(1) infinite;
+  flex-shrink: 0;
+}
+
+.velxio-typing-hint {
+  margin-left: auto;
+  opacity: 0.7;
+}
+
+.velxio-typing-body {
+  flex: 1;
+  overflow: hidden;
+  padding: 14px 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--wb-12, #e6e6e6);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.velxio-typing-caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: #4ade80;
+  animation: velxio-caret-blink 900ms steps(1) infinite;
+}
+
+/* ── Skip chip (canvas corner) ────────────────────────────────────────── */
+
+.velxio-reveal-skip {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--wb-7, #333);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--wb-2, #222) 88%, transparent);
+  color: var(--wb-12, #e6e6e6);
+  font-size: 11.5px;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+}
+
+.velxio-reveal-skip:hover {
+  border-color: #4ade80;
+}

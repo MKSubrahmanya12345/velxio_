@@ -10,7 +10,7 @@ from app.agent import catalog
 from app.agent.feedback import push as push_feedback
 from app.agent.models import AgentRequest
 from app.agent.runlog import snapshot as run_snapshot
-from app.agent.service import ProviderError, run_agent
+from app.agent.service import ProviderError, agent_run_budget_s, run_agent
 from app.core.config import settings
 
 router = APIRouter()
@@ -100,8 +100,14 @@ async def run(body: AgentRequest, request: Request):
     await _slots.acquire()
 
     async def stream():
+        # Board-aware deadline: an ESP32/STM32 run compiles for minutes, so
+        # the flat AGENT_RUN_TIMEOUT_S cap used to kill the run mid-compile
+        # while the (longer) inner compile window was still legal.
+        budget = agent_run_budget_s(
+            body.project.board.boardKind if body.project.board else None,
+            body.fast_mode)
         try:
-            async with asyncio.timeout(settings.AGENT_RUN_TIMEOUT_S):
+            async with asyncio.timeout(budget):
                 async for event in run_agent(body):
                     if await request.is_disconnected():
                         return
@@ -109,7 +115,7 @@ async def run(body: AgentRequest, request: Request):
         except TimeoutError:
             yield json.dumps({"type": "error",
                               "message": f"Agent time limit reached after "
-                                         f"{int(settings.AGENT_RUN_TIMEOUT_S)}s. "
+                                         f"{int(budget)}s. "
                                          f"Your workspace is unchanged. Try a smaller request."}) + "\n"
         except Exception as exc:
             # Only explicitly safe provider errors may be shown to the browser.

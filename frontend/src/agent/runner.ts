@@ -18,6 +18,7 @@ import {
 } from './workspace';
 import { runExpectations } from './expectations';
 import { useAgentJournal } from './journal';
+import { beginAgentReveal } from './reveal';
 
 interface ActiveRun {
   runId: string;
@@ -245,7 +246,15 @@ export async function runAgent(options: {
         after: captureWorkspace(),
         changes: describeChanges(before, after),
       });
+
+    // Playback: reveal the new parts, wires and code one by one so the user
+    // can watch the agent's work. Purely cosmetic — the stores already hold
+    // the complete, verified project, so skipping (canvas click, overlay
+    // click, reduced motion) changes what's visible, never the state.
+    const reveal = beginAgentReveal(before, after);
+
     if (runtime !== 'hex' || !event.hex) {
+      void reveal; // nothing to wait for — let the typing play out
       return (
         `${event.summary}\n\nThe workspace has the new files. ` +
         `This board does not produce hex and was not live-simulated. Run the .py file on the Pi.`
@@ -254,13 +263,28 @@ export async function runAgent(options: {
     onEvent({
       type: 'stage',
       stage: 'validating',
-      message: 'Applied checkpoint · starting simulator',
+      message: 'Applied checkpoint · building the circuit',
     });
     await delay(150, signal);
     const revision = useAgentJournal.getState().revisions.at(-1)!;
     assertFresh(fingerprint(revision.after), scope);
-    
+    // Wait for the playback BEFORE booting the board: the reveal plays on
+    // the still canvas, and behaviour verification below must start after
+    // it is over. Any canvas interaction (and the overlay / chip) skips it
+    // instantly; a stop mid-playback is picked up right after.
+    await reveal;
+    signal.throwIfAborted();
+    // The canvas is interactive during the playback, so the user may have
+    // started editing while it ran — the checkpoint was applied, but don't
+    // verify behaviour against a workspace that has since changed.
+    assertFresh(fingerprint(revision.after), scope);
+
     // Start appropriate board
+    onEvent({
+      type: 'stage',
+      stage: 'validating',
+      message: 'Applied checkpoint · starting simulator',
+    });
     const activeBoardId = after.boards[0]?.id || after.activeBoardId;
     if (activeBoardId) {
       useSimulatorStore.getState().startBoard(activeBoardId);

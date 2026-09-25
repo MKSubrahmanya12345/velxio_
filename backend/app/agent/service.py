@@ -1437,6 +1437,41 @@ _compile_cache: "OrderedDict[str, dict]" = OrderedDict()
 _COMPILE_CACHE_MAX = 32
 
 
+def _compile_timeout_s(board_kind: str | None, fast_mode: bool) -> float:
+    """Compile budget per board family, not one flat number.
+
+    The flat 100 s (25 s in fast mode) cap predates the heavy cores: an
+    ESP32 WebServer sketch needs minutes on a cold arduino-cli build
+    cache, so the run died with "Compilation timed out. The workspace was
+    not changed" on the first build of the day and the design was thrown
+    away. The caps below are ceilings for a warm-cache build; arduino-cli's
+    own build cache (not this process) makes repeated compiles fast.
+    """
+    try:
+        family = catalog.board_family(board_kind) if board_kind else "arduino"
+    except ValueError:
+        family = "arduino"
+    if family in {"esp32", "stm32"}:
+        return 180.0 if fast_mode else 360.0
+    if family == "rp2040":
+        return 60.0 if fast_mode else 180.0
+    if family == "python":
+        return 15.0
+    return 25.0 if fast_mode else 100.0
+
+
+def agent_run_budget_s(board_kind: str | None, fast_mode: bool = False) -> float:
+    """Wall budget for the WHOLE run, not just the model calls.
+
+    The route deadline and the per-call deadline both derive from this, so
+    a run can no longer be killed by the outer asyncio.timeout while it is
+    still inside its own compile window (240 s base + the family's compile
+    headroom above the old flat 100 s cap).
+    """
+    return settings.AGENT_RUN_TIMEOUT_S + max(
+        0.0, _compile_timeout_s(board_kind, fast_mode) - 100.0)
+
+
 async def compile_project(project):
     """Compile once per identical project in this process.
 
@@ -1650,7 +1685,9 @@ async def run_agent(request: AgentRequest):
     # (which can only report "time limit reached"). The 2s margin lets the
     # provider-specific error win the race and reach the user.
     deadline_token = _run_deadline.set(
-        time.monotonic() + settings.AGENT_RUN_TIMEOUT_S - 2.0)
+        time.monotonic() + agent_run_budget_s(
+            request.project.board.boardKind if request.project.board else None,
+            request.fast_mode) - 2.0)
     # JEV decides before the first design call. One System One request, then
     # the hardware agent runs. A late decision is not folded into a run that
     # already started — that race threw the rules away or contradicted the design.
@@ -2180,13 +2217,18 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                          "message": f"Compiling for {board_name}"})
             record.attempts = attempt + 1
             t0 = time.monotonic()
-            compile_timeout = 25.0 if request.fast_mode else 100.0
+            compile_timeout = _compile_timeout_s(
+                candidate.board.boardKind if candidate.board else None, request.fast_mode)
             try:
                 result = await asyncio.wait_for(compile_project(candidate), timeout=compile_timeout)
             except asyncio.TimeoutError:
-                record.finish("failed")
+                record.compile_ms = int(compile_timeout * 1000)
+                record.finish("failed", f"compile timeout after {int(compile_timeout)}s")
                 yield event({"type": "error",
-                             "message": "Compilation timed out. The workspace was not changed."})
+                             "message": (f"Compilation timed out after {int(compile_timeout)}s for {board_name}. "
+                                         "The workspace was not changed — retry the request: the toolchain's "
+                                         "build cache is warm now, so this same design usually compiles on "
+                                         "the next run.")})
                 return
             record.compile_ms += int((time.monotonic() - t0) * 1000)
             diagnostics = str(result.get("stderr") or result.get("error") or "No HEX artifact returned")[-10000:]

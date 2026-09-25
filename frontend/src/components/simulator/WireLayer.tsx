@@ -1,5 +1,6 @@
 import React from 'react';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
+import { useAgentReveal } from '../../agent/reveal';
 import { WireRenderer } from './WireRenderer';
 import { useResolvedTheme } from '../../hooks/useTheme';
 import { WireInProgressRenderer } from './WireInProgressRenderer';
@@ -60,6 +61,9 @@ export const WireLayer: React.FC<WireLayerProps> = ({
   const wireInProgress = useSimulatorStore((s) => s.wireInProgress);
   const selectedWireId = useSimulatorStore((s) => s.selectedWireId);
   const isTouchDevice = useIsCoarsePointer();
+  // Agent reveal: wires the agent just added draw themselves in, on a delay
+  // each. Read once per render — the map is empty for every non-agent wire.
+  const wireDelays = useAgentReveal((s) => s.wireDelays);
   // One subscription for the whole layer: WireRenderer reads its outline and
   // selection colours from the token layer at render time, and every wire is
   // a child of this component, so re-rendering here repaints all of them when
@@ -89,6 +93,7 @@ export const WireLayer: React.FC<WireLayerProps> = ({
           overridePath={
             segmentDragPreview?.wireId === wire.id ? segmentDragPreview.overridePath : undefined
           }
+          revealDelayMs={wireDelays[wire.id]}
         />
       ))}
 

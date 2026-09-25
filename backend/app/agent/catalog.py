@@ -215,6 +215,19 @@ def _pin_key(name: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).strip().lower())
 
 
+# Spellings models reach for that no catalog pin actually carries, mapped to
+# the key to try before rejecting. The big one is the 3.3 V rail: training
+# data is full of `3v3` net names, so a patch wires `esp32:3V3` even though
+# the pin is `3.3V`. Without this alias that costs a WHOLE repair round
+# (one extra provider call, 20–40 s) every time; with it the patch resolves
+# on the first validation pass, same as `D13` -> `13`.
+_PIN_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "3v3": ("33v",),
+    "v33": ("33v",),
+    "3v3v": ("33v",),
+}
+
+
 def resolve_pin(pins: Iterable[str], name: Any) -> str | None:
     """Canonical pin name for `name`, or None when it names no pin of this part.
 
@@ -242,9 +255,14 @@ def resolve_pin(pins: Iterable[str], name: Any) -> str | None:
     if uno_style:
         candidates.append(uno_style.group(1))
     for candidate in candidates:
-        hits = by_key.get(_pin_key(candidate))
+        key = _pin_key(candidate)
+        hits = by_key.get(key)
         if hits and len(hits) == 1:
             return hits[0]
+        for alias in _PIN_KEY_ALIASES.get(key, ()):
+            alias_hits = by_key.get(alias)
+            if alias_hits and len(alias_hits) == 1:
+                return alias_hits[0]
     return None
 
 
