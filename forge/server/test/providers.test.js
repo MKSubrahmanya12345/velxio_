@@ -46,7 +46,8 @@ test('JEV receives serialized state and typed questions, not a prose-generation 
   const jev = createJevProvider(loadConfig({ JEV_PROVIDER: 'typesafe', TYPESAFE_API_KEY: 'test' }));
   const result = await jev({ state: { notes: [{ text: 'Only me' }] }, questions: { respect_0: { type: 'noul', instructions: 'Does this response respect the rule?' } } });
   assert.match(request.url, /v1\/systemone$/);
-  assert.equal(typeof request.body.state, 'string');
+  assert.equal(typeof request.body.state, 'object');
+  assert.equal(request.body.state.notes[0].text, 'Only me');
   assert.equal(request.body.questions.respect_0.type, 'noul');
   assert.equal(result.provider, 'typesafe');
 });

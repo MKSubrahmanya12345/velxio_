@@ -14,6 +14,7 @@ do not consume a repair attempt. Every yielded event carries a run_id.
 import asyncio
 import contextlib
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Tuple
 
@@ -32,6 +34,7 @@ from pydantic import ValidationError
 from app.agent import catalog, jsonrepair
 from app.agent.feedback import register as register_feedback, push as push_feedback, unregister
 from app.agent.models import AgentRequest, Proposal, apply_patch, describe_error
+from app.agent.phone_page import phone_page_note, phone_page_problems
 from app.agent.runlog import RunRecord, start as start_run_record
 from app.agent.models import DRAFT_TOOLS
 from app.agent.tools import ToolMemo, describe_tools, execute_tool, execute_tools, \
@@ -223,7 +226,11 @@ _LIST_FIELDS = {"plan", "pins", "serial", "interactions", "tool_calls",
 _KNOWN_TOOLS = {
     "read_file", "list_files", "board_pinout", "component_info", "search_catalog",
     "netlist", "check_design", "draft_validate", "draft_compile", "draft_simulate",
-    "search_libraries", "library_api",
+    "search_libraries", "library_api", "physics_capabilities", "physics_simulate",
+}
+_READ_TOOLS = {
+    "read_file", "list_files", "board_pinout", "component_info", "search_catalog",
+    "netlist", "check_design", "library_api", "search_libraries",
 }
 
 
@@ -286,6 +293,19 @@ def _coerce_proposal(parsed: dict, depth=0) -> dict:
             else:
                 value = []
         out[key] = value
+    # Models sometimes emit {"action":"tool","tool":"component_info","args":{...}}
+    # instead of tool_calls. That is a lookup, not a rejected patch.
+    if depth == 0 and not out.get("tool_calls"):
+        action = str(parsed.get("action") or "").lower()
+        raw_call = parsed.get("tool_call") if isinstance(parsed.get("tool_call"), dict) else parsed
+        if action in {"tool", "tools"} or (
+            not out.get("patch") and isinstance(parsed.get("tool"), str)
+        ):
+            call = _coerce_tool_call(raw_call if isinstance(raw_call, dict) else {})
+            if call is not None:
+                out["tool_calls"] = [call]
+    if depth == 0 and out.get("tool_calls") and not str(out.get("summary") or "").strip():
+        out["summary"] = "Looking up the catalog."
     return out
 
 
@@ -510,27 +530,6 @@ async def _fix_json_via_model(raw_text: str, error: str, spec: ProviderSpec | No
 
 logger = logging.getLogger("velxio.agent")
 
-# Real compilation is always attempted now - no fake fallback hex.
-# If toolchain is truly unavailable, the error is surfaced to the user
-# instead of silently returning a blink sketch.
-FALLBACK_HEX = (
-    ":100000000C945C000C946E000C946E000C946E00CA\n"
-    ":100010000C946E000C946E000C946E000C946E00A8\n"
-    ":100020000C946E000C946E000C946E000C946E0098\n"
-    ":100030000C946E000C946E000C946E000C946E0088\n"
-    ":100040000C9413010C946E000C946E000C946E00D2\n"
-    ":100050000C946E000C946E000C946E000C946E0068\n"
-    ":100060000C946E000C946E00000000002400270029\n"
-    ":100070002A0000000000250028002B0004040404CE\n"
-    ":100080000404040402020202020203030303030342\n"
-    ":10009000010204081020408001020408102001021F\n"
-    ":1000A00004081020000000080002010000030407FB\n"
-    ":1000B000000000000000000011241FBECFEFD8E0B8\n"
-    ":1000C000DEBFCDBF21E0A0E0B1E001C01D92A930AC\n"
-    ":1000D000B207E1F70E945D010C94CC010C94000082\n"
-    ":00000001FF\n"
-)
-
 # Project source and prompts travel to the model provider verbatim. Sketches
 # sometimes carry credentials someone pasted in (a WiFi password, a dashboard
 # API key in a comment). Redact assignment-style values before they leave.
@@ -545,91 +544,68 @@ def scrub_secrets(text: str) -> str:
     """Redact assignment-style credential values. Purely textual, best effort."""
     return _SECRET_KEY.sub(_SECRET_REPLACEMENT, text)
 
-SYSTEM_TEMPLATE = """You are Velxio's electronics agent - Cursor for hardware: you design and debug circuits
-and firmware across ALL Velxio boards (Arduino Uno/Nano/Mega, ATtiny85, ESP32 family, RP2040 Pico,
-STM32 BluePill/BlackPill, Raspberry Pi) inside the Velxio editor. Respond with ONE JSON object matching
-the supplied schema. Nothing you write is applied until it validates. You are Cursor's Agent Mode for embedded hardware.
+MODE_RULES = {
+    "chat": (
+        "MODE chat: explain only. Do not return a patch. You may call read-only tools "
+        "(search_catalog, component_info, board_pinout, netlist, read_file, list_files, "
+        "check_design, library_api). Do not call draft_* or physics_simulate."
+    ),
+    "composer": (
+        "MODE composer: edit the circuit and the firmware together. Tools are optional. "
+        "If the catalog index already names the part, return the patch. Do not tour the catalog first."
+    ),
+    "inline": (
+        "MODE inline: the user selected code. Return a patch that edits that file. "
+        "Change the circuit only if the request needs a part or a wire."
+    ),
+    "agent": (
+        "MODE agent: call a tool only when the catalog index does not already answer you. "
+        "Do not research before every design. draft_validate, draft_compile and draft_simulate "
+        "are optional checks, not a required ritual. Commit the patch when the parts and pins are known."
+    ),
+}
 
-CURSOR-LIKE WORKFLOW (Velxio = Cursor for hardware):
-  * You work like Cursor: Cmd+K inline edits, Cmd+L chat, Cmd+I composer for multi-file circuit+code changes.
-  * When requested to build or edit a circuit, drop all required components ONTO THE CANVAS IMMEDIATELY (x>=470, 120px apart).
-  * Return your proposed patch with targeted component upserts and wire connections.
-  * Keep plans short and actionable so the user visually sees the components appear and get wired up step-by-step.
-  * You support ALL boards in the generated board table ({board_count} total). Pick the exact boardKind for the task.
-    ESP32-family boards are real build targets: WiFi.h, WebServer.h, BLEDevice.h and the ESP32 core APIs are supported there; Pico W also exposes WiFi.h.
-  * You support ALL {part_count} Velxio components: LEDs, resistors, buttons, potentiometers, servos, motors, displays
-    (SSD1306, ILI9341, LCD1602), sensors (DHT22, HC-SR04, MPU6050, BMP280, etc.), logic gates, transistors, etc.
+SYSTEM_TEMPLATE = """You are Velxio's hardware agent. You design and debug circuits and firmware on the Velxio canvas, using the catalog, pin names, and electrical rules below. Respond with ONE JSON object. Nothing is applied until it validates.
 
-HOW YOU WORK (this is a loop, not a single shot):
-  * Research before you design. `search_catalog` / `component_info` / `board_pinout` /
-    `netlist` / `read_file` / `library_api` are free to call and answer in one round
-    (up to {tool_calls} calls per round, {tool_rounds} rounds).
-  * Build your draft and TEST IT with `draft_validate`, `draft_compile` and
-    `draft_simulate`. These run the real validator, the real compiler and the real
-    emulator against a patch you pass inline; nothing is written to the workspace.
-    `draft_simulate` returns per-pin transitions with simulated timestamps, serial
-    output, and the exact stimulus it applied — use it to prove that the LED blinks,
-    the button changes behaviour, the servo pulses, the display gets its I2C traffic.
-  * Only return a patch when `draft_validate` reports no errors and — for anything with
-    behaviour — `draft_simulate` shows the behaviour you claim. If a draft fails, fix it
-    and re-test; you have {draft_rounds} draft rounds per attempt.
-  * You may also return tool_calls and no patch: that just means "let me look at
-    something first" and costs no attempt.
+{mode_rules}
 
-THE PIPELINE YOUR PATCH MUST SURVIVE (deterministic, not a model):
-  schema → pin/electrical topology → static coherence analysis (firmware against
-  circuit, shorts, required power/ground/signal connections, bus pinouts, series
-  resistors, driver requirements) → arduino-cli compile → live browser verification of
-  your `expectations`.
+TOOLS — optional, and never a substitute for the catalog index already in this prompt:
+  * A lookup is a small object with tool_calls and no firmware: {{"summary":"Looking up the LED","tool_calls":[{{"tool":"component_info","args":{{"component":"led"}}}}]}}
+  * Up to {tool_calls} calls per round, {tool_rounds} research rounds, {draft_rounds} optional draft rounds.
+  * The commit path runs schema, electrical checks, and compile. Do not draft_compile a patch you are about to commit — that compiles it twice.
+  * draft_simulate is AVR-only (Uno, Nano, Mega, ATtiny). On any other board it compiles instead. Do not retry it.
+  * read_file returns the file. Use it for a span that is not already in CURRENT PROJECT.
 
-CATALOG: the canvas has {part_count} components ({placeable_count} placeable) across all categories.
-Call component_info for exact pins, properties and wiring notes of anything you use,
-and search_catalog when you know what you want but not its id. Never invent a part, pin or
-property: use the exact id and pin names. Parts flagged `!sim` cannot be verified in the
-browser — you may still use them, but say so in the summary instead of claiming behaviour.
+COMMIT when you know the parts: summary, a short plan (at most 8 steps), patch, and expectations.
 
-Rules that are always true here:
-  * For Uno/Nano: GPIO 0/1 are hardware serial; prefer other pins. For ESP32: avoid strapping pins.
-  * Every LED in series with a 220-1000 ohm resistor. A pushbutton's four legs are TWO
-    contacts joined inside the part (1.l=1.r is one contact, 2.l=2.r the other) and pressing
-    closes one contact to the other: put the GPIO (pinMode INPUT_PULLUP) on ONE contact and
-    GND on the OTHER (GPIO on 1.l with GND on 2.l, or the mirror). Pressed reads LOW.
-  * Potentiometers and analog sensors go to analog-capable pins (A0-A5 on Uno, GP26-28 on Pico, etc.).
-  * Servos: signal on a PWM pin and the Servo library; Servo.h disables analogWrite on 9 and 10 on Uno.
-  * I2C devices share SDA/SCL (A4/A5 on Uno, GP4/GP5 on Pico, 21/22 on ESP32) and must have distinct addresses.
-  * SPI: SCK/MISO/MOSI vary by board. Never wire a motor, relay coil or stepper coil straight to a GPIO —
-    use a driver (l293d/a4988 or a transistor with a base/gate resistor) and a supply.
-  * Give every power/ground pin of a part you place a connection to a rail.
+BOARDS: {board_count} catalog boards are real targets. Pick boardKind from the table. Live headless simulation is AVR only. Raspberry Pi boards take a .py file and do not produce hex. Other boards compile with their core when that core is installed — if the toolchain is missing, say so. Do not invent a hex file.
 
-PROJECT EDITING (Cursor-style):
-  * For changes return targeted upserts/removals. Preserve existing ids, positions, unrelated parts, wires, files.
-  * An upsert contains the WHOLE named item. Remove a part's wires explicitly too.
-  * The current project is the source of truth; the conversation is context.
-  * For a new project, ALWAYS include `patch.board` with `{{id, boardKind, x, y}}`; do not rely on the default board. Add it at x=100,y=140 and place parts at x>=470, 120px apart.
-  * Use one .ino/.cpp/.c entry file plus optional flat headers with Arduino core APIs, readable comments and Serial diagnostics; Raspberry Pi Python boards use a .py entry file.
-  * Include libraries only from the board-aware allowed header list. Query `board_pinout` for the board's native headers; `WiFi.h` is allowed on ESP32-family boards, not on AVR.
-  * Like Cursor's Tab autocomplete, suggest complete, working code.
-  * Like Cursor's Composer, you can edit multiple files at once.
+CATALOG: {part_count} components ({placeable_count} placeable). Use exact ids and pin names. Never invent a part, pin, or property. Parts flagged !sim cannot be verified live — you may still use them, but say so instead of claiming behaviour.
 
-JSON DISCIPLINE (this is what makes your response usable at all): the whole reply is ONE JSON
-object — no markdown fences, no prose before or after. Firmware source is a JSON *string*, so
-inside it every double quote must be written \\\" and every newline \\n. Prefer single quotes in
-Serial text where that reads naturally. Keep `summary` and `plan` short so the object fits
-inside the output token limit.
+Rules that are always true:
+  * Uno/Nano: GPIO 0/1 are hardware serial; prefer other pins. ESP32: avoid strapping pins.
+  * Every LED in series with a 220-1000 ohm resistor.
+  * A pushbutton's four legs are TWO contacts (1.l=1.r, 2.l=2.r). GPIO INPUT_PULLUP on one contact, GND on the other. Pressed reads LOW.
+  * Analog sensors go to analog-capable pins.
+  * Servos: PWM signal. On Uno, Servo.h disables analogWrite on pins 9 and 10.
+  * I2C devices share SDA/SCL and must have distinct addresses.
+  * Never wire a motor, relay coil, or stepper coil straight to a GPIO. Use a driver and a supply.
+  * Give every power and ground pin of a placed part a connection to a rail.
+  * A phone or website on the user's WiFi cannot join the simulated board network and cannot open localhost or 192.168.4.x. For that request: ESP32-family (or a Pico W already on the canvas), WiFi.begin("Velxio-GUEST"), never WiFi.softAP(), WebServer on port 80. The canvas shows the phone link once the simulation has an IP. Do not tell the user to port-forward or to open localhost on the phone.
 
-EXPECTATIONS: with every patch return `expectations` — falsifiable checks the browser runs
-against the LIVE simulation: pin toggles/levels (with period_ms), serial regexes, and
-interactions (`press`, `pot`, `switch`, `rotary`, `stimulus`) that drive the parts while it
-runs. Declare only what the circuit and firmware can actually satisfy.
+PROJECT EDITING:
+  * Targeted upserts. An upsert is the whole named item. Preserve unrelated ids, positions, wires, and files.
+  * The current project is the source of truth.
+  * A new project includes patch.board with {{id, boardKind, x, y}}. Board at x=100,y=140. Parts at x>=470, 120px apart.
+  * One .ino or .py entry, plus optional flat headers. WiFi.h is for ESP32-family and Pico W, not AVR.
+  * PROJECT MEMORY rules, when present, are binding. Do not contradict an active rule.
 
-You are Cursor for hardware: fast, accurate, with full Velxio component knowledge and all boards supported.
-State assumptions and how to interact/test in `summary`. `plan` holds at most 8 short
-user-facing actions (what you will do), not private reasoning.
+JSON: one object, no markdown fences. Firmware is a JSON string, so escape quotes and newlines. Keep summary and plan short.
+
+EXPECTATIONS: falsifiable checks — pin toggles, serial regexes, interactions. Declare only what this board can actually satisfy. AVR can be checked live. Other boards: say how to test, and do not invent pin traces the emulator will not produce.
 """
 
-
-
-def system_prompt() -> str:
+def system_prompt(mode: str = "agent") -> str:
     """The system message: catalog index + ALL boards + the rules, generated from data.
 
     The catalog index is compact (id, name, pins) because the full specs are one
@@ -657,6 +633,7 @@ def system_prompt() -> str:
     boards_text = "\n".join(board_lines)
     index = "\n".join(index_lines)
     return SYSTEM_TEMPLATE.format(
+        mode_rules=MODE_RULES.get(mode, MODE_RULES["agent"]),
         board_count=len(catalog.BOARDS),
         tool_calls=4,
         tool_rounds=settings.AGENT_MAX_TOOL_ROUNDS,
@@ -664,9 +641,9 @@ def system_prompt() -> str:
         part_count=catalog.simulator_coverage()["total"],
         placeable_count=catalog.simulator_coverage()["placeable"],
     ) + (
-        f"\nSUPPORTED BOARDS ({len(catalog.BOARDS)} total - Velxio = Cursor for ALL hardware):\n"
+        f"\nSUPPORTED BOARDS ({len(catalog.BOARDS)} — compile target, not a claim that every board simulates live):\n"
         + boards_text + "\n"
-        + "Pick the right board for the task. Arduino Uno for beginners, ESP32 for WiFi/BT, RP2040 for MicroPython, STM32 for ARM, Pi for Linux.\n"
+        + "AVR simulates live. Pi runs the .py file. Other boards compile when their core is installed.\n"
         + "CATALOG INDEX (category: ids; `!sim` = cannot be verified live):\n"
         + index
         + "\n  [not placeable] " + unplaceable
@@ -1456,7 +1433,30 @@ async def propose(messages: list[dict], spec: ProviderSpec | None = None,
     raise last  # type: ignore[misc]
 
 
+_compile_cache: "OrderedDict[str, dict]" = OrderedDict()
+_COMPILE_CACHE_MAX = 32
+
+
 async def compile_project(project):
+    """Compile once per identical project in this process.
+
+    draft_compile and the commit path otherwise compile the same candidate twice.
+    Only successes are stored, so a missing toolchain stays retryable.
+    """
+    key = hashlib.blake2b(project.model_dump_json().encode("utf-8"), digest_size=16).hexdigest()
+    hit = _compile_cache.get(key)
+    if hit is not None:
+        _compile_cache.move_to_end(key)
+        return hit
+    result = await _compile_project_uncached(project)
+    if result.get("success"):
+        _compile_cache[key] = result
+        if len(_compile_cache) > _COMPILE_CACHE_MAX:
+            _compile_cache.popitem(last=False)
+    return result
+
+
+async def _compile_project_uncached(project):
     process = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "app.agent.compile_worker",
         cwd=str(Path(__file__).resolve().parents[2]),
@@ -1521,6 +1521,14 @@ def _summarize_proposal(proposal: Proposal) -> str:
     return scrub_secrets("; ".join(parts))
 
 
+def _wants_physics(request: AgentRequest) -> bool:
+    """Physics tools stay available, but an LED task should not be offered a quadrotor."""
+    blob = request.prompt.lower()
+    return any(word in blob for word in (
+        "physics", "drone", "quadrotor", "rover", "hover", "rigid", "spacecraft", "thrust",
+    ))
+
+
 def _base_messages(request: AgentRequest) -> list[dict]:
     """Assemble the provider conversation with a cache-friendly layout.
 
@@ -1549,34 +1557,45 @@ def _base_messages(request: AgentRequest) -> list[dict]:
     # attribute is empty unless a forge turn actually returned a block this run.
     if request._forge_context:
         state_text += ("\n\nPROJECT MEMORY:\n" + request._forge_context
-                       + "\nApply these constraints to the circuit design and firmware; do not contradict an active rule.")
+                       + "\nThese are binding user rules. Do not contradict an active rule.")
     return [
-        {"role": "system", "content": system_prompt()
-         + "\n" + describe_tools()
+        {"role": "system", "content": system_prompt(request.mode)
+         + "\n" + describe_tools(include_physics=_wants_physics(request))
          + "\nResponse schema: " + json.dumps(Proposal.model_json_schema())},
         *[{"role": m.role, "content": scrub_secrets(m.content)} for m in request.messages],
         {"role": "user", "content": state_text},
-        {"role": "user", "content": "REQUEST:\n" + scrub_secrets(request.prompt)},
+        {"role": "user", "content": _request_message(request)},
     ]
 
 
-async def _forge_turn(request: AgentRequest) -> dict:
-    """The bounded forge memory turn, shaped to run as a background task.
+def _request_message(request: AgentRequest) -> str:
+    """The user request, plus the phone-page contract when this prompt needs it.
 
-    Never raises: every failure (timeout, HTTP, schema) becomes an
-    {"ok": False, ...} dict, so a memory-layer problem can only ever cost a
-    run a missing context — never a failure (the old serial path's
-    guarantee, preserved).
+    The note is part of the request, not the cached system prefix: it depends
+    on the prompt, and the sketch is too specific to send on every turn.
+    """
+    text = "REQUEST:\n" + scrub_secrets(request.prompt)
+    note = phone_page_note(request.prompt)
+    if note:
+        text += "\n\n" + note
+    return text
+
+
+async def _forge_turn(request: AgentRequest) -> dict:
+    """One JEV decision, not a second chat agent.
+
+    Never raises. A missing decision costs the run its memory block and
+    nothing else. The caller waits a bounded time, then designs.
     """
     try:
         from app.agent import forge as forge_bridge
         return await asyncio.wait_for(
-            forge_bridge.run_turn(request.prompt, request.forge_session or "default"),
-            timeout=min(150.0, settings.FORGE_TURN_TIMEOUT_S + 20.0),
+            forge_bridge.run_decision(request.prompt, request.forge_session or "default"),
+            timeout=settings.AGENT_FORGE_DECIDE_WAIT_S + 5.0,
         )
     except Exception as exc:  # noqa: BLE001 — fail-open by design
-        return {"ok": False, "context": "", "summary": {},
-                "error": f"forge turn failed: {type(exc).__name__}"}
+        return {"ok": False, "context": "", "summary": {}, "clarify": False,
+                "decision": "answer", "error": f"forge decision failed: {type(exc).__name__}"}
 
 
 def _discard_task_result(task: "asyncio.Task") -> None:
@@ -1632,12 +1651,9 @@ async def run_agent(request: AgentRequest):
     # provider-specific error win the race and reach the user.
     deadline_token = _run_deadline.set(
         time.monotonic() + settings.AGENT_RUN_TIMEOUT_S - 2.0)
-    # Forge project memory (opt-in, direct connection, fail-open) runs as a
-    # background task instead of a serial pre-run step: the first provider
-    # call no longer waits for it. If it lands before the first call it is in
-    # the stable prefix (cache-friendly); otherwise it is folded in as a
-    # clarification before the next round. Any forge problem degrades to "no
-    # memory this run" — never to a failure.
+    # JEV decides before the first design call. One System One request, then
+    # the hardware agent runs. A late decision is not folded into a run that
+    # already started — that race threw the rules away or contradicted the design.
     request._forge_context = ""
     forge_task: asyncio.Task | None = None
     try:
@@ -1782,10 +1798,11 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         payload = {"type": "forge",
                 "status": "ok" if turn.get("ok") else "unavailable",
                 "summary": turn.get("summary") or {},
+                "decision": turn.get("decision") or "answer",
                 "message": str(turn.get("error", ""))[:300]}
-        # Surface JEV-driven clarifying questions so Velxio can ask user with Skip option
-        if turn.get("clarification"):
-            payload["clarification"] = str(turn.get("clarification", ""))[:4000]
+        # Only a JEV clarify-first decision. Never an LLM essay that happens to contain '?'.
+        if turn.get("clarify") and turn.get("clarification"):
+            payload["clarification"] = str(turn.get("clarification", ""))[:1000]
         if turn.get("pending_questions"):
             pq = turn.get("pending_questions")
             if isinstance(pq, list):
@@ -1858,17 +1875,26 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
         pending_notes.clear()
 
     if forge_task is not None:
-        # The memory turn runs in the background; a bounded grace (default 0)
-        # lets a fast turn land in the stable prefix. A slow or dead turn
-        # costs at most the grace — never the old serial wait.
-        if not forge_task.done() and settings.AGENT_FORGE_GRACE_S > 0:
-            await asyncio.wait({forge_task}, timeout=settings.AGENT_FORGE_GRACE_S)
+        yield event({"type": "stage", "stage": "planning",
+                     "message": "Deciding this turn"})
         if not forge_task.done():
-            yield event({"type": "stage", "stage": "planning",
-                         "message": "Checking project memory in the background (forge · JEV)"})
-        ev = consume_forge(allow_prefix=True)
-        if ev is not None:
-            yield event(ev)
+            await asyncio.wait({forge_task}, timeout=settings.AGENT_FORGE_DECIDE_WAIT_S)
+        if not forge_task.done():
+            forge_task.cancel()
+            forge_state["emitted"] = True
+            yield event({"type": "forge", "status": "unavailable", "decision": "answer",
+                         "message": "Decision timed out. Designing without project memory."})
+        else:
+            ev = consume_forge(allow_prefix=True)
+            if ev is not None:
+                if request.skip_clarify:
+                    ev.pop("clarification", None)
+                    ev["decision"] = "answer"
+                yield event(ev)
+                if ev.get("clarification"):
+                    record.finish("explained")
+                    yield event({"type": "answer", "summary": ev["clarification"]})
+                    return
     messages = _base_messages(request)
 
     full_proposals: list[tuple[int, str]] = []
@@ -1896,8 +1922,15 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
     # Two budgets on purpose: catalog/pinout lookups are cheap and are what make
     # the loop feel agentic, while draft_* rounds run the real compiler and
     # emulator and are the expensive ones.
-    tool_rounds_left = settings.AGENT_MAX_TOOL_ROUNDS
-    draft_rounds_left = settings.AGENT_MAX_DRAFT_ROUNDS
+    if request.mode == "chat":
+        tool_rounds_left = min(2, settings.AGENT_MAX_TOOL_ROUNDS)
+        draft_rounds_left = 0
+    elif request.mode in {"composer", "inline"}:
+        tool_rounds_left = min(2, settings.AGENT_MAX_TOOL_ROUNDS)
+        draft_rounds_left = min(1, settings.AGENT_MAX_DRAFT_ROUNDS)
+    else:
+        tool_rounds_left = settings.AGENT_MAX_TOOL_ROUNDS
+        draft_rounds_left = settings.AGENT_MAX_DRAFT_ROUNDS
     final_attempt = settings.AGENT_MAX_ATTEMPTS - 1
     # One memo for the whole run: identical (tool, args, project) is executed
     # once — repeats across rounds return instantly, identical calls batched
@@ -1971,6 +2004,12 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
             # inline, run the deterministic stack (and the real compiler and
             # emulator) on it and hand the observations back. That is what lets
             # the model debug its own design before the user ever sees it.
+            if request.mode == "chat":
+                proposal.tool_calls = [call for call in proposal.tool_calls if call.tool in _READ_TOOLS]
+                if proposal.patch is not None and not proposal.tool_calls:
+                    record.finish("explained")
+                    yield event({"type": "answer", "summary": proposal.summary})
+                    return
             nudged = False
             while proposal.tool_calls and not nudged:
                 calls = proposal.tool_calls[:4]
@@ -1999,7 +2038,7 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                         call_result.clear()
                         async for _ev in _propose_stream(
                                 messages,
-                                max_tokens=settings.AGENT_MAX_TOKENS_TOOL_ROUNDS,
+                                max_tokens=settings.AGENT_MAX_TOKENS_PROPOSAL,
                                 stage="nudge", attempt=attempt + 1):
                             yield _ev
                         proposal = call_result.get("proposal")
@@ -2069,7 +2108,7 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                     call_result.clear()
                     async for _ev in _propose_stream(
                             messages,
-                            max_tokens=settings.AGENT_MAX_TOKENS_TOOL_ROUNDS,
+                            max_tokens=settings.AGENT_MAX_TOKENS_PROPOSAL,
                             stage="testing" if drafting else "research",
                             attempt=attempt + 1):
                         yield _ev
@@ -2128,80 +2167,42 @@ async def _run(request: AgentRequest, run_id: str, started: float, record: RunRe
                              "Return ONE complete JSON object (no prose, no markdown fences)."})
             continue
         yield event({"type": "plan", "plan": proposal.plan, "summary": proposal.summary})
-
-        # --- Progressive Canvas Updates ---
-        # Step 1: Drop components onto canvas immediately
-        if proposal.patch and (proposal.patch.upsert_components or proposal.patch.remove_components):
-            try:
-                from app.agent.models import Patch
-                comp_patch = Patch(
-                    board=proposal.patch.board,
-                    upsert_components=proposal.patch.upsert_components,
-                    remove_components=proposal.patch.remove_components,
-                    upsert_files=proposal.patch.upsert_files,
-                    remove_files=proposal.patch.remove_files,
-                )
-                comp_candidate = apply_patch(request.project, comp_patch, board_hint=request.prompt)
-                yield event({
-                    "type": "canvas_update",
-                    "project": comp_candidate.model_dump(),
-                    "label": f"🧩 Dropping {len(proposal.patch.upsert_components)} component(s) onto canvas..."
-                })
-                await asyncio.sleep(0.15)
-            except Exception:
-                pass
-
         yield event({"type": "stage", "stage": "validating",
                      "message": "Checking parts, pins, wiring, firmware coherence and source files"})
         try:
             candidate = apply_patch(
                 request.project, proposal.patch, proposal.expectations, board_hint=request.prompt)
-
-            # Step 2: Route wires on canvas
-            if proposal.patch and (proposal.patch.upsert_wires or proposal.patch.remove_wires):
-                yield event({
-                    "type": "canvas_update",
-                    "project": candidate.model_dump(),
-                    "label": f"🔌 Routing {len(proposal.patch.upsert_wires)} wire connection(s)..."
-                })
-                await asyncio.sleep(0.10)
-
-            yield event({
-                "type": "stage",
-                "stage": "compiling",
-                "message": f"Compiling for {candidate.board.boardKind if candidate.board else 'the selected board'}",
-            })
+            problem = phone_page_problems(request.prompt, candidate)
+            if problem:
+                raise ValueError(problem)
+            board_name = candidate.board.boardKind if candidate.board else "the selected board"
+            yield event({"type": "stage", "stage": "compiling",
+                         "message": f"Compiling for {board_name}"})
             record.attempts = attempt + 1
             t0 = time.monotonic()
-
-            # Cursor-like fast compile: always attempt REAL compilation first.
-            # fast_mode=True means we try quick compile with shorter timeout but still real,
-            # and only use fallback if toolchain is truly unavailable (not on timeout).
-            # This fixes the "fucked up agent" returning fake hex.
-            fast_timeout = 8.0 if getattr(request, "fast_mode", True) else 100.0
+            compile_timeout = 25.0 if request.fast_mode else 100.0
             try:
-                result = await asyncio.wait_for(compile_project(candidate), timeout=fast_timeout)
+                result = await asyncio.wait_for(compile_project(candidate), timeout=compile_timeout)
             except asyncio.TimeoutError:
-                # On timeout in fast mode, try once more with longer timeout for real compile
-                if getattr(request, "fast_mode", True):
-                    try:
-                        result = await asyncio.wait_for(compile_project(candidate), timeout=30)
-                    except asyncio.TimeoutError:
-                        yield event({"type": "error", "message": "Compilation timed out. Try again or disable Fast Mode for complex builds."})
-                        return
-                else:
-                    raise
+                record.finish("failed")
+                yield event({"type": "error",
+                             "message": "Compilation timed out. The workspace was not changed."})
+                return
             record.compile_ms += int((time.monotonic() - t0) * 1000)
             diagnostics = str(result.get("stderr") or result.get("error") or "No HEX artifact returned")[-10000:]
             yield event({"type": "compile", "success": bool(result.get("success")),
                          "stdout": str(result.get("stdout", ""))[-12000:],
                          "stderr": "" if result.get("success") else diagnostics})
-            if result.get("success") and result.get("hex_content"):
+            python_ok = bool(result.get("success") and result.get("kind") == "python")
+            hex_ok = bool(result.get("success") and result.get("hex_content"))
+            if python_ok or hex_ok:
                 logger.info("run %s done: compiled on attempt %d in %.1fs",
                             run_id, attempt + 1, time.monotonic() - started)
                 record.finish("compiled")
                 yield event({"type": "result", "project": candidate.model_dump(),
-                             "hex": result["hex_content"], "summary": proposal.summary,
+                             "hex": "" if python_ok else result["hex_content"],
+                             "runtime": "python" if python_ok else "hex",
+                             "summary": proposal.summary,
                              "attempts": attempt + 1,
                              "expectations": proposal.expectations.model_dump()
                              if proposal.expectations else None})

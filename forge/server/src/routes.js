@@ -1,4 +1,5 @@
 import { runMemoryTurn } from './memory/turn.js';
+import { runDecisionTurn } from './memory/decide.js';
 import { listProviders } from './providers/registry.js';
 import { resolveProviderId } from './providers/catalog.js';
 // Forge — REST API (chat-first + legacy compatibility)
@@ -133,6 +134,30 @@ export function createRouter(deps) {
         if (deps.store.removeConversation) await deps.store.removeConversation(req.params.id);
         else await deps.store.remove(req.params.id);
         res.json({ ok: true });
+      });
+    } catch (e) { next(e); }
+  });
+
+  // Empty conversation for the hardware agent. Does not run a generation turn.
+  r.post('/api/chat/session', async (req, res, next) => {
+    try {
+      const title = String(req.body?.title || 'Hardware project').trim().slice(0, 60) || 'Hardware project';
+      const conv = makeConversation({ title });
+      await deps.store.createConversation(conv);
+      res.status(201).json({ conversation: conv });
+    } catch (e) { next(e); }
+  });
+
+  // One JEV decision. No assistant essay. The hardware agent designs after this.
+  r.post('/api/chat/:id/decide', async (req, res, next) => {
+    try {
+      const message = validateMessage(req.body?.text);
+      await withLock(req.params.id, async () => {
+        const conv = deps.store.getConversation ? await deps.store.getConversation(req.params.id) : null;
+        if (!conv) return res.status(404).json({ error: 'conversation not found' });
+        const result = await runDecisionTurn(deps, conv, message);
+        await deps.store.saveConversation(result.conversation);
+        res.json(result);
       });
     } catch (e) { next(e); }
   });

@@ -17,7 +17,10 @@ how the injected shim fixes it without touching the sketch.
 import asyncio
 import json
 import logging
+import os
 import re
+import socket
+import struct
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -185,6 +188,74 @@ def _rewrite_html(resp: Response, prefix: str) -> Response:
         headers=headers,
         media_type=resp.media_type or ctype,
     )
+
+
+def _shareable_lan_ip(ip: str) -> bool:
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        nums = [int(part) for part in parts]
+    except ValueError:
+        return False
+    if any(n < 0 or n > 255 for n in nums):
+        return False
+    a, b, c, _d = nums
+    if a in (0, 127) or (a == 169 and b == 254):
+        return False
+    # Addresses that exist only inside the simulation, never on the computer.
+    if ip == "192.168.4.15" or (a == 10 and b == 13 and c == 37):
+        return False
+    return True
+
+
+def lan_ipv4s() -> list[str]:
+    """IPv4 addresses a phone on this computer's WiFi might be able to open."""
+    found: list[str] = []
+
+    def add(ip: str) -> None:
+        if _shareable_lan_ip(ip) and ip not in found:
+            found.append(ip)
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("8.8.8.8", 80))
+            add(sock.getsockname()[0])
+        finally:
+            sock.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM):
+            add(info[4][0])
+    except OSError:
+        pass
+    if os.path.isdir("/sys/class/net"):
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None  # type: ignore[assignment]
+        if fcntl is not None:
+            for name in os.listdir("/sys/class/net"):
+                if name == "lo":
+                    continue
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    try:
+                        res = fcntl.ioctl(sock.fileno(), 0x8915, struct.pack("256s", name.encode()[:15]))
+                        add(socket.inet_ntoa(res[20:24]))
+                    finally:
+                        sock.close()
+                except OSError:
+                    continue
+    return found
+
+
+@router.get("/lan")
+async def gateway_lan() -> dict:
+    """LAN addresses for the canvas phone card. Registered before the proxy catch-all."""
+    return {"ips": lan_ipv4s()}
 
 
 @router.api_route(

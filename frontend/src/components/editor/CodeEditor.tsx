@@ -131,14 +131,11 @@ export const CodeEditor = () => {
         background: 'rgba(0,0,0,0.3)',
         borderRadius: '0 0 0 6px',
       }}>
-        <span title="Cmd+K Inline Edit">⌘K</span>
+        <span title="Inline edit">⌘K</span>
         <span style={{ opacity: 0.3 }}>|</span>
-        <span title="Cmd+L Chat">⌘L</span>
+        <span title="Add selection to chat">⌘L</span>
         <span style={{ opacity: 0.3 }}>|</span>
-        <span title="Cmd+I Composer">⌘I</span>
-        <span style={{ opacity: 0.3 }}>|</span>
-        <span title="Tab Complete">⇥</span>
-        <span style={{ marginLeft: '6px', color: '#007acc' }}>Velxio = Cursor</span>
+        <span title="Composer">⌘I</span>
       </div>
       
       <Editor
@@ -204,11 +201,9 @@ export const CodeEditor = () => {
                   gap: 12px;
                 `;
                 hint.innerHTML = `
-                  <span><b>⌘K</b> Inline Edit</span>
-                  <span><b>⌘L</b> Add to Chat</span>
+                  <span><b>⌘K</b> Inline edit</span>
+                  <span><b>⌘L</b> Add to chat</span>
                   <span><b>⌘I</b> Composer</span>
-                  <span><b>Tab</b> Accept</span>
-                  <span style="color:#007acc;">Velxio = Cursor</span>
                 `;
                 ed.getDomNode()?.appendChild(hint);
                 setTimeout(() => hint.remove(), 4000);

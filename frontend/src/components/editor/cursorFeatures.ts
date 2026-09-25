@@ -299,7 +299,7 @@ export function showInlineEdit(editor: MonacoEditor.IStandaloneCodeEditor) {
       <span style="color:#555; font-size:11px; margin-left:auto;">Esc to close • Ctrl+↵ to apply</span>
     </div>
     <div style="margin-top:10px; padding:8px; background:#252525; border-radius:4px; color:#666; font-size:10px; line-height:1.4;">
-      <span style="color:#007acc; font-weight:600;">Velxio = Cursor</span> for hardware • ${ALL_BOARDS.length} boards • ${ALL_PARTS.length} components • @ mention files, components, boards • Tab to accept ghost text
+      ${ALL_BOARDS.length} boards • ${ALL_PARTS.length} components • edits go to the hardware agent
     </div>
   `;
   
@@ -324,33 +324,6 @@ export function showInlineEdit(editor: MonacoEditor.IStandaloneCodeEditor) {
     const model = editor.getModel();
     if (!model) return;
     
-    if (selectedText && selection) {
-      const lower = prompt.toLowerCase();
-      let handled = false;
-      let newText = selectedText;
-      
-      if (lower.includes('faster') && selectedText.includes('delay')) {
-        newText = selectedText.replace(/delay\s*\(\s*(\d+)\s*\)/g, (_, n) => `delay(${Math.max(50, Math.floor(parseInt(n)/2))})`);
-        handled = true;
-      } else if (lower.includes('slower') && selectedText.includes('delay')) {
-        newText = selectedText.replace(/delay\s*\(\s*(\d+)\s*\)/g, (_, n) => `delay(${parseInt(n)*2})`);
-        handled = true;
-      } else if (lower.includes('remove') && lower.includes('comment')) {
-        newText = selectedText.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-        handled = true;
-      }
-      
-      if (handled && newText !== selectedText) {
-        editor.executeEdits('cursor-inline', [{
-          range: selection,
-          text: newText,
-        }]);
-        close();
-        return;
-      }
-    }
-    
-    // Complex edit -> delegate to agent (Cursor-like)
     const event = new CustomEvent('velxio-cursor-inline-edit', {
       detail: { prompt, selectedText, fileName }
     });
@@ -454,96 +427,8 @@ export function registerCursorKeybindings(monaco: Monaco, editor: MonacoEditor.I
   });
 }
 
-export function registerTabCompletion(monaco: Monaco, editor: MonacoEditor.IStandaloneCodeEditor) {
-  let ghostDecoration: string[] = [];
-  
-  const ghostMap: Record<string, string> = {
-    'digitalW': 'rite(pin, HIGH);',
-    'pinM': 'ode(pin, OUTPUT);',
-    'Serial.': 'println("");',
-    'delay(': '1000);',
-    'analogW': 'rite(pin, value);',
-    'analogR': 'ead(A0);',
-    'for (': 'int i=0; i<10; i++) {',
-    'if (': 'condition) {',
-    'void setup': '() {\n  Serial.begin(9600);\n}',
-    'void loop': '() {\n  \n}',
-  };
-  
-  const updateGhostText = () => {
-    const position = editor.getPosition();
-    if (!position) return;
-    const model = editor.getModel();
-    if (!model) return;
-    
-    const line = model.getLineContent(position.lineNumber);
-    const before = line.substring(0, position.column - 1);
-    const trimmed = before.trim();
-    
-    let ghost = '';
-    for (const [key, val] of Object.entries(ghostMap)) {
-      if (trimmed.endsWith(key) || before.endsWith(key)) {
-        ghost = val;
-        // Avoid duplicating if already typed
-        if (key === 'delay(' && before.includes('delay(') && before.match(/delay\(\d/)) {
-          ghost = '';
-        }
-        break;
-      }
-    }
-    
-    if (ghost) {
-      const decorations = [{
-        range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
-        options: {
-          after: {
-            content: ghost,
-            inlineClassName: 'cursor-ghost-text',
-          }
-        }
-      }];
-      ghostDecoration = editor.deltaDecorations(ghostDecoration, decorations);
-    } else {
-      ghostDecoration = editor.deltaDecorations(ghostDecoration, []);
-    }
-  };
-  
-  editor.onDidChangeModelContent(() => updateGhostText());
-  editor.onDidChangeCursorPosition(() => updateGhostText());
-  
-  editor.addAction({
-    id: 'cursor.acceptGhost',
-    label: 'Cursor: Accept Ghost (Tab)',
-    keybindings: [monaco.KeyCode.Tab],
-    run: () => {
-      if (ghostDecoration.length > 0) {
-        const position = editor.getPosition();
-        if (!position) return;
-        const model = editor.getModel();
-        if (!model) return;
-        const line = model.getLineContent(position.lineNumber);
-        const before = line.substring(0, position.column - 1);
-        const trimmed = before.trim();
-        let ghost = '';
-        for (const [key, val] of Object.entries(ghostMap)) {
-          if (trimmed.endsWith(key) || before.endsWith(key)) {
-            ghost = val;
-            break;
-          }
-        }
-        if (ghost) {
-          editor.executeEdits('cursor-tab', [{
-            range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
-            text: ghost,
-          }]);
-          ghostDecoration = editor.deltaDecorations(ghostDecoration, []);
-          return;
-        }
-      }
-      // @ts-ignore
-      editor.trigger('cursor', 'tab', {});
-    }
-  });
+export function registerTabCompletion(_monaco: Monaco, _editor: MonacoEditor.IStandaloneCodeEditor) {
+  // Monaco's own completions stay. A ghost map that inserts delay(1000) is not a completion model.
 }
 
 export function injectCursorStyles() {

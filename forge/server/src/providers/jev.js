@@ -1,9 +1,10 @@
 // Forge — Jev provider factory.
 //
-// Contract: ask({ state, questions }) → { answers: { [id]: { type, …fields } }, model, provider, usage }
+// Contract: ask({ state, questions }) → { answers, model, provider, usage }
 //
-// `state` is serialized to JSON before the call (the TypeSafe API takes
-// unstructured program state as a string).
+// `state` is sent as structured JSON when the caller passed an object. The
+// System One API accepts a string, object, or array. Stringifying an object
+// first throws away the paths questions are supposed to point at.
 
 export function createJevProvider(cfg) {
   if (cfg.jev.provider === 'typesafe' && cfg.jev.apiKey) return typesafeJev(cfg);
@@ -16,7 +17,7 @@ export function createJevProvider(cfg) {
 function typesafeJev(cfg) {
   return async function typesafe({ state, questions }) {
     const body = {
-      state: typeof state === 'string' ? state : JSON.stringify(state),
+      state: state === undefined || state === null ? '' : state,
       model: cfg.jev.model,
       questions,
     };

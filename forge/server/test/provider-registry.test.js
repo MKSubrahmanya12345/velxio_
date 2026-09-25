@@ -190,11 +190,11 @@ test('any error switches to the next provider and key', async t => {
   assert.ok(registry.log.some(entry => entry.outcome === 'error' && entry.keyId === bad.id));
 });
 
-test('the loop runs 10 rounds across every key and provider, then stops', async t => {
+test('the loop runs the configured rounds across every key and provider, then stops', async t => {
   const { registry } = await makeRegistry(t);
   const a = await registry.add(gemini('a'));
   const b = await registry.add(openrouter('b'));
-  assert.equal(registry.failover.maxRounds, 10);
+  assert.equal(registry.failover.maxRounds, 2);
 
   const calls = stubFetch(t, () => new Response('boom', { status: 500 }));
   const error = await runWithFailover({ registry, work: async entry => callProviderEntry(entry, { system: 'S', user: 'U' }) })
@@ -203,15 +203,15 @@ test('the loop runs 10 rounds across every key and provider, then stops', async 
   assert.ok(error, 'it stops only after the round budget');
   assert.equal(error.allProvidersFailed, true);
   assert.equal(error.status, 502);
-  assert.equal(calls.length, 20, '2 keys × 10 rounds');
-  assert.equal(error.attempts.length, 20);
-  assert.equal(error.rounds, 10);
-  assert.match(error.message, /20 attempts across 10 of 10 rounds/);
+  assert.equal(calls.length, 4, '2 keys × 2 rounds');
+  assert.equal(error.attempts.length, 4);
+  assert.equal(error.rounds, 2);
+  assert.match(error.message, /4 attempts across 2 of 2 rounds/);
   assert.match(error.message, /Gemini “a”/);
   assert.match(error.message, /OpenRouter “b”/);
   assert.match(error.message, /no project changes were saved/);
-  assert.equal(registry.get(a.id).stats.consecutiveFailures, 10);
-  assert.equal(registry.get(b.id).stats.failures, 10);
+  assert.equal(registry.get(a.id).stats.consecutiveFailures, 2);
+  assert.equal(registry.get(b.id).stats.failures, 2);
 });
 
 test('the round budget is configurable and auto-switch can be turned off', async t => {
@@ -248,14 +248,14 @@ test('a rejected credential is skipped in later rounds unless retries are reques
   const work = entry => callProviderEntry(entry, { system: 'S', user: 'U' });
 
   const error = await runWithFailover({ registry, work }).then(() => null, e => e);
-  assert.equal(calls.length, 11, '1 rejected attempt + the flaky key in all 10 rounds');
+  assert.equal(calls.length, 3, '1 rejected attempt + the flaky key in both rounds');
   assert.equal(error.attempts.filter(a => a.keyId === rejected.id).length, 1);
   assert.equal(error.attempts.filter(a => a.permanent).length, 1);
 
   await registry.setFailover({ retryRejected: true });
   const before = calls.length;
-  await assert.rejects(() => runWithFailover({ registry, work }), /20 attempts across 10 of 10 rounds/);
-  assert.equal(calls.length - before, 20, 'every key is retried in every round');
+  await assert.rejects(() => runWithFailover({ registry, work }), /4 attempts across 2 of 2 rounds/);
+  assert.equal(calls.length - before, 4, 'every key is retried in every round');
 });
 
 test('timeouts, network failures, and non-JSON answers all trigger a switch', async t => {
@@ -373,7 +373,7 @@ test('the Providers API adds, lists, selects, tests, updates, and deletes keys',
   const health = await (await send('GET', '/api/health')).json();
   assert.equal(health.providers.planner, 'unconfigured');
   assert.equal(health.failover.configured, false);
-  assert.equal(health.failover.maxRounds, 10);
+  assert.equal(health.failover.maxRounds, 2);
 
   const empty = await (await send('GET', '/api/providers')).json();
   assert.deepEqual(empty.keys, []);
@@ -382,7 +382,8 @@ test('the Providers API adds, lists, selects, tests, updates, and deletes keys',
   const added = await send('POST', '/api/providers/keys', { provider: 'gemini', apiKey: 'AIza-plain', note: 'main key', model: 'gemini-2.5-flash' });
   assert.equal(added.status, 200);
   const addedBody = await added.json();
-  assert.equal(addedBody.key.apiKey, 'AIza-plain', 'keys come back in plain text, never dotted');
+  assert.equal(addedBody.key.apiKey, 'AIza…in', 'the API returns a mask, not the stored secret');
+  assert.equal(registry.get(addedBody.key.id).apiKey, 'AIza-plain', 'the server still stores the real key');
   assert.equal(addedBody.key.note, 'main key');
   assert.equal(addedBody.state.activeId, addedBody.key.id);
 
@@ -435,7 +436,7 @@ test('.env keys are served through the API, protected, and restorable', async t 
 
   const noted = await (await send('PATCH', '/api/providers/keys/env:llm', { note: 'team key' })).json();
   assert.equal(noted.key.note, 'team key');
-  assert.equal(noted.key.apiKey, 'env-key');
+  assert.equal(noted.key.apiKey, '••••••••');
 
   await send('DELETE', '/api/providers/keys/env:llm');
   const restored = await (await send('POST', '/api/providers/restore-env', {})).json();

@@ -100,7 +100,7 @@ export function loadConfig(env = process.env) {
     dataFile: env.PROVIDERS_FILE || './data/providers.json',
     failover: {
       enabled: !['false', '0', 'off'].includes(String(env.FAILOVER_ENABLED || '').toLowerCase()),
-      maxRounds: Math.min(25, Math.max(1, Number(env.FAILOVER_MAX_ROUNDS) || 10)),
+      maxRounds: Math.min(25, Math.max(1, Number(env.FAILOVER_MAX_ROUNDS) || 2)),
       retryRejected: ['true', '1', 'on'].includes(String(env.FAILOVER_RETRY_REJECTED || '').toLowerCase()),
     },
     envDefaults: { planner, bedrock },

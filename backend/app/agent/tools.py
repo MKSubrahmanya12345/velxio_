@@ -105,20 +105,25 @@ def _clip(value: Any, limit: int = _RESULT_LIMIT) -> str:
 
 
 def read_file(project: Project, args: dict) -> dict:
+    """Return a line-numbered span. offset/limit let the model read a region, not a teaser."""
     name = str(args.get("name", ""))[:120]
+    offset = max(1, int(args.get("offset") or 1))
+    limit = int(args.get("limit") or 400)
+    limit = max(1, min(limit, 800))
+    cap = 12000
     for source in project.files:
         if source.name == name:
-            content = source.content
-            # The full file is already in CURRENT PROJECT (the state message),
-            # which the provider usually serves from cache — re-emitting the
-            # bytes here would duplicate them in every later call of the run
-            # (docs/research/cursor-ai.md §2.1). Return orientation anchors
-            # instead of the payload.
             from app.agent.service import scrub_secrets  # lazy: service imports this module
-            return {"ok": True, "name": name, "chars": len(content),
-                    "head": scrub_secrets(content[:300]),
-                    "tail": scrub_secrets(content[-300:]) if len(content) > 600 else "",
-                    "note": "The full content is already in CURRENT PROJECT — patch against it."}
+            lines = scrub_secrets(source.content).splitlines()
+            start = offset - 1
+            chunk = lines[start:start + limit]
+            numbered = "\n".join(f"{start + i + 1}|{line}" for i, line in enumerate(chunk))
+            truncated = False
+            if len(numbered) > cap:
+                numbered = numbered[:cap]
+                truncated = True
+            return {"ok": True, "name": name, "lines": len(lines), "offset": offset,
+                    "shown": len(chunk), "content": numbered, "truncated": truncated}
     return {"ok": False, "error": f"No file named {name!r}. Files: {[f.name for f in project.files]}"}
 
 
@@ -336,10 +341,19 @@ async def draft_simulate(project: Project, args: dict) -> dict:
     candidate, failure = _candidate(project, args)
     if failure is not None:
         return failure
-    if candidate.board and catalog.board_family(candidate.board.boardKind) not in {"arduino", "attiny"}:
-        return {"ok": False, "stage": "simulate",
-                "error": f"Headless AVR simulation is not available for {candidate.board.boardKind}; "
-                         "use draft_compile for this board and verify behaviour in its board simulator."}
+    family = catalog.board_family(candidate.board.boardKind) if candidate.board else "arduino"
+    if family not in {"arduino", "attiny"}:
+        result = await compile_project(candidate)
+        compiled = bool(result.get("success"))
+        return {
+            "ok": True,
+            "simulated": False,
+            "compiled": compiled,
+            "board": candidate.board.boardKind if candidate.board else "",
+            "stderr": "" if compiled else str(result.get("stderr") or result.get("error") or "")[-2000:],
+            "note": "Headless simulation is AVR-only (Uno, Nano, Mega, ATtiny). "
+                    "This board was compiled, not simulated. Do not call draft_simulate again.",
+        }
     interactions = args.get("interactions")
     interactions = [i for i in interactions if isinstance(i, dict)][:8] if isinstance(interactions, list) else []
     observe_ms = int(args.get("observe_ms", 2000) or 2000)
@@ -555,33 +569,26 @@ TOOLS = {
 assert set(TOOLS) == set(TOOL_NAMES), "TOOLS must match the model-facing TOOL_NAMES"
 
 
-def describe_tools() -> str:
-    return (
-        "Tools you may request in tool_calls (results arrive in the next message; at most 4 calls "
-        "per round, nothing is written to the workspace): "
-        "read_file{name}; list_files{}; board_pinout{}; "
-        "component_info{component, properties?} — pins/properties/notes of one catalog id; pass "
-        "the properties you intend to set (e.g. {\"digits\": 4}) to get that variant's pins; "
-        "search_catalog{query, category?, limit?} — find parts across the whole catalog; "
-        "netlist{} — what is connected to what right now; "
-        "check_design{} — static coherence analysis of the current project; "
-        "search_libraries{query}; library_api{library}; "
-        "draft_validate{patch, expectations?} — build your patch and report every error and "
-        "warning without applying it; "
-        "draft_compile{patch} — compile your patch for real and return the compiler output; "
-        "draft_simulate{patch, interactions?, observe_ms?, watch_pins?} — compile and RUN your "
-        "patch on the emulator with the interactions applied, returning per-pin transitions, "
-        "serial output and the stimulus actually delivered. Use draft_simulate whenever the "
-        "design has to behave a certain way; iterate until the observation matches the intent; "
-        "physics_capabilities{} — reference for the physics scene layer (rigid bodies, "
-        "actuators, sensor links, environment — the generic layer a quadrotor, rover or "
-        "spacecraft are all built from); "
-        "physics_simulate{scene, duration_ms?, sample_every_ms?, inputs?, checks?} — run a "
-        "physics scene HEADLESSLY and return telemetry samples plus check results (kind: "
-        "altitude|position|velocity|actuator, each with target+tolerance). Use it to verify "
-        "a mechanical design behaves (e.g. hovers at altitude, rests on the floor) before "
-        "wiring it to a circuit."
+def describe_tools(include_physics: bool = False) -> str:
+    text = (
+        "Tools are optional. A lookup is a small JSON object with tool_calls and no firmware. "
+        "At most 4 calls per round. Nothing is written to the workspace. "
+        "read_file{name, offset?, limit?} returns line-numbered source; "
+        "list_files{}; board_pinout{}; "
+        "component_info{component, properties?}; search_catalog{query, category?, limit?}; "
+        "netlist{}; check_design{}; search_libraries{query}; library_api{library}; "
+        "draft_validate{patch, expectations?} and draft_compile{patch} are optional checks. "
+        "Do not draft_compile a patch you are about to commit — the commit path compiles it. "
+        "draft_simulate{patch, interactions?, observe_ms?, watch_pins?} runs the AVR emulator only "
+        "(Uno, Nano, Mega, ATtiny). On any other board it compiles and reports that it did not simulate. "
+        "Do not retry it."
     )
+    if include_physics:
+        text += (
+            " physics_capabilities{} and physics_simulate{scene, duration_ms?, sample_every_ms?, inputs?, checks?} "
+            "run the rigid-body scene layer. Use them only when the request is about a body, thrust, or motion."
+        )
+    return text
 
 
 async def execute_tool(project: Project, call: ToolCall,

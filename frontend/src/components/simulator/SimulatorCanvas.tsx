@@ -7,6 +7,7 @@ import {
 import { getBoardBuiltins, getProBoard } from '../../lib/proBoardRegistry';
 import { useElectricalStore } from '../../store/useElectricalStore';
 import { openDeviceGateway } from '../../lib/openDeviceGateway';
+import { PhonePageCard } from './PhonePageCard';
 import React, { useEffect, useState, useRef, useCallback, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -3037,6 +3038,7 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
                             </svg>
                           </span>
                         ) : null}
+                        {hasIp ? <PhonePageCard clientId={clientId} /> : null}
                       </>
                     );
                   })()}

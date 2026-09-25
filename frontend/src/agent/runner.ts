@@ -107,6 +107,8 @@ async function requestRun(
   options: {
     provider: string;
     fastMode?: boolean;
+    mode?: 'chat' | 'composer' | 'inline' | 'agent';
+    skipClarify?: boolean;
     signal: AbortSignal;
     onEvent: (event: AgentEvent) => void;
   },
@@ -121,7 +123,9 @@ async function requestRun(
       prompt,
       project,
       provider: options.provider,
-      fast_mode: options.fastMode ?? false, // Default to real compile like Cursor
+      fast_mode: options.fastMode ?? false,
+      mode: options.mode ?? 'agent',
+      skip_clarify: Boolean(options.skipClarify),
       forge_session: forgeSession(),
       messages: messages
         .slice(-12)
@@ -146,13 +150,8 @@ async function requestRun(
         _active = { runId: event.run_id };
         continue;
       }
-      if (event.type === 'canvas_update') {
-        try {
-          const progressive = fromAgentProject(event.project, before);
-          loadWorkspace(progressive);
-          runEditorCommand('view.reset');
-        } catch {}
-      }
+      // A progressive canvas event is not a checkpoint. Applying it here
+      // left half-built circuits and made a timeout claim parts were kept.
       onEvent(event);
       if (event.type === 'error')
         throw new Error([event.message, event.diagnostics].filter(Boolean).join('\n\n'));
@@ -185,6 +184,8 @@ export async function runAgent(options: {
   messages: ChatMessage[];
   provider: string;
   fastMode?: boolean;
+  mode?: 'chat' | 'composer' | 'inline' | 'agent';
+  skipClarify?: boolean;
   signal: AbortSignal;
   onEvent: (event: AgentEvent) => void;
 }): Promise<string> {
@@ -223,11 +224,12 @@ export async function runAgent(options: {
         'Electrical pre-flight blocked this design. Workspace unchanged.\n' +
           verification.errors.map((e) => e.message).join('\n'),
       );
+    const runtime = event.runtime ?? (event.hex ? 'hex' : 'python');
     try {
       loadWorkspace(after);
-      // Cursor-like: support any board, not just first
       const boardId = after.boards[0]?.id || after.activeBoardId;
-      if (boardId) {
+      // Pi success is an empty hex and a .py file. Do not invent a program.
+      if (boardId && runtime === 'hex' && event.hex) {
         useSimulatorStore.getState().compileBoardProgram(boardId, event.hex);
       }
     } catch (error) {
@@ -243,6 +245,12 @@ export async function runAgent(options: {
         after: captureWorkspace(),
         changes: describeChanges(before, after),
       });
+    if (runtime !== 'hex' || !event.hex) {
+      return (
+        `${event.summary}\n\nThe workspace has the new files. ` +
+        `This board does not produce hex and was not live-simulated. Run the .py file on the Pi.`
+      );
+    }
     onEvent({
       type: 'stage',
       stage: 'validating',
@@ -335,6 +343,6 @@ export async function runAgent(options: {
       .find((b) => b.id === activeBoardId)
       ?.serialOutput.slice(-1800);
     const warnings = verification.warnings.map((w) => w.message);
-    return `${event.summary}\n\n✓ Design validated · firmware compiled · simulation running (Velxio = Cursor for ${after.boards[0]?.boardKind || 'hardware'}).\nBehaviour is not automatically verified — the proposal declared no expectations. Interact with the circuit to test it.${warnings.length ? '\n\nPre-flight notes:\n' + warnings.join('\n') : ''}${serial ? '\n\nObserved serial output:\n' + serial : '\n\nNo serial output observed during the 1.2-second startup check.'}`;
+    return `${event.summary}\n\nDesign validated and firmware compiled. Live pin traces were not declared, so behaviour was not checked automatically. Interact with the circuit to test it.${warnings.length ? '\n\nPre-flight notes:\n' + warnings.join('\n') : ''}${serial ? '\n\nObserved serial output:\n' + serial : '\n\nNo serial output observed during the 1.2-second startup check.'}`;
   }
 }

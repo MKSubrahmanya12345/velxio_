@@ -17,7 +17,25 @@ import { describeCatalog, envEntries, providerDefinition, validateCredentials } 
 import { createPlanner } from './planner.js';
 import { createReasoner } from '../memory/reasoner.js';
 
-export const DEFAULT_FAILOVER = { enabled: true, maxRounds: 10, retryRejected: false };
+export const DEFAULT_FAILOVER = { enabled: true, maxRounds: 2, retryRejected: false };
+
+export function maskSecret(value) {
+  const secret = String(value || '');
+  if (!secret) return '';
+  if (secret.length <= 8) return '••••••••';
+  return `${secret.slice(0, 4)}…${secret.slice(-2)}`;
+}
+
+// What the browser may see. The registry still stores the real secret for calls.
+export function publicEntry(entry) {
+  if (!entry) return entry;
+  return {
+    ...entry,
+    apiKey: maskSecret(entry.apiKey),
+    secret: entry.secret ? maskSecret(entry.secret) : '',
+    sessionToken: entry.sessionToken ? maskSecret(entry.sessionToken) : '',
+  };
+}
 const LOG_LIMIT = 40;
 const NOTE_LIMIT = 240;
 
@@ -341,7 +359,7 @@ export class ProviderRegistry {
     const order = this.candidates();
     return {
       catalog: describeCatalog(),
-      keys,
+      keys: keys.map(publicEntry),
       activeId: this.activeId,
       active: active ? { id: active.id, provider: active.provider, label: providerDefinition(active.provider).label, model: active.model, note: active.note } : null,
       failover: { ...this.failover },

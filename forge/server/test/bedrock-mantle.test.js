@@ -94,6 +94,6 @@ test('Bedrock 400 "Operation not allowed" is a rejection: tried once, not for al
   const error = await runWithFailover({ registry, work: e => callProviderEntry(e, { system: 'S', user: 'U' }) }).then(() => null, e => e);
   assert.ok(error?.allProvidersFailed);
   assert.equal(calls.filter(u => u.includes('amazonaws.com')).length, 1, 'Bedrock refusal is not re-paid every round');
-  assert.equal(calls.filter(u => u.includes('groq')).length, 10, 'the other provider still gets its full budget');
+  assert.equal(calls.filter(u => u.includes('groq')).length, 2, 'the other provider still gets its full budget');
   assert.equal(error.attempts.find(a => a.keyId === 'env:bedrock').permanent, true);
 });

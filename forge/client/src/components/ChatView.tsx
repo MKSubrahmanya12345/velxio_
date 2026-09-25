@@ -158,13 +158,7 @@ export function ChatView({
 
   const pendingTool = conversation.pendingHumanTools?.find(t => t.status === 'requires_action');
   const pendingQuestions = conversation.memory?.notes.filter(n => n.kind === 'question' && (n.status === 'pending' || n.status === 'proposed')) || [];
-  const lastAssistant = [...conversation.messages].reverse().find(m => m.role === 'assistant');
-  const lastHasQuestions = !!(lastAssistant && /\?/.test(lastAssistant.content) && /(?:clarify|functionalit|what.*type|what.*component|waste|sensor|motor|microcontroller|OLED|related|smart dustbin)/i.test(lastAssistant.content));
-  const showJevClarify = pendingQuestions.length > 0 || lastHasQuestions;
-
-  const skipToCoding = () => {
-    void send('Skip clarification — proceed to coding with best assumptions. Use sensible defaults for any open questions.');
-  };
+  const showDecision = pendingQuestions.length > 0;
 
   return (
     <div className="fg-chat-workspace">
@@ -192,7 +186,7 @@ export function ChatView({
           <div className="fg-msg fg-msg-system">
             <div className="fg-msg-content">
               <div>👋 New chat started. Say what you wanna build.</div>
-              <div className="fg-muted" style={{ marginTop: 8 }}>Example: “I wanna build an MP3 player with ESP32 and a speaker” — I’ll run JEV feasibility, then planner, then call you as human tool for each physical step.</div>
+              <div className="fg-muted" style={{ marginTop: 8 }}>Example: “I wanna build an MP3 player with ESP32 and a speaker.” JEV records the decision. This chat does not write the firmware.</div>
             </div>
           </div>
         )}
@@ -209,12 +203,11 @@ export function ChatView({
         </div>
       )}
 
-      {showJevClarify && !pendingTool && (
+      {showDecision && !pendingTool && (
         <div className="fg-pending-banner" style={{background:'rgba(63,185,80,0.12)', borderColor:'#3fb950'}}>
-          🧠 JEV is asking for clarification{pendingQuestions.length ? ` — ${pendingQuestions.length} open question(s)` : ''}. Answer below, or skip to coding.
+          Open questions in project memory{pendingQuestions.length ? ` — ${pendingQuestions.length}` : ''}. Answer below if you want them recorded.
           <div style={{marginTop:8, display:'flex', gap:8}}>
-            <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => inputRef.current?.focus()}>Answer questions</button>
-            <button className="fg-btn fg-btn-primary" disabled={busy} onClick={skipToCoding} style={{background:'#3fb950', color:'#000'}}>Skip to coding →</button>
+            <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => inputRef.current?.focus()}>Answer</button>
           </div>
           {pendingQuestions.length>0 && (
             <ul style={{margin:'8px 0 0 18px', fontSize:13}}>
@@ -246,9 +239,7 @@ export function ChatView({
               <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => prepareReport('I completed the step. Here is what I checked: ')}>Report progress</button>
               <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={() => prepareReport('The step failed. Here is what happened: ')}>Report a problem</button>
             </>}
-            {showJevClarify && !pendingTool && (
-              <button className="fg-btn fg-btn-secondary" disabled={busy} onClick={skipToCoding} title="Skip JEV clarification and proceed to coding with best assumptions" style={{borderColor:'#3fb950'}}>Skip to coding →</button>
-            )}
+
             <button className="fg-btn fg-btn-primary" disabled={busy || !input.trim()} onClick={() => send(input)}>{busy ? 'Reviewing…' : 'Send →'}</button>
           </div>
         </div>

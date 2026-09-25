@@ -161,6 +161,13 @@ const suggestions = [
   },
 ];
 
+function stepFor(stage: string): 'think' | 'parts' | 'check' | 'code' {
+  if (stage === 'validating') return 'parts';
+  if (stage === 'testing' || stage === 'repairing') return 'check';
+  if (stage === 'compiling' || stage === 'verifying') return 'code';
+  return 'think';
+}
+
 export function AgentPanel() {
   const [open, setOpen] = useState(true);
   const [tab, setTab] = useState<'chat' | 'history' | 'create'>('chat');
@@ -171,6 +178,8 @@ export function AgentPanel() {
   const [statusError, setStatusError] = useState('');
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState('');
+  const [step, setStep] = useState<'think' | 'parts' | 'check' | 'code'>('think');
+  const [heartbeat, setHeartbeat] = useState('');
   const [plan, setPlan] = useState<string[]>([]);
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
@@ -186,6 +195,7 @@ export function AgentPanel() {
   const [forgeQuestions, setForgeQuestions] = useState<string[]>([]);
   const [showClarification, setShowClarification] = useState(false);
   const controller = useRef<AbortController | null>(null);
+  const submitRef = useRef<(text?: string, opts?: { mode?: 'chat' | 'composer' | 'inline' | 'agent'; skip?: boolean }) => void>(() => {});
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const feedbackSent = useRef<Set<string>>(new Set());
@@ -218,11 +228,14 @@ export function AgentPanel() {
   // Cursor-like event listeners for inline edit
   useEffect(() => {
     const handleInlineEdit = (e: any) => {
-      const { prompt: p, selectedText, fileName } = e.detail;
-      const context = selectedText ? `File ${fileName} selection:\n\`\`\`\n${selectedText}\n\`\`\`\n\nRequest: ${p}` : p;
-      setPrompt(context);
-      input.current?.focus();
-      setNotice(`⌘K inline edit: ${p} ${fileName ? `in ${fileName}` : ''}`);
+      const { prompt: p, selectedText, fileName } = e.detail || {};
+      const context = selectedText
+        ? `File ${fileName || 'sketch'} selection:\n\`\`\`\n${selectedText}\n\`\`\`\n\nRequest: ${p}`
+        : String(p || '');
+      if (!context.trim()) return;
+      setOpen(true);
+      setTab('chat');
+      void submitRef.current(context, { mode: 'inline' });
     };
     const handleFocusChat = (e: any) => {
       const { prompt: p, context } = e.detail || {};
@@ -368,7 +381,7 @@ export function AgentPanel() {
     }
   };
 
-  async function submit(text = prompt) {
+  async function submit(text = prompt, opts?: { mode?: 'chat' | 'composer' | 'inline' | 'agent'; skip?: boolean }) {
     if (!text.trim() || controller.current) return;
     if (!status?.configured) {
       setSettingsOpen(true);
@@ -388,7 +401,9 @@ export function AgentPanel() {
     setPlan([]);
     setDiagnostics([]);
     setTab('chat');
-    setStage('Reading current code and circuit');
+    setStep('think');
+    setHeartbeat('');
+    setStage('Reading the current circuit');
     feedbackSent.current = new Set();
     const abort = new AbortController();
     controller.current = abort;
@@ -400,34 +415,22 @@ export function AgentPanel() {
         messages: context,
         provider: providerId || 'bedrock',
         fastMode,
+        mode: opts?.mode ?? cursorMode,
+        skipClarify: Boolean(opts?.skip),
         signal: abort.signal,
         onEvent: (event: AgentEvent) => {
           if (event.type === 'stage') {
             const msg = `${event.message}${event.attempt ? ` · attempt ${event.attempt}` : ''}`;
+            setStep(stepFor(event.stage));
             setStage(msg);
-            setActivities((prev) => [...prev, `⚙️ ${msg}`]);
-          }
-          if (event.type === 'heartbeat') {
-            // Ticks every few seconds while a provider call is in flight.
-            // The stage line carries the live detail; the feed keeps ONE
-            // heartbeat row (updated in place) so real actions are not pushed
-            // out of the 4-line window by noise.
-            const msg = `⏳ ${event.message}`;
-            setStage(msg);
-            setActivities((prev) =>
-              prev.length > 0 && prev[prev.length - 1].startsWith('⏳')
-                ? [...prev.slice(0, -1), msg]
-                : [...prev, msg],
-            );
-          }
-          if (event.type === 'retry') {
-            const msg = `⟳ ${event.message}`;
-            setStage(msg);
+            setHeartbeat('');
             setActivities((prev) => [...prev, msg]);
           }
-          if (event.type === 'canvas_update') {
-            const msg = event.label || '🧩 Updating canvas live...';
-            setStage(msg);
+          if (event.type === 'heartbeat') {
+            setHeartbeat(event.message);
+          }
+          if (event.type === 'retry') {
+            const msg = event.message;
             setActivities((prev) => [...prev, msg]);
           }
           if (event.type === 'tools') {
@@ -438,32 +441,15 @@ export function AgentPanel() {
           if (event.type === 'plan') setPlan(event.plan);
           if (event.type === 'forge') {
             const summary = event.summary ?? {} as any;
-            const evAny = event as any;
-            const clar = evAny.clarification as string | undefined;
-            const pqs = (evAny.pending_questions as string[] | undefined) || [];
-            if (evAny.status === 'ok' && (clar || pqs.length)) {
-              const hasQuestionMark = !!(clar && clar.includes('?'));
-              const hasQuestions = pqs.length > 0 || hasQuestionMark;
-              if (hasQuestions && clar && clar.trim().length > 20) {
-                setForgeClarification(clar);
-                setForgeQuestions(pqs);
-                setShowClarification(true);
-                journal.addMessage({ role: 'assistant', content: `**JEV Clarification (Forge):**\n\n${clar}`, scope: requestScope });
-              } else if (pqs.length) {
-                const combined = pqs.map((q, i) => `${i+1}. ${q}`).join('\n');
-                const content = `**JEV has ${pqs.length} open question(s) for this build:**\n\n${combined}\n\nAnswer in chat, or skip to coding.`;
-                setForgeClarification(content);
-                setForgeQuestions(pqs);
-                setShowClarification(true);
-                journal.addMessage({ role: 'assistant', content, scope: requestScope });
-              }
+            if (event.clarification && event.decision !== 'answer') {
+              setForgeClarification(event.clarification);
+              setForgeQuestions(event.pending_questions ?? []);
+              setShowClarification(true);
             }
             setForgeNote(
               event.status === 'ok'
-                ? `forge memory · ${Number(summary.active_notes ?? 0)} active note(s) · ${
-                    (summary as any).withheld ? 'draft held by JEV check' : 'JEV-checked'
-                  }`
-                : `forge memory unavailable: ${event.message || 'service offline'} — the agent continues without it`,
+                ? `project memory · ${Number(summary.active_notes ?? 0)} active note(s)`
+                : `decision unavailable: ${event.message || 'service offline'} — designing without project memory`,
             );
             void checkForge();
           }
@@ -498,6 +484,7 @@ export function AgentPanel() {
       void loadRuns();
     }
   }
+  submitRef.current = submit;
 
   async function sendNote(text: string) {
     const note = text.trim();
@@ -549,11 +536,11 @@ export function AgentPanel() {
       <aside className="agent-rail">
         <button
           onClick={() => setOpen(true)}
-          title="Open circuit agent (Ctrl+Shift+L) - Velxio = Cursor"
+          title="Open circuit agent"
           aria-label="Open circuit agent"
         >
           <MessageSquare size={21} />
-          <span>CURSOR</span>
+          <span>AGENT</span>
         </button>
         {busy && <LoaderCircle size={16} className="agent-spin" />}
       </aside>
@@ -568,7 +555,7 @@ export function AgentPanel() {
   ].filter(m => !mentionQuery || m.id.toLowerCase().includes(mentionQuery) || m.label.toLowerCase().includes(mentionQuery)).slice(0,12);
 
   return (
-    <aside className="agent-panel" aria-label="Circuit agent - Velxio = Cursor">
+    <aside className="agent-panel" aria-label="Circuit agent">
       <header className="agent-header">
         <div className="agent-tabs" role="tablist" aria-label="Agent views">
           <button
@@ -638,7 +625,7 @@ export function AgentPanel() {
       <div className="agent-context" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <Cpu size={13} />
-          <span>VELXIO = CURSOR</span>
+          <span>Hardware agent</span>
           <strong>{boards[0]?.boardKind || 'Arduino Uno'}</strong>
           <span
             className="agent-scope-badge"
@@ -705,8 +692,7 @@ export function AgentPanel() {
               <X size={14} />
             </button>
           </div>
-          <p><strong>Velxio = Cursor for Hardware</strong> — Full Cursor IDE experience for electronics.</p>
-          <p>• <b>⌘K</b> Inline Edit in editor • <b>⌘L</b> Add selection to Chat • <b>⌘I</b> Composer (multi-file) • <b>Tab</b> Accept autocomplete • <b>@</b> Mention files/components</p>
+          <p>Designs against the Velxio catalog, pin names, and electrical rules. JEV decides the turn; this panel writes the circuit.</p>
           <p className="agent-muted">
             Providers are configured on the server. Pick one in the dropdown next to the composer.
           </p>
@@ -812,16 +798,13 @@ export function AgentPanel() {
                 <div className="agent-mark">
                   <Sparkles size={24} />
                 </div>
-                <div className="agent-eyebrow">VELXIO = CURSOR FOR HARDWARE</div>
+                <div className="agent-eyebrow">CIRCUIT AGENT</div>
                 <h2>
                   From an idea
                   <br />
                   to a running circuit.
                 </h2>
                 <p>
-                  <strong>Cursor features now in Velxio:</strong><br/>
-                  <code>⌘K</code> Inline Edit • <code>⌘L</code> Chat • <code>⌘I</code> Composer • <code>Tab</code> Complete • <code>@</code> Mentions
-                  <br/><br/>
                   Describe what you want to build.
                   <br />
                   I'll wire it, write the code, and run it — any board, any component.
@@ -851,18 +834,14 @@ export function AgentPanel() {
                     <Check size={12} /> 157 components (all Velxio parts)
                   </span>
                   <span>
-                    <Check size={12} /> Cursor: ⌘K, ⌘L, ⌘I, Tab, @mentions
+                    <Check size={12} /> AVR simulates live; Pi runs Python
                   </span>
                   <span>
-                    <Check size={12} /> Real compilation (no fake hex)
-                  </span>
-                  <span>
-                    <Check size={12} /> Undo any checkpoint
+                    <Check size={12} /> Other boards compile when their core is installed
                   </span>
                 </div>
                 <p className="agent-small">
-                  Velxio is now Cursor for hardware. Works with Arduino, ESP32, RP2040, STM32, Pi. 
-                  Select code and press ⌘K for inline edit, ⌘L to add to chat, ⌘I for composer multi-file edits.
+                  Catalog boards are build targets. Headless simulation is AVR only.
                 </p>
               </div>
             )}
@@ -900,7 +879,7 @@ export function AgentPanel() {
                 <div className="agent-progress-banner">
                   <div className="agent-banner-title">
                     <Sparkles size={14} className="agent-spin" />
-                    <strong>⚡ CURSOR AGENT BUILDING</strong>
+                    <strong>Designing</strong>
                   </div>
                   <span className="agent-timer-chip">
                     <Clock3 size={11} /> {elapsed}s
@@ -908,16 +887,16 @@ export function AgentPanel() {
                 </div>
 
                 <div className="agent-stepper">
-                  <div className={`agent-step ${stage.includes('Reading') || stage.includes('planning') ? 'is-active' : 'is-done'}`}>
+                  <div className={`agent-step ${step === 'think' ? 'is-active' : 'is-done'}`}>
                     <span>1</span> Think
                   </div>
-                  <div className={`agent-step ${stage.includes('Dropping') || stage.includes('validating') ? 'is-active' : stage.includes('Routing') || stage.includes('compiling') || stage.includes('Compiling') ? 'is-done' : ''}`}>
+                  <div className={`agent-step ${step === 'parts' ? 'is-active' : step === 'check' || step === 'code' ? 'is-done' : ''}`}>
                     <span>2</span> Parts
                   </div>
-                  <div className={`agent-step ${stage.includes('Routing') ? 'is-active' : stage.includes('compiling') || stage.includes('Compiling') ? 'is-done' : ''}`}>
-                    <span>3</span> Wires
+                  <div className={`agent-step ${step === 'check' ? 'is-active' : step === 'code' ? 'is-done' : ''}`}>
+                    <span>3</span> Check
                   </div>
-                  <div className={`agent-step ${stage.includes('compiling') || stage.includes('Compiling') ? 'is-active' : ''}`}>
+                  <div className={`agent-step ${step === 'code' ? 'is-active' : ''}`}>
                     <span>4</span> Code
                   </div>
                 </div>
@@ -926,6 +905,7 @@ export function AgentPanel() {
                   <LoaderCircle size={14} className="agent-spin" />
                   <span>{stage}</span>
                 </div>
+                {heartbeat && <small className="agent-muted">{heartbeat}</small>}
 
                 {activities.length > 0 && (
                   <div className="agent-activity-feed">
@@ -949,7 +929,7 @@ export function AgentPanel() {
                   </ol>
                 )}
                 <small>
-                  {cursorMode === 'composer' ? 'Composer: editing multiple files...' : 'Components drop onto canvas immediately (Cursor-like)'}
+                  {cursorMode === 'chat' ? 'Explaining. No circuit changes.' : 'The circuit is applied only after it validates.'}
                 </small>
               </div>
             )}
@@ -957,7 +937,7 @@ export function AgentPanel() {
               <div className="agent-forge-clarify" style={{border:'1px solid #3fb950', borderRadius:8, padding:12, margin:'8px 0', background:'rgba(63,185,80,0.08)'}}>
                 <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:8}}>
                   <Brain size={14} />
-                  <strong>JEV is asking for clarification</strong>
+                  <strong>Decision before designing</strong>
                   <span style={{marginLeft:'auto', fontSize:11, opacity:0.7}}>{forgeQuestions.length} question(s)</span>
                 </div>
                 <div style={{maxHeight:200, overflowY:'auto', marginBottom:10, fontSize:13}}>
@@ -973,12 +953,10 @@ export function AgentPanel() {
                     Answer in chat
                   </button>
                   <button className="agent-primary" onClick={() => {
-                    const skipNote = 'Skip clarification — proceed to coding with best assumptions. Use sensible defaults for any open questions.';
-                    if (busy) { void sendNote(skipNote); } else { setPrompt(skipNote); }
                     setShowClarification(false);
-                    setNotice('Skipped clarification — coding with best assumptions');
+                    if (lastUserPrompt.trim()) void submit(lastUserPrompt, { skip: true });
                   }} style={{fontSize:13, background:'#3fb950', color:'#000', border:'none', padding:'6px 12px', borderRadius:6, cursor:'pointer'}}>
-                    Skip to coding →
+                    Skip and design
                   </button>
                   <button className="agent-secondary" onClick={() => setShowClarification(false)} style={{fontSize:12}}>
                     Dismiss
@@ -1190,7 +1168,7 @@ export function AgentPanel() {
                   ? 'Composer: describe multi-file changes... Use @ to mention files'
                   : messages.length
                     ? 'What should we change next? @ to mention files/components'
-                    : 'Describe a circuit to build… @ for files • ⌘K inline • ⌘I composer'
+                    : 'Describe a circuit to build'
             }
             onChange={handlePromptChange}
             onKeyDown={(e) => {
@@ -1218,28 +1196,24 @@ export function AgentPanel() {
               {cursorMode === 'composer' && <Layers size={12} />}
               {cursorMode === 'agent' && <Zap size={12} />}
               {cursorMode.toUpperCase()} <ChevronRight size={11} />
-              <button
-                type="button"
-                className={`agent-fast-badge ${!fastMode ? 'active' : ''}`}
-                title="Real compilation (Cursor-like, no fake hex) - recommended"
-                onClick={() => setFastMode(!fastMode)}
-                style={{ 
-                  background: !fastMode ? '#2ea04322' : 'transparent',
-                  borderColor: !fastMode ? '#2ea043' : '#333',
-                  color: !fastMode ? '#2ea043' : '#666',
-                }}
-              >
-                ✓ Real Compile
-              </button>
-              <button
-                type="button"
-                className={`agent-fast-badge ${fastMode ? 'active' : ''}`}
-                title="Fast Mode: quicker but may timeout"
-                onClick={() => setFastMode(!fastMode)}
-                style={{ marginLeft: '4px' }}
-              >
-                ⚡ Fast
-              </button>
+              <label className="agent-fast-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <input
+                  type="radio"
+                  name="agent-compile-mode"
+                  checked={!fastMode}
+                  onChange={() => setFastMode(false)}
+                />
+                Real compile
+              </label>
+              <label className="agent-fast-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 4 }}>
+                <input
+                  type="radio"
+                  name="agent-compile-mode"
+                  checked={fastMode}
+                  onChange={() => setFastMode(true)}
+                />
+                Fast compile
+              </label>
               {configuredProviders.length > 0 ? (
                 <label className="agent-provider-select">
                   <Cpu size={11} />
@@ -1257,7 +1231,7 @@ export function AgentPanel() {
                   </select>
                 </label>
               ) : (
-                <span>{busy ? 'Steer me' : 'Velxio = Cursor'}</span>
+                <span>{busy ? 'Steer me' : 'No model selected'}</span>
               )}
             </span>
             {busy ? (
@@ -1297,7 +1271,7 @@ export function AgentPanel() {
           <span>
             {busy
               ? 'Enter to send a note · notes steer the next repair turn'
-              : `⌘K edit · ⌘L chat · ⌘I composer · Tab complete · @ mentions · ${cursorMode} mode`}
+              : `${cursorMode} · catalog parts and pin rules`}
           </span>
           <span>
             {prompt.length > 5000 ? `${prompt.length}/6000` : `${Object.keys(catalog.boards).length} boards · ${PLACEABLE_SIZE} parts`}
@@ -1322,7 +1296,7 @@ export function AgentPanel() {
               <span className="agent-live-dot" /> Simulation running
             </>
           ) : (
-            'Velxio = Cursor • Ready'
+            'Ready'
           )}
         </span>
       </footer>

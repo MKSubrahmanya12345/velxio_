@@ -192,8 +192,8 @@ requests stay relative.
   **OpenCode Zen**, **Groq**, or any OpenAI-compatible endpoint. Each key carries
   a model, an optional base URL / region, and a **note** so you can tell two keys
   for the same provider apart.
-- The key field is a plain text input and saved keys are displayed in plain text
-  with their note — nothing is dotted out or masked. Copy is one click.
+- The key field is a password input. Saved keys are not copied from the page,
+  and HTTP responses mask the secret. The full value stays in the server store.
 - **Select** any one key: it runs first. The rest stay in the loop as fallbacks.
 - **Test** probes a single credential live (no failover) and reports the reply or
   the exact HTTP status. **Disable** takes a key out of the loop without deleting
@@ -214,7 +214,7 @@ repair, and the legacy planner) walks the loop order: selected key → that
 provider's other keys → every other enabled provider/key. Any error — HTTP
 status, timeout, unreachable host, or a malformed/non-JSON answer — switches to
 the next credential and retries the same prompt. One **round** is a full pass
-over all of them; the runner loops **10 rounds by default** and then stops,
+over all of them; the runner loops **2 rounds by default** and then stops,
 reporting every attempt with its status and reason. Nothing is saved from a
 failed turn. The round budget, the on/off switch, and whether credentials
 rejected with 401/403/404 are retried in later rounds are all on the page
@@ -224,8 +224,8 @@ Each switch is recorded: per-key ok/failure counters and last error on the key
 card, a **loop order** preview, a **recent attempts** log, and `provider` events
 in the turn trace (visible in the decision trail of a streamed turn).
 
-Keys are stored in plain text in `server/data/providers.json` (`PROVIDERS_FILE`)
-and served to the client as entered. **Forge has no authentication**, so anyone
+Keys are stored in `server/data/providers.json` (`PROVIDERS_FILE`). The HTTP
+API masks them; the file on disk keeps the full secret. **Forge has no authentication**, so anyone
 who can reach the API can read these keys — keep the server on localhost or a
 trusted network, and never commit that file (`data/` is git-ignored).
 
@@ -327,7 +327,7 @@ integration, accounts, or guaranteed factual/physical verification.
 - `server/src/providers/jsonModel.js`: shared configured LLM/Bedrock generator.
 - `server/src/providers/catalog.js`: Gemini/OpenRouter/Bedrock/Ollama request shapes.
 - `server/src/providers/registry.js`: stored keys, notes, selection, stats, attempt log.
-- `server/src/providers/failover.js`: switch-and-loop runner (10 rounds, then stop).
+- `server/src/providers/failover.js`: switch-and-loop runner (2 rounds by default, then stop).
 - `client/src/components/ProvidersView.tsx`: the Providers management page.
 - `server/src/memory/decisions.js`: typed JEV questions and conservative application.
 - `server/src/memory/turn.js`: propose → review → contextualize → draft → check/repair.
