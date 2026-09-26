@@ -38,25 +38,36 @@ sidebar shows setup instructions. No canned circuit generator is used in product
 
 ## The agent loop
 
-The path is a JEV decision, then one coding loop. It is not a Forge essay turn.
+The path is a JEV decision, then one plain tool-use loop over a run-scoped
+workspace. It is not a Forge essay turn. See `docs/agent-architecture-v2.md`
+for the full design.
 
 1. **Decision** — one System One call (`POST /api/chat/:id/decide`). Code applies
    the answers. If the trusted mode is clarify-first, the run stops and asks a
    question the code wrote. Otherwise the accepted rules are injected and the
    coding model starts. A decision that does not return in time is cancelled;
    the run designs without memory.
-2. **Optional tool rounds** (`AGENT_MAX_TOOL_ROUNDS`, default 3; chat and inline
-   cap at 2) — catalog, pinout, netlist, and `read_file`. Tools are optional.
-   The catalog index is already in the prompt, so a known part does not need a
-   lookup. Chat cannot call `draft_*`.
-3. **Optional draft rounds** (`AGENT_MAX_DRAFT_ROUNDS`, default 2; composer and
-   inline cap at 1; chat is 0). `draft_simulate` is the AVR emulator. On any
-   other board it compiles and reports that it did not simulate. Do not
-   `draft_compile` a patch that is about to be committed — the commit path
-   compiles it, and identical projects are memoized.
-4. **Commit** — plan, summary, patch, and expectations. The validator and the
-   real compiler are the gates. The browser live-checks expectations only when
-   the result is AVR hex.
+2. **The workspace** — the run materialises the project as real files
+   (`sketch.ino`, `diagram.json`, optional flat headers; `main.py` for Pi) and
+   gives the model nine native tools: `write_file`, `read_file`, `edit_file`,
+   `list_files`, `remove_file`, `catalog`, `check`, `compile`, `simulate`
+   (≤8 tool calls per turn, `AGENT_MAX_TURNS` = 24 turns per run).
+   `check()` runs the catalog-driven electrical lint; `compile()` runs the real
+   toolchain through the pooled compile service; `simulate()` runs the headless
+   AVR emulator with stimuli. Every result is a small `{ok, data|error}` JSON
+   envelope the model reads and fixes from.
+3. **done()** — the model ends the run itself with
+   `done(summary, plan?, expectations?)`. An untouched workspace means the run
+   was a question: the summary becomes the answer, nothing else runs. A touched
+   workspace starts the final gates in order: rebuild → phone-page contract →
+   electrical lint → real compile. A gate failure is fed back to the model as
+   data and the loop continues — there is no attempt counter, only the turn
+   cap and the run wall clock. The intent check is a bare fact
+   ("prompt names a servo; no servo in the circuit"), never an invitation to
+   explain a shortfall.
+4. **Result** — workspace diff + summary + expectations land as a pending
+   checkpoint. The browser applies it, runs the electrical pre-flight and
+   live-checks the declared expectations (AVR hex only).
 
 ## Setup
 
@@ -77,74 +88,58 @@ Edit `backend/.env` locally (do not commit it):
 
 ```dotenv
 AGENT_ENABLED=true
-# Amazon Bedrock (the default provider):
+# Amazon Bedrock (the ONLY provider):
 BEDROCK_MODEL_ID=your-bedrock-model-id
 AWS_REGION=us-east-1
-# Second provider (optional, via Google's OpenAI-compatible layer):
-# AGENT_GEMINI_API_KEY=your-google-ai-studio-api-key
-# AGENT_GEMINI_MODEL=gemini-2.5-flash
-# Optional loop bounds / resilience:
-# AGENT_MAX_ATTEMPTS=4            repair attempts (proposal -> validate/compile)
-# AGENT_MAX_TOOL_ROUNDS=3        optional research rounds
-# AGENT_MAX_DRAFT_ROUNDS=2       optional draft rounds (AVR simulate, or compile)
-# AGENT_RUN_TIMEOUT_S=240        whole-run budget (also what the UI waits for)
-# AGENT_PROVIDER_TIMEOUT_S=120   ceiling for one provider call (clipped to time left)
-# AGENT_PROVIDER_RETRIES=2       retries on 429/5xx/transport errors (backoff + jitter)
-# AGENT_STREAM_TTFB_S=45         give up if no first token within this long
-# AGENT_STREAM_STALL_S=20        give up if a streamed reply goes quiet this long
-# AGENT_COMMIT_RESERVE_S=45      stop researching and commit with this much budget left
-# AGENT_ALLOW_LIBRARY_SEARCH=false  live Arduino library search from the agent
+# Optional loop bounds — three protections for the user, nothing else:
+# AGENT_RUN_TIMEOUT_S=300        whole-run wall clock (the UI waits this long)
+# AGENT_MAX_TURNS=24             hard cap on provider round-trips per run
+# AGENT_PROVIDER_RETRIES=8       the ONE retry layer (botocore never stacks under it)
+# AGENT_SIM_WALL_CLOCK_S=10      simulate() subprocess kill (fixed constant)
+# Which Bedrock transport serves the model: "converse" (default) or "mantle"
+# (required for moonshotai.kimi-k2.5). Verified once at startup.
+# BEDROCK_TRANSPORT=converse
 ```
 
 The default provider is **Amazon Bedrock**. Set `BEDROCK_MODEL_ID` and
 `AWS_REGION` (+ optional static `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/
 `AWS_SESSION_TOKEN`; otherwise the default credential chain/IAM role is used).
 Most Bedrock models run through native Converse (boto3). `moonshotai.kimi-k2.5`
-is NOT served by native Converse on this account ("Operation not allowed") — it
-is routed instead to the **Bedrock Mantle Chat Completions** endpoint
-(`https://bedrock-mantle.<region>.api.aws/v1/chat/completions`) and therefore
-needs `BEDROCK_API_KEY`. Tuning knobs: `BEDROCK_MAX_TOKENS`,
-`BEDROCK_TEMPERATURE`, `BEDROCK_TOP_P`, `BEDROCK_TIMEOUT_MS`,
-`BEDROCK_MAX_RETRIES`.
+is NOT served by native Converse on this account ("Operation not allowed") — set
+`BEDROCK_TRANSPORT=mantle` for it and the run goes to the **Bedrock Mantle Chat
+Completions** endpoint
+(`https://bedrock-mantle.<region>.api.aws/v1/chat/completions`) instead; that
+transport falls back to `BEDROCK_API_KEY` bearer auth when no static AWS
+credentials are set. The transport is chosen by this flag, probed once at
+startup — never guessed from the model id. Both transports stream: Converse
+tokens arrive as they are generated (heartbeats show the live tail), and the
+one bound on a provider call is the read timeout. While the model writes a
+file, the in-progress `write_file` content rides the same heartbeats and
+**types live into the editor pane** — you watch the sketch being written, not
+a character counter. The post-result playback then replays only what you
+have not already watched (new parts, new wires, files that were not
+live-typed), and the one bound on a provider call is the read timeout — a cancelled run stops
+listening, and the abandoned socket read dies within that same timeout. No
+stacked timers. Tuning knobs: `BEDROCK_MAX_TOKENS`, `BEDROCK_TEMPERATURE`,
+`BEDROCK_TOP_P`, `BEDROCK_PROMPT_CACHE`. There is deliberately no
+`BEDROCK_MAX_RETRIES`: botocore runs at `max_attempts=1` and `propose()`'s
+bounded loop is the one retry layer.
 
-**Providers are OpenCode, Gemini and Bedrock — there is no generic
-OpenAI-compatible provider.** Groq was removed: its free tier returned HTTP 429
-mid-run often enough to strand runs in the retry loop, and it rotated model ids
-without notice (`llama-3.1-8b-instant` / `llama-3.3-70b-versatile` began
-returning HTTP 404 on 2026-08-16).
+**Prompt caching** (`BEDROCK_PROMPT_CACHE`, default `off`): cachePoints go at
+the system prompt and the conversation-history boundary — the two prefixes
+that are byte-stable across turns — never around the per-run workspace state.
+The startup probe measures whether the model actually reports cache usage
+before the flag does anything, and run records carry the measured
+`cache_read`/`cache_write` split (`GET /api/agent/runs/records`), so the cost
+model always prices real spend, never an assumption.
 
-**Gemini is a first-class second provider.** Set `AGENT_GEMINI_API_KEY` (a Google
-AI Studio key) and the agent can route requests to Gemini through Google's official
-OpenAI-compatible layer. Both the OpenAI-compatible provider and Gemini speak the same
-wire format, so the adapter is unchanged — Gemini just reads from its own base
-URL/model/key.
+**Bedrock is the only model provider.** OpenCode and Gemini were removed, and
+with them every automatic "pick another provider" path: an unconfigured or
+failing Bedrock is reported as a hard error and the run ends — the agent is
+never silently downgraded to something else mid-request.
 
-Any provider with its key/config configured appears in the chat panel's **provider dropdown**
-in the composer; the selection is per-session and sent as a provider id in each run
-(`opencode`, `gemini`, `bedrock` or `local`, default `bedrock`). Keys never reach the
-browser, and the browser cannot change provider URLs/keys. A keyed provider that is
-configured is always preferred.
-
-### Built-in planner — no key, no network (`local`)
-
-`backend/app/agent/planner.py` is a deterministic planner that needs no provider at
-all (`AGENT_BUILTIN`, default on). It parses the prompt against the same generated
-catalog the model reads and returns the same `Proposal`: board, parts, pin
-assignment, wiring, firmware and falsifiable expectations. Because it spends nothing,
-it is the one provider available while `AGENT_ENABLED=false`; `AGENT_BUILTIN=false`
-restores the old "agent is not configured" behaviour, and a run whose provider has no
-key falls back to it with a `note` instead of failing.
-
-It is not a shortcut past the gates: the patch still goes through schema validation,
-the deterministic analysis, the real compiler and the browser's electrical pre-flight
-and live-simulation checks, and it refuses (with a reason) what it cannot do honestly —
-a bare stepper coil, a relay without a driver, a Python target, a question.
-
-Working today: LED / RGB LED, button (+LED), buzzer, servo, potentiometer and the
-analog inputs, photoresistor, DHT22, HC-SR04, I2C OLED, parallel and I2C LCD,
-NeoPixel, 7-segment, switches/tilt/PIR, an I2C bus scan for any other I2C part, and
-`board_pinout`-style answers about any catalog part. Anything it places still counts
-against the same 40 parts / 100 wires limits.
+The provider id sent with each run is `bedrock`. Keys never reach the browser,
+and the browser cannot change provider URLs/keys.
 
 ```sh
 # Terminal 1, from repo root. Start in backend so .env and Python modules resolve.
@@ -221,37 +216,37 @@ reports the state.
 2. Send the supported design plus recent conversation to the backend. Credential-shaped
    assignments (api key/password/token/bearer) are redacted from source, history and the
    prompt before anything leaves the server.
-3. The model works in **tool rounds** (see *The agent loop* above): catalog and
-   project research (`read_file`, `list_files`, `board_pinout`, `component_info`,
-   `search_catalog`, `netlist`, `check_design`, `library_api`, `search_libraries`)
-   and, once it has a draft, `draft_validate` / `draft_compile` / `draft_simulate`
-   — which build the candidate inline, run the real validator, compiler and
-   emulator on it and hand the observations back. Tool rounds never apply a
-   patch; they are bounded by `AGENT_MAX_TOOL_ROUNDS` (default 5) and
-   `AGENT_MAX_DRAFT_ROUNDS` (default 4).
-4. The model returns a short plan, summary, **targeted patch** (upsert/remove by
-   ID or filename), and **`expectations`** — falsifiable behaviour checks: pin
-   transitions/levels with periods, serial regexes, and interactions. An
-   interaction is one of `press` (a momentary switch), `pot` (a potentiometer or
-   joystick axis), `switch` (a toggle), `rotary` (an encoder or dial) or
-   `stimulus` (a sensor model value such as `temperature`, `lux`, `distance`,
-   `lat`/`lng` — the same knobs the Sensor panel exposes). Unmentioned
-   objects/files are retained deterministically.
-5. Validation runs `apply_patch`: schema strictness, catalog pins (per-instance
-   variants included: `digits=4`, `pins=i2c`), unique IDs, the **catalog-driven
-   static analysis** — firmware pins vs wiring, analogWrite on PWM pins,
-   analogRead on ADC pins, GPIO-to-rail shorts, bridged GPIOs, bridged switch
-   contacts, a part shorted across its own terminals, a supply output wired to a
-   GPIO, a required power/ground connection missing, a signal on a pin that
-   cannot carry it, I2C/SPI bus pinout mismatches and address clashes, missing
-   series resistors (LEDs, opto inputs, 7-segment/bar-graph channels), missing
-   gate resistors (transistors, MOSFETs) and coils wired straight to a pin — then
-   include allowlisting. Errors name the fix and drive a repair.
-6. Compile for `arduino:avr:uno`. Validation/compiler diagnostics drive repairs,
-   with **three proposals maximum** (`AGENT_MAX_ATTEMPTS`), transient provider
-   failures retried with backoff (`AGENT_PROVIDER_RETRIES`, 429/5xx/timeouts),
-   100-second compiler limit, and a 240-second overall server limit. Every repair is
-   against the original snapshot, not a partially applied failed proposal.
+3. The model works **in the workspace** (see *The agent loop* above): it edits
+   `sketch.ino` / `diagram.json` with `write_file` / `edit_file` / `remove_file`,
+   looks things up with `list_files` / `read_file` / `catalog`, and verifies with
+   `check` (electrical lint), `compile` (real toolchain, pooled + cached) and
+   `simulate` (headless AVR with stimuli). Every tool result is a small
+   `{ok, data|error}` JSON envelope — diagnostics are data the model fixes from.
+4. The model ends with `done(summary, plan?, expectations?)`. **`expectations`**
+   are falsifiable behaviour checks: pin transitions/levels with periods, serial
+   regexes, and interactions. An interaction is one of `press` (a momentary
+   switch), `pot` (a potentiometer or joystick axis), `switch` (a toggle),
+   `rotary` (an encoder or dial) or `stimulus` (a sensor model value such as
+   `temperature`, `lux`, `distance`, `lat`/`lng` — the same knobs the Sensor
+   panel exposes).
+5. The final gates run in order behind done(): workspace rebuild (schema
+   strictness, catalog pins per-instance variants included: `digits=4`,
+   `pins=i2c`, unique IDs), the phone-page contract for board-native UI, the
+   **catalog-driven static analysis** — firmware pins vs wiring, analogWrite on
+   PWM pins, analogRead on ADC pins, GPIO-to-rail shorts, bridged GPIOs,
+   bridged switch contacts, a part shorted across its own terminals, a supply
+   output wired to a GPIO, a required power/ground connection missing, a signal
+   on a pin that cannot carry it, I2C/SPI bus pinout mismatches and address
+   clashes, missing series resistors (LEDs, opto inputs, 7-segment/bar-graph
+   channels), missing gate resistors (transistors, MOSFETs) and coils wired
+   straight to a pin — then include allowlisting. The intent check refuses a
+   done() whose circuit is missing a part the prompt named. Errors name the fix.
+6. Compile through the pooled compile service (per-family ceiling enforced by
+   the pool; identical projects are cached). A gate failure is fed back to the
+   model and the loop continues — bounded only by `AGENT_MAX_TURNS` (24) and
+   the run wall clock (`AGENT_RUN_TIMEOUT_S` + compile headroom). Transient
+   provider failures retry inside the one retry layer
+   (`AGENT_PROVIDER_RETRIES`, 429/5xx/timeouts).
 7. Stream NDJSON progress events (not private model reasoning) to the sidebar. Every
    event carries a `run_id`; the last 100 runs are queryable at
    `GET /api/agent/runs/records` (same bearer token): outcome, attempts, provider
@@ -272,9 +267,11 @@ reports the state.
 Electrical warnings are surfaced. An electrical pre-flight error blocks application;
 a runtime fault stops simulation and leaves an undoable checkpoint.
 
-Source and circuit upserts replace the named item only. Unrelated files/components
-are preserved by the merger; preserving unrelated lines *inside an edited file*
-is instructed to the model and protected by checkpoints, not a semantic code proof.
+The workspace is real files: a `write_file` replaces one file; an `edit_file`
+replaces one exact old_string with a new one, so unrelated lines inside an
+edited file are never touched by construction (a missed match is an error the
+model reads). `diagram.json` fixes go through targeted edits, not whole-file
+rewrites. Checkpoints + undo remain the user's safety net.
 
 ## Changes, undo and persistence
 

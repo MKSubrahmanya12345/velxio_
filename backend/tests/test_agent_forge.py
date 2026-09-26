@@ -12,7 +12,7 @@ import json
 import pytest
 
 from app.agent import forge
-from app.agent.models import AgentRequest, Proposal
+from app.agent.models import AgentRequest
 
 
 @pytest.fixture(autouse=True)
@@ -187,18 +187,15 @@ def _minimal_request():
     return AgentRequest(prompt="make it blink", project=project, forge_session="ws-1")
 
 
-def test_base_messages_injects_forge_block():
-    from app.agent.service import _base_messages
-    request = _minimal_request()
-    messages = _base_messages(request)
-    # Layout: [system] → [history] → [state] → [request]; the request (last)
-    # must stay free of memory, and without context the state block is clean too.
-    assert "PROJECT MEMORY" not in messages[-1]["content"]
-    assert "PROJECT MEMORY" not in messages[-2]["content"]
-    request._forge_context = "PROJECT MEMORY (user-established, JEV-reviewed; rules are binding):\n- [rule] Only one LED."
-    # Accepted memory reaches the state message (second to last), which the
-    # cache-friendly layout keeps byte-stable for the whole run.
-    assert "[rule] Only one LED." in _base_messages(request)[-2]["content"]
+def test_workspace_summary_stays_free_of_memory():
+    """v2: the workspace summary block replaces the old state block; project
+    memory joins the conversation as its own user turn, never inside it."""
+    from app.agent import workspace as wsmod
+    from app.agent.service import _workspace_summary
+    project = AgentRequest.model_validate(_minimal_request().model_dump()).project
+    summary = _workspace_summary(wsmod.Workspace(project, "make it blink"))
+    assert "PROJECT MEMORY" not in summary
+    assert "main.ino" in summary
 
 
 def test_agent_request_accepts_forge_session():
@@ -245,9 +242,12 @@ async def test_run_agent_waits_for_the_decision_before_designing(monkeypatch):
             "clarification": "A decision is needed before designing. Which pin?",
         }
 
-    async def llm(messages, spec=None, max_tokens=None):
-        seen.append("\n".join(m["content"] for m in messages))
-        return Proposal(summary="ok")
+    async def llm(messages, spec, max_tokens, tools=True):
+        seen.append("\n".join(str(m.get("content")) for m in messages))
+        # Untouched workspace + done() = an explanation run (answer event).
+        return service.ChatResult(tool_calls=[
+            {"id": "t1", "name": "done",
+             "arguments": json.dumps({"summary": "ok"})}])
 
     monkeypatch.setattr(forge, "run_decision", fake_decision)
     monkeypatch.setattr(service, "propose", llm)

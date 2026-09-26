@@ -36,6 +36,36 @@ const HARD_CAP_MS = 14000;
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
 
+// ── Live typing (while the model is still generating) ─────────────────────
+
+/** Files the live typing already streamed this run, so the post-result
+ *  reveal does not re-type them. Consumed by beginAgentReveal. */
+const liveTypedNames = new Set<string>();
+
+interface AgentLiveTypeState {
+  active: boolean;
+  /** name -> content so far (the server sends the full prefix each beat). */
+  files: Record<string, string>;
+  /** Server update order (its dict order = the model's write order). */
+  order: string[];
+  begin: (files: Record<string, string>) => void;
+  end: () => void;
+}
+
+export const useAgentLiveType = create<AgentLiveTypeState>((set) => ({
+  active: false,
+  files: {},
+  order: [],
+  begin: (files) =>
+    set({ active: true, files: { ...files }, order: Object.keys(files) }),
+  end: () => {
+    for (const name of Object.keys(useAgentLiveType.getState().files)) {
+      liveTypedNames.add(name);
+    }
+    set({ active: false, files: {}, order: [] });
+  },
+}));
+
 interface AgentRevealState {
   active: boolean;
   scope: string | null;
@@ -136,7 +166,12 @@ export function beginAgentReveal(before: Snapshot, after: Snapshot): Promise<voi
   const afterGroup = after.boards[0]?.activeFileGroupId;
   const afterFiles: { name: string; content: string }[] =
     afterGroup ? (after.fileGroups[afterGroup] ?? []) : [];
-  const changedFiles = afterFiles.filter((f) => beforeFiles.get(f.name) !== f.content);
+  // The live typing already streamed these files in front of the user while
+  // the model generated — replaying them would be a re-run, not a reveal.
+  const changedFiles = afterFiles.filter(
+    (f) => beforeFiles.get(f.name) !== f.content && !liveTypedNames.has(f.name),
+  );
+  liveTypedNames.clear();
 
   if (
     reducedMotion() ||

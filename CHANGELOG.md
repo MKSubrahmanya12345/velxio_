@@ -37,25 +37,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the serial batcher, and `lib/proHardwareSerial.ts` lets an installed monitor
   intercept a board's serial input while attached
 
-- Agent **built-in offline planner** (`backend/app/agent/planner.py`, `AGENT_BUILTIN`, default on):
-  with no provider key, no network and no setup a plain-English request — "blink an LED",
-  "button and LED", "read a potentiometer", "HC-SR04 distance", "DHT22 on pin 2", "sweep a servo",
-  "NeoPixel strip", "I2C OLED", "7-segment counter", "RGB LED" — is parsed against the generated
-  catalog and turned into the same `Proposal` a model returns: board, parts, 220-1000 Ω series
-  resistors where the rules require one, pin-level wiring, firmware and falsifiable expectations.
-  It passes the identical gates (schema validation, deterministic analysis, the real compiler, the
-  browser's electrical pre-flight and live-simulation checks) and appears as `local` /
-  "Built-in (offline)" in the provider dropdown. A configured keyed provider is still preferred;
-  a run whose provider has no key falls back to the planner with a `note` instead of failing, and
-  `AGENT_BUILTIN=false` restores the old "not configured" behaviour. It refuses honestly — and says
-  why — what it cannot do: a bare stepper coil or relay (needs a driver), a Raspberry Pi target
-  (Python, not Arduino C++), a part the catalog has no wiring rules for, or a question
-
 ### Changed
-- `/api/agent/status` reports a local-server provider (OpenCode) as not ready when nothing is
-  listening on its base URL, and marks the built-in planner with `"local": true`. The browser used
-  to auto-select OpenCode on a box where `opencode serve` was never started, so every run died on a
-  refused connection with no circuit produced
+- **Live typing in the editor while the agent generates**: in-progress
+  `write_file` content is extracted from the model's tool-call deltas
+  server-side and shipped on every heartbeat; the editor pane types it live
+  (the same curtain the post-result reveal uses, fed by the real stream) —
+  no more "generating · N characters" as the primary signal. The sidebar
+  says "typing sketch.ino", the post-result playback skips files that were
+  already live-typed, and ticks speed up (0.15s) while code is arriving
+- **Agent streaming + measured prompt caching**: the Converse transport now
+  streams (`converse_stream`) — heartbeats carry the live text tail on both
+  transports. One bound per transport: botocore `read_timeout` for Converse,
+  the asyncio stall guard for Mantle; the run deadline only stops reading,
+  it is never a second kill timer. `BEDROCK_PROMPT_CACHE` (default off) adds
+  cachePoints at the stable prefix boundaries; the startup probe measures
+  cache usage before honoring the flag (unsupported model => fail fast with
+  the fix; Mantle => measured state on `/api/agent/status`), and run records
+  price input tokens on the true full basis (input + cacheRead + cacheWrite)
+  with the measured split kept alongside
+- **Golden eval harness** (`eval/golden.yaml`, `backend/eval_runner.py`,
+  `eval/nightly.yml`): nightly outcome eval through the real run loop —
+  compiled result + behavioral expectations in the headless sim (pin
+  transition rates, serial regexes, serial distinct-value minimums), with
+  part-presence demoted to a diagnostic. First run records the baseline;
+  a ≥10pt success-rate drop exits 1 (the release gate)
+- **Agent v2** (`docs/agent-architecture-v2.md`): the draft-patch pipeline is replaced by a plain
+  tool-use loop over a run-scoped workspace (`sketch.ino` + `diagram.json`). Nine native tools
+  (`write_file`/`read_file`/`edit_file`/`list_files`/`remove_file`/`catalog`/`check`/`compile`/
+  `simulate`), `{ok, data|error}` envelopes, and a model-called `done()` whose gates feed failures
+  back as data — no attempt counters, only `AGENT_MAX_TURNS` and the run wall clock. The compiler
+  moved behind a pooled, cached, family-bounded compile service shared by the tool and the final
+  gate. Amazon Bedrock remains the only provider; the transport (`converse`/`mantle`) is a config
+  flag probed once at startup
+- `/api/agent/status` reports the one Bedrock transport path and its configuration state; there are no local-server providers to probe
 - The agent no longer uses a workspace access token. `AGENT_ACCESS_TOKEN` /
   `AGENT_ALLOW_ANONYMOUS` are gone: with `AGENT_ENABLED=true` and a configured
   provider the agent endpoints (`/api/agent/runs`, `records`, `forge/*`,

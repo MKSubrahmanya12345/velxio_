@@ -1,0 +1,79 @@
+# Nightly golden-prompt eval + release gate (docs/agent-architecture-v2.md C.7).
+#
+# Runs eval/golden.yaml against real Bedrock through the real agent loop and
+# gates on a >=10pt success-rate drop vs eval/baseline.json. Costs one night's
+# worth of tokens per model; that is the price of being allowed to say
+# "agent quality is tracked".
+#
+# Required repo secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+# (+ BEDROCK_MODEL_ID repo variable, or hardcode it below).
+# First run records the baseline and exits 0; the gate arms from run 2.
+#
+# PR smoke tier: on pull requests touching backend/app/agent/** or eval/**,
+# run the 3-prompt smoke set only (needs a PR-triggered secret — pull_request
+# from forks does not get secrets; keep the nightly in schedule + workflow_dispatch).
+
+name: agent-golden-eval
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # 02:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      ids:
+        description: "comma-separated prompt ids (empty = full suite)"
+        default: ""
+      limit:
+        description: "cap prompt count (smoke tier)"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install the AVR toolchain (the gate compiles for real)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=/usr/local/bin sh
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install arduino:avr
+
+      - name: Install python deps
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Run the golden suite
+        working-directory: backend
+        env:
+          BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
+          BEDROCK_PROMPT_CACHE: "on"
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.ids }}" ]; then ARGS="--ids ${{ github.event.inputs.ids }}"; fi
+          if [ -n "${{ github.event.inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"; fi
+          python eval_runner.py $ARGS
+
+      - name: Upload run detail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-runs
+          path: eval/runs/
+          if-no-files-found: warn
+          retention-days: 90

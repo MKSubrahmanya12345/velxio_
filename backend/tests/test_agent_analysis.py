@@ -7,7 +7,7 @@ used to be accepted and reported to the user as "design validated".
 """
 import pytest
 
-from app.agent.analysis import Finding, analyse, firmware_pin_usage, pin_constants
+from app.agent.analysis import Finding, analyse, assert_clean, firmware_pin_usage, pin_constants
 from app.agent.models import (
     Board,
     Connection,
@@ -15,11 +15,10 @@ from app.agent.models import (
     Expectations,
     Interaction,
     Part,
-    Patch,
     PinExpectation,
     Project,
     Source,
-    apply_patch,
+    validate_electrical,
 )
 
 LED = Part(id="led1", metadataId="led", x=500, y=100, properties={"color": "red"})
@@ -41,18 +40,28 @@ BLINK = [wire("w1", "uno", "13", "res1", "1"), wire("w2", "res1", "2", "led1", "
          wire("w3", "led1", "C", "uno", "GND.1")]
 
 
-def patch(components=(LED, RES), wires=BLINK, source=BLINK_SRC, **extra):
-    return Patch(board=Board(id="uno"), upsert_components=list(components),
-                 upsert_wires=list(wires),
-                 upsert_files=[Source(name="sketch.ino", content=source)], **extra)
-
-
 def codes(project, expectations=None):
     return {f.code: f for f in analyse(project, expectations)}
 
 
-def build(p):
-    return apply_patch(Project(), p)
+def patch(components=(LED, RES), wires=BLINK, source=BLINK_SRC, **extra):
+    """The candidate spec (kwargs dict). In v2 there is no Patch model: the
+    workspace tools edit files and done() assembles + gates the project. This
+    shim keeps the test table readable."""
+    assert not extra, extra
+    return dict(components=list(components), wires=list(wires), source=source)
+
+
+def build(p, expectations=None):
+    """Assemble the project and run the SAME gate the v1 patch path used
+    (assert_clean -> validate_electrical). In v2 the workspace's check() and
+    done() run this stack — the test pins it at the function level."""
+    project = Project(board=Board(id="uno"), components=list(p["components"]),
+                      wires=list(p["wires"]),
+                      files=[Source(name="sketch.ino", content=p["source"])])
+    project._findings = assert_clean(project, p.get("expectations", expectations))
+    validate_electrical(project)
+    return project
 
 
 def test_good_blink_is_clean():
@@ -77,7 +86,7 @@ def test_firmware_pins_must_match_the_circuit(led_pin, source, expected):
     assert expected in {f.code for f in analyse(direct)}
     # apply_patch surfaces it as a rejection, never a half-applied patch.
     with pytest.raises(ValueError):
-        apply_patch(Project(), patch(wires=wires, source=source))
+        build(patch(wires=wires, source=source))
 
 
 def test_wrong_pin_rejected_with_actionable_message():
@@ -228,17 +237,13 @@ def test_line_continuation_does_not_hide_a_pin():
 
 def test_expectations_must_reference_real_parts_and_pins():
     with pytest.raises(ValueError, match="not wired to anything"):
-        apply_patch(Project(), patch(),
-                    Expectations(pins=[PinExpectation(pin="A3", expect="high")]))
+        build(patch(), Expectations(pins=[PinExpectation(pin="A3", expect="high")]))
     with pytest.raises(ValueError, match="only a pushbutton"):
-        apply_patch(Project(), patch(),
-                    Expectations(interactions=[Interaction(kind="press", componentId="res1")]))
+        build(patch(), Expectations(interactions=[Interaction(kind="press", componentId="res1")]))
     with pytest.raises(ValueError, match="only a potentiometer"):
-        apply_patch(Project(), patch(),
-                    Expectations(interactions=[Interaction(kind="pot", componentId="led1")]))
+        build(patch(), Expectations(interactions=[Interaction(kind="pot", componentId="led1")]))
     with pytest.raises(ValueError, match="not in the circuit"):
-        apply_patch(Project(), patch(),
-                    Expectations(interactions=[Interaction(kind="press", componentId="ghost")]))
+        build(patch(), Expectations(interactions=[Interaction(kind="press", componentId="ghost")]))
 
 
 def test_valid_expectations_survive():
@@ -248,7 +253,7 @@ def test_valid_expectations_survive():
         serial=[],
         interactions=[],
     )
-    candidate = apply_patch(Project(), patch(), expectations)
+    candidate = build(patch(), expectations)
     assert candidate.findings == []
 
 
@@ -272,12 +277,12 @@ SERVO_WIRES = [wire("s1", "srv1", "PWM", "uno", "9"),
                wire("s3", "srv1", "GND", "uno", "GND.1")]
 
 
-def servo_patch(wires, source=SERVO_SRC):
-    return patch(components=(SERVO,), wires=wires, source=source)
+def build_servo(wires, source=SERVO_SRC):
+    return build(components=(SERVO,), wires=wires, source=source)
 
 
 def test_servo_on_a_pwm_pin_with_power_is_clean():
-    candidate = build(servo_patch(SERVO_WIRES))
+    candidate = build_servo(SERVO_WIRES)
     assert candidate.findings == []
 
 
@@ -287,23 +292,23 @@ def test_servo_signal_on_a_non_pwm_pin_is_rejected():
            wire("s3", "srv1", "GND", "uno", "GND.1")]
     source = SERVO_SRC.replace("attach(9)", "attach(7)")
     with pytest.raises(ValueError, match="non-PWM pin 7"):
-        build(servo_patch(bad, source=source))
+        build_servo(bad, source=source)
 
 
 def test_servo_signal_unwired_is_rejected():
     idle = "void setup(){}void loop(){}"
     with pytest.raises(ValueError, match="not wired to any board pin"):
-        build(servo_patch([wire("s2", "srv1", "V+", "uno", "5V"),
-                           wire("s3", "srv1", "GND", "uno", "GND.1")], source=idle))
+        build_servo([wire("s2", "srv1", "V+", "uno", "5V"),
+                           wire("s3", "srv1", "GND", "uno", "GND.1")], source=idle)
 
 
 def test_servo_without_power_warns_but_applies():
     wires = [wire("s1", "srv1", "PWM", "uno", "9"),
              wire("s3", "srv1", "GND", "uno", "GND.1")]
-    candidate = build(servo_patch(wires))
+    candidate = build_servo(wires)
     assert "servo-power-unwired" in codes(candidate)
     assert codes(candidate)["servo-power-unwired"].severity == "warning"
 
 
 def test_servo_h_include_is_allowed():
-    build(servo_patch(SERVO_WIRES))
+    build_servo(SERVO_WIRES)
