@@ -4,6 +4,7 @@ import App from './App';
 import './index.css';
 import './wireup-theme.css';
 import './styles/wireup-ide.css';
+import './styles/wireup-motion.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
