@@ -22,6 +22,7 @@ rather than crashing startup.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -31,6 +32,7 @@ from pathlib import Path
 import httpx
 
 from app.core.config import settings
+from app.core.hooks import register_lifespan_startup
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 # Default dev location. The standalone Docker image ships the backend at
@@ -157,16 +159,31 @@ async def _wait_live(deadline_s: float) -> bool:
     return False
 
 
-async def ensure_live() -> tuple[bool, dict]:
-    """(live, health). Probes once; autostarts and waits only when configured."""
+async def ensure_live(spawn: bool = True) -> tuple[bool, dict]:
+    """(live, health). Probes once; autostarts and waits only when spawn=True
+    (and configured). spawn=False is for the per-request hot path
+    (run_decision): the server is meant to already be warm from _warm_start
+    below, so a user's build request never pays a subprocess-boot latency -
+    it just probes and fails open immediately if forge isn't already up."""
     health = await _probe()
     if health is not None:
         return True, health
-    if not await _spawn():
+    if not spawn or not await _spawn():
         return False, {}
     if await _wait_live(settings.FORGE_SPAWN_WAIT_S):
         return True, await _probe() or {}
     return False, {}
+
+
+async def _warm_start() -> None:
+    """Boot forge during app startup, not inside a user's first build
+    request. Registered below as a lifespan hook - best-effort, silent on
+    failure (run_decision's own fail-open still applies either way)."""
+    with contextlib.suppress(Exception):
+        await ensure_live()
+
+
+register_lifespan_startup(_warm_start)
 
 
 async def _probe(timeout: float = 2.0) -> dict | None:
@@ -301,7 +318,7 @@ async def run_decision(prompt: str, session: str = "default") -> dict:
              "pending_questions": [], "clarify": False, "decision": "answer"}
     if not is_enabled() or not str(prompt or "").strip():
         return {**empty, "error": "forge memory is disabled"}
-    live, _health = await ensure_live()
+    live, _health = await ensure_live(spawn=False)
     if not live:
         return {**empty, "error": "forge service is not reachable and autostart is off or failed"}
     try:
