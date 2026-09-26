@@ -7,7 +7,7 @@ export function createProjectController({ cfg, registry, jev, store, indexer }) 
   // build path the autonomous controller.
   const legacy = createAgent({ cfg, registry, jev, store, indexer });
   const autonomous = createAutonomousAgent({ cfg, registry, store, indexer, fallbackAgent: legacy });
-  const orchestrator = createAgentOrchestrator({ agent: autonomous, registry, store });
+  const orchestrator = createAgentOrchestrator({ agent: autonomous, registry, store, cfg });
 
   return {
     start: ({ goal, constraints, prefer, emit }) => autonomous.runProject(goal, constraints || {}, { emit, prefer }),
