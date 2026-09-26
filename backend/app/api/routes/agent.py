@@ -1,10 +1,13 @@
 """Opt-in AI endpoint. Never accepts provider URLs or API keys from browsers."""
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("velxio.agent")
 
 from app.agent import catalog
 from app.agent.feedback import push as push_feedback
@@ -128,6 +131,9 @@ async def run(body: AgentRequest, request: Request):
                                          f"Your workspace is unchanged. Try a smaller request."}) + "\n"
         except Exception as exc:
             # Only explicitly safe provider errors may be shown to the browser.
+            # The traceback still goes to the log: a generic message with no
+            # traceback is an unactionable black box.
+            logger.exception("agent run failed")
             message = str(exc) if isinstance(exc, ProviderError) else "Agent service failed. Check backend connectivity and model configuration, then retry."
             yield json.dumps({"type": "error", "message": message}) + "\n"
         finally:

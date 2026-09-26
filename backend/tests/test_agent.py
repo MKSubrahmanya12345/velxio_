@@ -55,8 +55,10 @@ def blink_project() -> Project:
     return wsmod.build_project(blink_workspace_files())
 
 
-def tool_call(name, **args):
-    return {"id": f"call-{name}", "name": name, "arguments": json.dumps(args)}
+def tool_call(tool, **args):
+    # `tool`, not `name`: write_file/read_file take a `name` argument, which
+    # would collide with a `name` parameter here.
+    return {"id": f"call-{tool}", "name": tool, "arguments": json.dumps(args)}
 
 
 # --- the electrical rules still bind, on the v2 path -------------------------
@@ -160,6 +162,32 @@ def test_file_caps_are_enforced():
     ws = wsmod.Workspace(Project(), "blink an led")
     envelope = ws.write_file("big.h", "x" * (64 * 1024 + 1))
     assert envelope["ok"] is False and "64" in envelope["error"]
+
+
+def test_wire_colour_names_are_accepted():
+    """The system prompt's own diagram example writes `"color":"red"`; a
+    colour name must build, not raise on the #rrggbb pattern."""
+    p = blink_project()  # DIAGRAM wires are "orange" and "black"
+    assert [w.color for w in p.wires] == ["#f97316", "#f97316", "#111827"]
+
+
+def test_a_model_invented_part_property_is_tool_data_not_a_dead_run():
+    """`resistance` is not an editable resistor property. That is a design
+    problem the model fixes in one edit, so it must reach it as a problem
+    line — a raw pydantic error here escaped the tools and killed the run."""
+    diagram = json.loads(json.dumps(DIAGRAM))
+    diagram["parts"][1]["props"] = {"resistance": 330}
+    files = {"diagram.json": json.dumps(diagram), "sketch.ino": SKETCH}
+    with pytest.raises(wsmod.WorkspaceError) as excinfo:
+        wsmod.build_project(files)
+    # the message names the offender AND the fix
+    assert "resistance" in str(excinfo.value) and "value" in str(excinfo.value)
+    ws = wsmod.Workspace(Project(), "blink an led")
+    ws.files = files
+    envelope = ws.check()
+    assert envelope["ok"] is True
+    assert envelope["data"]["clean"] is False
+    assert "resistance" in envelope["data"]["problems"][0]
 
 
 def test_mentioned_parts_are_found_and_missing_parts_rejected():

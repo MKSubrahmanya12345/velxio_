@@ -404,8 +404,13 @@ def _converse_usage(raw: dict) -> dict:
 
 def _converse_client_error(spec: ProviderSpec, exc) -> ProviderError:
     """Map a Converse ClientError to the taxonomy. One classification, once."""
-    code = str((exc.get("Error", {}) or {}).get("Code") or "")
-    status = int(((exc.response or {}).get("ResponseMetadata") or {})
+    # botocore's ClientError carries the parsed body ONLY as .response: it has
+    # no .get() and no __getitem__, so exc.get(...) raises AttributeError from
+    # inside this handler. That escaped to the probe's catch-all, which then
+    # blamed region/credentials and buried the 4xx the provider had explained.
+    response = getattr(exc, "response", None) or {}
+    code = str((response.get("Error") or {}).get("Code") or "")
+    status = int((response.get("ResponseMetadata") or {})
                  .get("HTTPStatusCode") or 0)
     if status == 429 or "Throttl" in code:
         return ProviderTransientError(f"{spec.label} is throttling requests. Retrying…")
@@ -548,17 +553,44 @@ def _mantle_headers(url: str, body: bytes, spec: ProviderSpec) -> dict:
     return {"Authorization": f"Bearer {spec.api_key}"} if spec.api_key else {}
 
 
+def _mantle_message(message: dict) -> dict:
+    """One message in the gateway's OpenAI shape.
+
+    A tool round is only valid with the tool fields intact: the assistant
+    message must carry `tool_calls` and the tool result its `tool_call_id`
+    (the gateway answers HTTP 400 "missing field `tool_call_id`" without
+    them, which would kill the run on its second turn).
+    """
+    role = message.get("role")
+    out: dict = {"role": role, "content": message.get("content") or ""}
+    if role == "assistant" and message.get("tool_calls"):
+        out["tool_calls"] = [
+            {"id": str(call.get("id") or uuid.uuid4().hex[:12]),
+             "type": "function",
+             "function": {"name": str(call.get("name") or ""),
+                          "arguments": str(call.get("arguments") or "{}")}}
+            for call in message["tool_calls"]]
+    if role == "tool":
+        out["tool_call_id"] = str(message.get("tool_call_id") or "")
+    return out
+
+
 def _mantle_body(spec: ProviderSpec, messages: list[dict], max_tokens: int,
                  tools) -> dict:
-    payload: dict = {"model": spec.model, "messages": messages,
+    # `stream` is not optional: without it the gateway replies with ONE
+    # application/json chat.completion, the SSE reader below sees no `data:`
+    # line, and every turn silently degrades into an empty reply — no tool
+    # calls, no usage — which the loop can only end with the turn cap.
+    payload: dict = {"model": spec.model,
+                     "messages": [_mantle_message(m) for m in messages],
                      "max_tokens": max_tokens,
                      "temperature": settings.BEDROCK_TEMPERATURE,
-                     "top_p": settings.BEDROCK_TOP_P}
+                     "top_p": settings.BEDROCK_TOP_P,
+                     "stream": True,
+                     "stream_options": {"include_usage": True}}
     # Canonical only: private markers (the cache boundary) must not reach the
     # gateway, and there is no Mantle cache marker to send — whether the
     # gateway caches is measured by the probe, not assumed here.
-    payload["messages"] = [{"role": m.get("role"), "content": m.get("content")}
-                           for m in messages]
     if tools:
         payload["tools"] = toolspecs.mantle_tools()
     return payload
@@ -577,6 +609,7 @@ async def _mantle_stream(spec: ProviderSpec, url: str, body: dict) -> ChatResult
     finish_reason: str | None = None
     usage: dict | None = None
     started = False
+    saw_sse = False
     total = 0
     timeout = httpx.Timeout(_http_timeout(settings.AGENT_PROVIDER_TIMEOUT_S), connect=10.0)
     try:
@@ -614,6 +647,7 @@ async def _mantle_stream(spec: ProviderSpec, url: str, body: dict) -> ChatResult
                     text = line.strip() if isinstance(line, str) else ""
                     if not text.startswith("data:"):
                         continue
+                    saw_sse = True
                     data = text[5:].strip()
                     if not data:
                         continue
@@ -662,6 +696,15 @@ async def _mantle_stream(spec: ProviderSpec, url: str, body: dict) -> ChatResult
                             finish_reason = reason
     except httpx.HTTPError:
         raise ProviderTransientError(f"{spec.label} is unreachable. Retrying…") from None
+    if not saw_sse:
+        # A 200 that is not an event stream means the gateway ignored
+        # `stream: true`. Say so instead of returning an empty reply: the loop
+        # reads "no tool calls" as the model chatting, and burns every turn
+        # until the cap — the exact failure this branch used to cause.
+        raise ProviderError(
+            f"{spec.label} answered with a non-streaming body even though "
+            "stream=true was sent. The gateway is not serving SSE on this "
+            "endpoint — check BEDROCK_TRANSPORT and the model id.")
     ordered = [calls[i] for i in sorted(calls) if calls[i].get("name")]
     if usage and isinstance(usage.get("prompt_tokens_details"), dict):
         # OpenAI-shaped gateway cache report -> the same measured fields the
@@ -1211,6 +1254,18 @@ async def _run(request: AgentRequest, run_id: str, started: float,
 async def _dispatch(workspace: Workspace, name: str, args: dict) -> dict:
     """One tool call -> envelope. done() raises DoneSignal (submit/explain);
     everything else never raises."""
+    try:
+        return await _run_tool(workspace, name, args)
+    except DoneSignal:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the contract is that a tool can
+        # never end a run: an error here is a tool result the model reads.
+        logger.exception("tool %s raised", name)
+        return {"ok": False,
+                "error": f"{name} failed: {type(exc).__name__}: {exc}"[:600]}
+
+
+async def _run_tool(workspace: Workspace, name: str, args: dict) -> dict:
     if name == "list_files":
         return workspace.list_files()
     if name == "read_file":

@@ -314,11 +314,111 @@ def test_mantle_body_strips_private_markers(monkeypatch):
     assert all(set(m.keys()) == {"role", "content"} for m in body["messages"])
 
 
+def test_mantle_body_asks_for_a_stream(monkeypatch):
+    """No `stream: true` => one application/json body => an SSE reader sees
+    nothing and every turn degrades to an empty reply."""
+    body = service._mantle_body(spec(), [{"role": "user", "content": "hi"}],
+                               1000, None)
+    assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
+
+
+def test_mantle_body_keeps_the_tool_round_intact():
+    """The gateway 400s ("missing field `tool_call_id`") unless the assistant
+    keeps tool_calls and the tool result keeps tool_call_id."""
+    body = service._mantle_body(spec(), [
+        {"role": "user", "content": "list leds"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "functions.catalog:0", "name": "catalog",
+                         "arguments": '{"query": "led"}'}]},
+        {"role": "tool", "tool_call_id": "functions.catalog:0", "name": "catalog",
+         "content": '{"ok": true}'},
+    ], 1000, ["tools"])
+    assistant, tool = body["messages"][1], body["messages"][2]
+    assert assistant["tool_calls"] == [
+        {"id": "functions.catalog:0", "type": "function",
+         "function": {"name": "catalog", "arguments": '{"query": "led"}'}}]
+    assert tool["tool_call_id"] == "functions.catalog:0"
+    assert set(tool.keys()) == {"role", "content", "tool_call_id"}
+
+
+# --- the Mantle reader: a non-SSE body is a hard error, not an empty reply ----
+
+class FakeStreamResponse:
+    def __init__(self, lines, status_code=200):
+        self.lines = lines
+        self.status_code = status_code
+        self.headers = {"content-type": "application/json"}
+
+    async def aiter_lines(self):
+        for line in self.lines:
+            yield line
+
+    async def aread(self):
+        return "\n".join(self.lines).encode()
+
+
+def install_fake_httpx(monkeypatch, lines, status_code=200):
+    response = FakeStreamResponse(lines, status_code)
+
+    class FakeStreamCtx:
+        async def __aenter__(self):
+            return response
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def stream(self, *a, **k):
+            return FakeStreamCtx()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(service.httpx, "AsyncClient", FakeClient)
+
+
+@pytest.mark.asyncio
+async def test_mantle_stream_rejects_a_non_streaming_body(monkeypatch):
+    install_fake_httpx(monkeypatch, [json.dumps(
+        {"choices": [{"finish_reason": "tool_calls", "message": {
+            "tool_calls": [{"id": "functions.catalog:0", "type": "function",
+                            "function": {"name": "catalog", "arguments": "{}"}}]}}]})])
+    with pytest.raises(service.ProviderError) as excinfo:
+        await service._mantle_stream(spec(), "https://example.invalid", {})
+    assert "non-streaming body" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_mantle_stream_reads_sse_tool_call_deltas(monkeypatch):
+    install_fake_httpx(monkeypatch, [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"functions.catalog:0",'
+        '"type":"function","function":{"name":"catalog"}}]}}]}',
+        "",
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":'
+        '{"arguments":"{\\"query\\": \\"led\\"}"}}]}}]}',
+        "",
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+    ])
+    result = await service._mantle_stream(spec(), "https://example.invalid", {})
+    assert result.tool_calls == [{"id": "functions.catalog:0", "name": "catalog",
+                                  "arguments": '{"query": "led"}'}]
+    assert result.stop_reason == "tool_calls"
+
+
 # --- the probe measures caching; it never assumes it ---------------------------
 
 @pytest.mark.asyncio
 async def test_probe_fails_fast_when_cache_requested_but_unreported(monkeypatch):
     monkeypatch.setattr(settings, "BEDROCK_PROMPT_CACHE", "on")
+    monkeypatch.setattr(settings, "BEDROCK_TRANSPORT", "converse")
     # Probe response reports NO cache fields -> hard config error with the fix.
     client = FakeConverseClient([metadata_event(inputTokens=2000, outputTokens=5)])
     install_fake_boto3(monkeypatch, client)
@@ -332,6 +432,7 @@ async def test_probe_fails_fast_when_cache_requested_but_unreported(monkeypatch)
 @pytest.mark.asyncio
 async def test_probe_passes_when_cache_usage_is_reported(monkeypatch):
     monkeypatch.setattr(settings, "BEDROCK_PROMPT_CACHE", "on")
+    monkeypatch.setattr(settings, "BEDROCK_TRANSPORT", "converse")
     client = FakeConverseClient([metadata_event(
         inputTokens=500, outputTokens=5, cacheWriteInputTokens=1500)])
     install_fake_boto3(monkeypatch, client)
@@ -344,6 +445,7 @@ async def test_probe_passes_when_cache_usage_is_reported(monkeypatch):
 @pytest.mark.asyncio
 async def test_probe_without_cache_flag_does_not_require_cache_fields(monkeypatch):
     monkeypatch.setattr(settings, "BEDROCK_PROMPT_CACHE", "off")
+    monkeypatch.setattr(settings, "BEDROCK_TRANSPORT", "converse")
     client = FakeConverseClient([metadata_event(inputTokens=10, outputTokens=1)])
     install_fake_boto3(monkeypatch, client)
     service._verified.clear()

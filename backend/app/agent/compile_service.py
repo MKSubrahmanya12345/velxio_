@@ -72,18 +72,31 @@ async def compile_project(project: Project, fast: bool = False) -> dict:
 async def _compile_uncached(project: Project) -> dict:
     """One disposable worker subprocess so cancellation also terminates
     compiler children (the existing isolation, kept)."""
+    backend_root = Path(__file__).resolve().parents[2]
+    # Running a script by path puts the SCRIPT's directory on sys.path, not the
+    # cwd, so the worker's `from app.agent import ...` needs the backend root
+    # on PYTHONPATH — without it the worker dies on import and every compile
+    # reports "Compiler process failed".
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(backend_root), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])])
     process = await asyncio.create_subprocess_exec(
         sys.executable, str(_WORKER),
-        cwd=str(Path(__file__).resolve().parents[2]),
+        cwd=str(backend_root),
+        env=env,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, start_new_session=os.name != "nt",
     )
     try:
-        stdout, _stderr = await process.communicate(project.model_dump_json().encode())
+        stdout, stderr = await process.communicate(project.model_dump_json().encode())
         marker = b"__VELXIO_AGENT_RESULT__"
         if process.returncode or marker not in stdout:
+            # The worker's own traceback is the only diagnosis there is: never
+            # discard it behind a generic sentence.
+            detail = stderr.decode("utf-8", "replace").strip()[-1200:]
             return {"success": False,
-                    "error": "Compiler process failed. Check the Arduino toolchain."}
+                    "error": "Compiler process failed. Check the Arduino toolchain."
+                             + (f"\n{detail}" if detail else "")}
         return json.loads(stdout.rsplit(marker, 1)[1])
     finally:
         if process.returncode is None:

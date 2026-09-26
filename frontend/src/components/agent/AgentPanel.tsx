@@ -41,7 +41,7 @@ import {
   loadWorkspace,
   scopeKey,
 } from '../../agent/workspace';
-import { beginAgentLiveType, endAgentLiveType } from '../../agent/reveal';
+import { useAgentLiveType } from '../../agent/reveal';
 import type { AgentEvent } from '../../agent/protocol';
 import { triggerDownloadVlx } from '../../utils/vlxFile';
 import { CreativePanel } from '../creative/CreativePanel';
@@ -463,7 +463,7 @@ export function AgentPanel() {
             // The model is writing a file RIGHT NOW: type it live in the
             // editor pane instead of showing a character counter.
             if (event.files && Object.keys(event.files).length > 0) {
-              beginAgentLiveType(event.files);
+              useAgentLiveType.getState().begin(event.files);
             }
           }
           if (event.type === 'retry') {
@@ -506,14 +506,14 @@ export function AgentPanel() {
           // must see which files were already live-typed before it decides
           // what (not) to replay.
           if (event.type === 'result' || event.type === 'answer') {
-            endAgentLiveType();
+            useAgentLiveType.getState().end();
           }
         },
       });
-      endAgentLiveType();
+      useAgentLiveType.getState().end();
       journal.addMessage({ role: 'assistant', content: answer, scope: requestScope });
     } catch (error) {
-      endAgentLiveType();
+      useAgentLiveType.getState().end();
       failed = true;
       const message = abort.signal.aborted
         ? 'Agent stopped. No further edits will be applied. If a compiled checkpoint was already applied, it remains available in Checkpoints for undo.'

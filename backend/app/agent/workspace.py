@@ -109,6 +109,43 @@ def parse_diagram(text: str) -> dict[str, Any]:
     return data
 
 
+_COLOR_NAMES = {
+    "red": "#ef4444", "green": "#22c55e", "blue": "#3b82f6",
+    "yellow": "#eab308", "orange": "#f97316", "purple": "#a855f7",
+    "pink": "#ec4899", "black": "#111827", "white": "#f9fafb",
+    "gray": "#8a92a3", "grey": "#8a92a3", "brown": "#92400e",
+    "cyan": "#06b6d4", "magenta": "#d946ef",
+}
+
+
+def _wire_color(value: Any) -> str:
+    """A wire color as #rrggbb.
+
+    The system prompt's own diagram example writes `"color":"red"`, so colour
+    NAMES are expected input: map the common ones instead of rejecting the
+    model's own example. Anything else passes through to the model validator.
+    """
+    text = str(value or "").strip()
+    return _COLOR_NAMES.get(text.lower(), text or "#8a92a3")
+
+
+def _validated(model: type, payload: dict, what: str):
+    """One workspace model built from model-written JSON.
+
+    A rejected part (an unsupported property, a colour that is not #rrggbb)
+    is a design problem the model can fix in one edit, so it must arrive as
+    tool data — never as a raw pydantic error escaping the tools and killing
+    the run.
+    """
+    try:
+        return model(**payload)
+    except WorkspaceError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - pydantic ValidationError and friends
+        from app.agent.models import describe_error
+        raise WorkspaceError(f"{what}: {describe_error(exc)}") from None
+
+
 def diagram_to_parts(data: dict[str, Any]) -> tuple[Board | None, list[Part], list[Connection]]:
     board: Board | None = None
     board_id = data.get("board")
@@ -127,22 +164,22 @@ def diagram_to_parts(data: dict[str, Any]) -> tuple[Board | None, list[Part], li
         if not isinstance(raw, dict) or "id" not in raw or "type" not in raw:
             raise WorkspaceError(
                 f"{FILE_DIAGRAM} part needs at least id and type: {json.dumps(raw)[:120]}")
-        parts.append(Part(
-            id=str(raw["id"]), metadataId=str(raw["type"]),
-            x=float(raw.get("x", 240) or 240), y=float(raw.get("y", 200) or 200),
-            properties={k: v for k, v in (raw.get("props") or {}).items()},
-        ))
+        parts.append(_validated(Part, {
+            "id": str(raw["id"]), "metadataId": str(raw["type"]),
+            "x": float(raw.get("x", 240) or 240), "y": float(raw.get("y", 200) or 200),
+            "properties": {k: v for k, v in (raw.get("props") or {}).items()},
+        }, f"{FILE_DIAGRAM} part {str(raw['id'])!r} is invalid"))
     wires: list[Connection] = []
     for raw in data.get("connections") or []:
         if not isinstance(raw, dict) or "from" not in raw or "to" not in raw:
             raise WorkspaceError(
                 f"{FILE_DIAGRAM} connection needs from and to: {json.dumps(raw)[:120]}")
-        wires.append(Connection(
-            id=str(raw.get("id") or f"w{len(wires) + 1}"),
-            start=_endpoint(str(raw["from"])),
-            end=_endpoint(str(raw["to"])),
-            color=str(raw.get("color") or "#8a92a3"),
-        ))
+        wires.append(_validated(Connection, {
+            "id": str(raw.get("id") or f"w{len(wires) + 1}"),
+            "start": _endpoint(str(raw["from"])),
+            "end": _endpoint(str(raw["to"])),
+            "color": _wire_color(raw.get("color")),
+        }, f"{FILE_DIAGRAM} connection is invalid"))
     return board, parts, wires
 
 
