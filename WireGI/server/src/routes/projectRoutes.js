@@ -7,14 +7,6 @@ export function createProjectRouter(deps) {
   const r = Router();
 
   // Stream ndjson progress events if the client asks for it; else return JSON.
-  //
-  // The stream contract (the UI depends on it):
-  //   { seq, ts, t, runId, level, type, stage, message, …payload }
-  //   · `message` is always a non-empty string
-  //   · provider attempt failures are type 'provider' (never 'error')
-  //   · a terminal failure is a single { type:'error', fatal:true, error:{…} }
-  //     carrying name + message + where + stack, followed by the stream ending
-  //   · `: hb` comment lines keep proxies from killing a long silence
   const stream = (res, req, status, work) => {
     const streamed = (req.get('accept') || '').includes('application/x-ndjson');
     let heartbeat = null;
@@ -23,14 +15,23 @@ export function createProjectRouter(deps) {
         'Content-Type': 'application/x-ndjson',
         'Cache-Control': 'no-cache, no-transform',
         'X-Accel-Buffering': 'no',
+        'Connection': 'keep-alive',
       });
       res.flushHeaders();
       heartbeat = setInterval(() => {
-        if (!res.destroyed) res.write(': hb\n');
-      }, 15000);
+        if (!res.destroyed) {
+          res.write(': hb\n');
+          res.flush?.();
+        }
+      }, 8000);
     }
     const write = (p) => {
-      if (!res.destroyed) res.write(JSON.stringify(p) + '\n');
+      if (!res.destroyed) {
+        res.write(JSON.stringify(p) + '\n');
+        // Express compression/proxy layers can otherwise buffer several events.
+        // Flush after every event so the UI sees progress as it happens.
+        res.flush?.();
+      }
     };
     const emit = (p) => {
       if (streamed) write(p);
@@ -52,8 +53,6 @@ export function createProjectRouter(deps) {
       })
       .catch((err) => {
         stop();
-        // Any thrown value (including a bare string) becomes a full record —
-        // an error event with no message is a bug we refuse to ship again.
         const described = describeError(err);
         if (streamed) {
           write({
@@ -90,10 +89,6 @@ export function createProjectRouter(deps) {
   r.get('/', async (req, res, next) => {
     try {
       const list = await deps.store.list();
-      // The list view only needs the headline — not every event of every run.
-      // needsYou = parts the human still has to sign off (same filter the
-      // desktop chat uses), so the mobile chat app can badge conversations
-      // without downloading every project.
       res.json(
         list.map((p) => {
           const parts = p.state?.parts || [];
@@ -145,7 +140,6 @@ export function createProjectRouter(deps) {
     }
   });
 
-  // Everything the Debug tab needs about one project, in a single call.
   r.get('/:id/debug', async (req, res, next) => {
     try {
       const p = await deps.store.get(req.params.id);
@@ -169,6 +163,7 @@ export function createProjectRouter(deps) {
           errorDetail: x.errorDetail,
         })),
         runLog: (p.state.runLog || []).slice(-limit),
+        checkpoint: p.state.checkpoint || null,
         env: deps.cfg?.env || null,
         debug: deps.cfg?.debug || {},
         time: new Date().toISOString(),
@@ -187,7 +182,6 @@ export function createProjectRouter(deps) {
     }
   });
 
-  // Gap B: resume a stalled/partial run. Idempotent — no-op when nothing is left.
   r.post('/:id/resume', (req, res, next) => {
     return stream(res, req, 200, (emit) => ctrl.resume({ projectId: req.params.id, emit })).catch(next);
   });
@@ -203,11 +197,6 @@ export function createProjectRouter(deps) {
     ).catch(next);
   });
 
-  // The human checkpoint (chat-driven, no LLM in the loop):
-  //   POST /api/projects/:id/human { partId?, decision, text }
-  //   decision: approve | provide | rerun | reject
-  // Returns the same ndjson trace as the other run endpoints, additionally
-  // emitting `{type:'human', stage, partId, part}` events.
   r.post('/:id/human', (req, res, next) => {
     const decision = String(req.body?.decision || 'provide').toLowerCase();
     const allowed = ['approve', 'provide', 'rerun', 'reject'];
