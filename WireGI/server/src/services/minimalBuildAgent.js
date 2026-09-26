@@ -1,12 +1,13 @@
 import { generateJSON } from './llm.js';
 import { makeProject, makePart, newId } from '../models/project.js';
-import { researchPart } from './research.js';
+import { createSpecializedWorkers } from './specializedWorkers.js';
 import { reconcileProject } from './reconcile.js';
 import { runSimPhase } from './velxio.js';
 import { pickProfile } from './profiles.js';
 import { describeError } from './debug.js';
 
 const MAX_PARTS = 3;
+const now = () => new Date().toISOString();
 
 const PLAN_SYSTEM = `You are WireGI's hardware architect. Produce the smallest complete build plan for the user's request.
 Return JSON ONLY:
@@ -18,11 +19,10 @@ Rules:
 - researchRequired is only a hint; evidence still comes from tools/research.
 - simulationRequired=true only when simulation materially validates the requested behavior.`;
 
-const now = () => new Date().toISOString();
-
 export function createMinimalBuildAgent({ cfg, registry, store, indexer }) {
   const save = async (project) => { project.updatedAt = now(); await store.save(project); };
   const emit = (fn, type, stage, message, extra = {}) => fn?.({ type, stage, message, ts: now(), ...extra });
+  const workers = createSpecializedWorkers({ registry, indexer });
 
   async function plan(project, emitFn, prefer) {
     const p = await generateJSON({
@@ -49,48 +49,23 @@ export function createMinimalBuildAgent({ cfg, registry, store, indexer }) {
     project.state.idea.parts = project.state.parts.map((x) => ({ id: x.id, name: x.name, domain: x.domain, idea: x.idea }));
     project.state.idea.revisions.push({ at: now(), kind: 'created', note: project.goal, revision: 1 });
     project.state.simulationRequired = p.simulationRequired === true;
+    project.state.workers = {};
     project.status = 'researching';
     await save(project);
-    emit(emitFn, 'project', 'planned', `Minimal plan: ${project.state.parts.length} parallel work units.`, {
+    emit(emitFn, 'project', 'planned', `Minimal plan: ${project.state.parts.length} shared work units.`, {
       projectId: project.id,
       parts: project.state.parts.map((x) => ({ id: x.id, name: x.name, domain: x.domain })),
     });
-  }
-
-  async function research(project, part, emitFn, prefer) {
-    part.status = 'researching';
-    part.attempts = (part.attempts || 0) + 1;
-    try {
-      const r = await researchPart({ part, project, registry, indexer, emit: emitFn, prefer });
-      part.current = { gathered: r.gathered, understand: r.understand, data: r.data };
-      part.data = r.data;
-      part.gathered = r.gathered || [];
-      part.research = r.research || [];
-      part.openQuestions = r.understand?.openQuestions || [];
-      part.humanCheckpoint = Boolean(r.humanCheckpoint);
-      part.status = part.humanCheckpoint ? 'awaiting_human' : 'data_ready';
-      part.updatedAt = now();
-      part.finishedAt = part.updatedAt;
-      part.error = null;
-      part.errorDetail = null;
-      part.evidence = [...(part.evidence || []), { rung: 'research', at: part.updatedAt, detail: r.web?.engine || 'research synthesis' }];
-      return { ok: true, part };
-    } catch (err) {
-      const d = describeError(err);
-      part.status = 'failed';
-      part.error = d.message;
-      part.errorDetail = d;
-      return { ok: false, part, error: d };
-    }
   }
 
   async function runProject(goal, constraints = {}, { emit: emitFn = () => {}, prefer } = {}) {
     const project = makeProject({ goal, constraints });
     project.state.runLog = [];
     project.state.checkpoint = null;
+    project.state.workers = {};
     project.status = 'init';
     await store.create(project);
-    const run = { id: newId('run'), kind: 'minimal-parallel-build', startedAt: now(), status: 'running', goal };
+    const run = { id: newId('run'), kind: 'shared-parallel-build', startedAt: now(), status: 'running', goal };
     project.state.runs.push(run);
     project.currentRunId = run.id;
 
@@ -102,17 +77,18 @@ export function createMinimalBuildAgent({ cfg, registry, store, indexer }) {
       emit(emitFn, 'stage', 'planning', 'Planning the smallest complete build…', { runId: run.id });
       await plan(project, emitFn, prefer);
 
-      const parts = project.state.parts;
-      emit(emitFn, 'stage', 'research', `Researching ${parts.length} work units in parallel…`, { runId: run.id });
-      project.state.checkpoint = { runId: run.id, stage: 'research', status: 'running', updatedAt: now() };
+      project.state.checkpoint = { runId: run.id, stage: 'workers', status: 'running', updatedAt: now() };
       await save(project);
-      const results = await Promise.all(parts.map((p) => research(project, p, emitFn, prefer)));
-      project.state.current.parts = parts.filter((p) => p.current?.data).map((p) => ({ id: p.id, name: p.name, domain: p.domain, data: p.current.data }));
+      emit(emitFn, 'stage', 'workers', 'Starting hardware and coding workers in parallel…', {
+        runId: run.id,
+        workers: ['hardware', 'coding'],
+      });
+      await workers.run({ project, emit: emitFn, prefer });
       await save(project);
 
-      const usable = parts.filter((p) => p.current?.data);
+      const usable = project.state.parts.filter((p) => p.current?.data);
       if (usable.length > 1) {
-        emit(emitFn, 'stage', 'reconcile', 'Checking interfaces between the parallel results…', { runId: run.id });
+        emit(emitFn, 'stage', 'reconcile', 'Integrating the shared hardware and software state…', { runId: run.id });
         project.state.checkpoint = { runId: run.id, stage: 'reconcile', status: 'running', updatedAt: now() };
         await save(project);
         await reconcileProject({ project, emit: emitFn, registry, contextChars: cfg?.throughput?.reconcileContextChars });
@@ -120,21 +96,24 @@ export function createMinimalBuildAgent({ cfg, registry, store, indexer }) {
       }
 
       if (project.state.simulationRequired && usable.length) {
-        emit(emitFn, 'stage', 'simulation', 'Running targeted verification…', { runId: run.id });
+        emit(emitFn, 'stage', 'simulation', 'Running targeted verification on the integrated project…', { runId: run.id });
         project.state.checkpoint = { runId: run.id, stage: 'simulation', status: 'running', updatedAt: now() };
         await save(project);
         project.state.sim = await runSimPhase({ project, registry, cfg, emit: emitFn, prefer });
         await save(project);
       }
 
-      const failed = results.filter((r) => !r.ok).length;
+      const failed = project.state.parts.filter((p) => p.status === 'failed').length;
       project.status = failed ? 'partial' : 'complete';
       project.state.checkpoint = { runId: run.id, stage: 'complete', status: 'complete', updatedAt: now() };
       project.state.chat.push({ role: 'agent', content: summary(project), ts: now() });
       run.status = project.status;
       run.endedAt = now();
       await save(project);
-      emit(emitFn, 'run', 'end', `Build ${project.status}.`, { runId: run.id });
+      emit(emitFn, 'run', 'end', `Build ${project.status}.`, {
+        runId: run.id,
+        workers: project.state.workers,
+      });
       return project;
     } catch (err) {
       const d = describeError(err);
@@ -142,9 +121,14 @@ export function createMinimalBuildAgent({ cfg, registry, store, indexer }) {
       run.status = 'failed';
       run.endedAt = now();
       run.error = d.message;
-      project.state.errors.push({ at: now(), runId: run.id, where: 'minimal-parallel-build', ...d });
+      project.state.errors.push({ at: now(), runId: run.id, where: 'shared-parallel-build', ...d });
       await save(project);
-      emit(emitFn, 'error', 'run', `Build failed: ${d.message}`, { error: d, fatal: true, checkpoint: project.state.checkpoint });
+      emit(emitFn, 'error', 'run', `Build failed: ${d.message}`, {
+        error: d,
+        fatal: true,
+        checkpoint: project.state.checkpoint,
+        workers: project.state.workers,
+      });
       throw err;
     }
   }
@@ -154,6 +138,10 @@ export function createMinimalBuildAgent({ cfg, registry, store, indexer }) {
 
 function summary(project) {
   const lines = [`# ${project.goal}`, '', `Status: **${project.status}**`, ''];
+  const workers = project.state.workers || {};
+  if (workers.hardware || workers.coding) {
+    lines.push(`Workers: hardware=${workers.hardware?.status || 'idle'}, coding=${workers.coding?.status || 'idle'}`, '');
+  }
   for (const p of project.state.parts) {
     const mark = p.status === 'failed' ? '✖' : p.verified ? '✓' : p.current?.data ? '•' : '?';
     lines.push(`- ${mark} **${p.name}** (${p.domain})`);
