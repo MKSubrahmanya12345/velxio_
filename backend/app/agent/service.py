@@ -95,6 +95,7 @@ ORDERED / ONE-BY-ONE REQUESTS:
   * Use read_file/catalog/check as needed to observe the current state, but do
     not perform a later mutation until the requested earlier stage has completed.
   * Never output pseudo tool-call markup as prose. Use native tool calls.
+  * For ordered requests, emit only the next tool action; do not perform a later mutation until the requested earlier stage has completed.
 
 BOARDS: {board_count} catalog boards. Set diagram.json boardKind to the user's board (or the best fit); catalog("") returns its pinout.
 
@@ -279,43 +280,45 @@ def agent_run_budget_s(board_kind: str | None, fast: bool = False) -> float:
 # --- ChatResult: what one provider call returns ------------------------------
 
 
-_COMPAT_TOOL_RE = re.compile(
-    r"(?:<\\|tool_calls_section_begin\\|>\\s*)?"
-    r"(?:<\\|tool_call_begin\\|>\\s*)?"
-    r"(?:functions\\.)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
-    r"\\s*:\\s*"
-    r"(?P<args>\\{.*?\\})"
-    r"(?:\\s*<\\|tool_call_end\\|>)?",
+_COMPAT_TOOL_MARKER_RE = re.compile(
+    r"<\\|tool_call_begin\\|>\\s*"
+    r"(?:functions\\.)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\s*:\\d+\\s*"
+    r"<\\|tool_call_argument_begin\\|>\\s*"
+    r"(?P<args>.*?)"
+    r"\\s*<\\|tool_call_end\\|>",
     re.DOTALL,
 )
 
 
 def _recover_provider_tool_calls(content: str) -> list[dict]:
-    """Conservatively recover an explicitly emitted tool call from providers
-    that serialize native tool use as text.
+    """Recover only explicit provider-emitted tool markers.
 
-    This is NOT a planning wrapper: no action is inferred. A call is recovered
-    only when the provider explicitly names one of our registered tools and
-    emits a JSON object for its arguments.
+    No tool is inferred from prose. The provider must have emitted its tool
+    marker, a registered tool name, and a JSON object as the arguments.
     """
     text = str(content or "")
-    if "tool_call" not in text and "functions." not in text:
-        return []
-
     recovered: list[dict] = []
     seen: set[tuple[str, str]] = set()
-    for match in _COMPAT_TOOL_RE.finditer(text):
+
+    for match in _COMPAT_TOOL_MARKER_RE.finditer(text):
         name = match.group("name")
-        spec = toolspecs.by_name(name)
-        if spec is None:
+        if toolspecs.by_name(name) is None:
             continue
-        raw_args = match.group("args")
+
+        raw = match.group("args").strip()
         try:
-            args = json.loads(raw_args)
+            args = json.loads(raw)
         except (TypeError, ValueError):
             continue
         if not isinstance(args, dict):
             continue
+
+        # Gateway schema compatibility only: some providers call the
+        # filename argument "file" while our registered tool uses "name".
+        if name in {"read_file", "write_file", "edit_file"} and "name" not in args and "file" in args:
+            args = {**args, "name": args["file"]}
+            args.pop("file", None)
+
         key = (name, json.dumps(args, sort_keys=True, separators=(",", ":")))
         if key in seen:
             continue
@@ -325,6 +328,7 @@ def _recover_provider_tool_calls(content: str) -> list[dict]:
             "name": name,
             "arguments": json.dumps(args, separators=(",", ":")),
         })
+
     return recovered
 
 class ChatResult:
@@ -1069,6 +1073,7 @@ async def _run(request: AgentRequest, run_id: str, started: float,
     record.provider = spec.id
 
     workspace = Workspace(request.project, request.prompt)
+    ordered_request = bool(re.search(r"(?i)(one[- ]by[- ]one|step[- ]by[- ]step|first .+ then|in this order|ordered)", request.prompt))
     workspace.compile_fn = _compile_tool
     workspace.simulate_fn = _simulate_tool
     messages = _base_messages(request, workspace)
@@ -1257,8 +1262,8 @@ async def _run(request: AgentRequest, run_id: str, started: float,
                     "stage": "recovered",
                     "tools": [c["name"] for c in recovered],
                     "message": (
-                        "Recovered an explicitly emitted tool call from the provider; "
-                        "executing it through the real workspace tool interface."
+                        "Provider emitted an explicit tool marker; routing it "
+                        "through the registered workspace tool."
                     ),
                 })
                 chat.tool_calls = recovered
@@ -1266,10 +1271,8 @@ async def _run(request: AgentRequest, run_id: str, started: float,
             else:
                 messages.append({"role": "assistant", "content": chat.content})
                 messages.append({"role": "user", "content": (
-                    "Use the native workspace tools. Text alone changes nothing. "
-                    "Call list_files/read_file/catalog first when you need state; "
-                    "then make the smallest edit with write_file/edit_file, or "
-                    "finish with done(). Do not print pseudo tool-call syntax.")})
+                    "Use the registered workspace tools. Text alone changes nothing. "
+                    "Do not print functions.* or <|tool_call...|> markup.")})
                 stage = "working"
                 continue
 
@@ -1278,7 +1281,8 @@ async def _run(request: AgentRequest, run_id: str, started: float,
                          "tool_calls": chat.tool_calls})
         done_signal: DoneSignal | None = None
         tool_events: list[dict] = []
-        for call in chat.tool_calls[:8]:
+        calls_to_execute = chat.tool_calls[:1] if ordered_request else chat.tool_calls[:8]
+        for call in calls_to_execute:
             name = str(call.get("name", ""))
             try:
                 args = json.loads(call.get("arguments") or "{}")
