@@ -16,7 +16,7 @@ Return JSON ONLY:
 Rules:
 - Parts are meaningful engineering work units, not wires, screws or procedures.
 - Prefer 1-6 parts. Do not split a trivial request into artificial parts.
-- Set researchRequired=false only when the part is a standard, well-known item whose exact facts can be established by the simulator/tooling or are already obvious from the request.
+- Set researchRequired=false only as a planning hint; it must never be treated as evidence.
 - Set researchRequired=true whenever exact electrical, mechanical, compatibility, version, rating, or component facts are needed.
 - Never invent specifications. A plan is intent, not evidence.
 - Include firmware only when it is genuinely required.
@@ -42,9 +42,7 @@ export function createFastBuildAgent({ cfg, registry, store, indexer }) {
       prefer,
       operation: 'fast-build-plan',
     });
-    if (!Array.isArray(result?.parts) || !result.parts.length) {
-      throw new Error('The architect returned no build parts.');
-    }
+    if (!Array.isArray(result?.parts) || !result.parts.length) throw new Error('The architect returned no build parts.');
 
     const profile = pickProfile(result.classification, result.domains, project.goal);
     project.profileId = profile.id;
@@ -108,15 +106,10 @@ export function createFastBuildAgent({ cfg, registry, store, indexer }) {
       emit(emitFn, 'run', 'start', `Build started: ${goal}`, { runId: run.id });
       await plan(project, emitFn, prefer);
 
-      const researchParts = project.state.parts.filter((p) => p.meta?.researchRequired !== false);
-      const knownParts = project.state.parts.filter((p) => p.meta?.researchRequired === false);
-
-      if (knownParts.length) {
-        emit(emitFn, 'agent', 'evidence', `${knownParts.length} standard part${knownParts.length === 1 ? '' : 's'} left for simulator/tool verification instead of LLM research.`);
-      }
-
-      // Independent research is concurrent. This preserves evidence quality while
-      // removing the old one-part-at-a-time latency wall.
+      // Evidence is mandatory. The planner's researchRequired flag is only a
+      // hint for prioritisation; it is never permission to turn model output
+      // into facts. All independent research runs concurrently.
+      const researchParts = project.state.parts;
       const results = await Promise.all(researchParts.map((part) => researchOne(project, part, emitFn, prefer)));
       project.state.current.parts = project.state.parts
         .filter((p) => p.current?.data)
@@ -125,12 +118,9 @@ export function createFastBuildAgent({ cfg, registry, store, indexer }) {
       await save(project);
 
       const failed = results.filter((r) => !r.ok);
-      if (failed.length) {
-        emit(emitFn, 'agent', 'research', `${failed.length} research item${failed.length === 1 ? '' : 's'} failed; continuing with verified data where available.`);
-      }
+      if (failed.length) emit(emitFn, 'agent', 'research', `${failed.length} research item${failed.length === 1 ? '' : 's'} failed; continuing with verified data where available.`);
 
-      // Reconciliation is useful only when there are multiple researched parts.
-      // A one-part build does not need an extra LLM call.
+      // One-part projects do not need an additional reconciliation LLM call.
       if (project.state.parts.filter((p) => p.current?.data).length > 1) {
         try {
           await reconcileProject({ project, emit: emitFn, registry, contextChars: cfg?.throughput?.reconcileContextChars });
@@ -140,9 +130,8 @@ export function createFastBuildAgent({ cfg, registry, store, indexer }) {
         }
       }
 
-      // Simulation remains the evidence gate. It is not removed; it is simply
-      // reached without the old 24-turn controller repeatedly asking an LLM what
-      // to do next.
+      // Simulation remains the evidence gate. It is reached directly instead
+      // of through the old 24-turn controller repeatedly asking what to do next.
       if (project.state.parts.some((p) => p.current?.data)) {
         try {
           const sim = await runSimPhase({ project, registry, cfg, emit: emitFn, prefer });
@@ -153,7 +142,7 @@ export function createFastBuildAgent({ cfg, registry, store, indexer }) {
         }
       }
 
-      const missing = project.state.parts.filter((p) => !p.current?.data && p.meta?.researchRequired !== false && p.status !== 'failed');
+      const missing = project.state.parts.filter((p) => !p.current?.data && p.status !== 'failed');
       const failedParts = project.state.parts.filter((p) => p.status === 'failed');
       const simBad = project.state.sim && ['failed', 'partial'].includes(project.state.sim.status);
       project.status = missing.length || failedParts.length || simBad ? 'partial' : 'complete';
