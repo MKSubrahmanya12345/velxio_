@@ -5,6 +5,7 @@ import './index.css';
 import './wireup-theme.css';
 import './styles/wireup-ide.css';
 import './styles/wireup-motion.css';
+import './styles/wireup-polish.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
