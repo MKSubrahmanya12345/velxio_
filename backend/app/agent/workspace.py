@@ -267,6 +267,37 @@ def analyse_project(files: dict[str, str]) -> tuple[Project, list[str]]:
 # decidable from prose — that is the pending checkpoint's job (the user).
 # --------------------------------------------------------------------------
 
+# A part the user asked to REMOVE is not a part the circuit must contain:
+# "remove the servo and add an led" names a servo, and requiring it back makes
+# done() unsatisfiable — the model then calls done() until the turn cap, which
+# is what a removal request used to do. The cue window is deliberately short
+# and the failure direction is deliberate: skipping a requirement the user
+# wanted is recoverable, deadlocking the gate is not.
+_REMOVAL_CUES = (
+    "remove", "delete", "drop", "erase", "get rid of", "instead of",
+    "rather than", "replace", "swap", "no longer", "without", "not a ",
+    "quitar", "quita", "elimina", "eliminar", "borra", "borrar",
+    "sustituye", "sustituir", "reemplaza", "reemplazar", "en vez de", "sin ",
+)
+
+
+_CLAUSE_CUTS = (" but ", " and ", " then ", " plus ", " though ", " while ",
+                ",", ";", ":", " y ", " e ")
+
+
+def _removal_requested(text: str, at: int) -> bool:
+    """Does the clause immediately before this mention ask for the part to go?
+
+    Scoped to the clause: "remove the servo but keep the pushbutton" excuses
+    the servo only, so a removal never excuses an unrelated requirement.
+    """
+    window = text[max(0, at - 60):at]
+    cut = max(window.rfind(sep) for sep in _CLAUSE_CUTS)
+    if cut >= 0:
+        window = window[cut + 1:]
+    return any(cue in window for cue in _REMOVAL_CUES)
+
+
 def mentioned_parts(prompt: str) -> list[str]:
     text = f" {prompt.lower()} "
     found: list[str] = []
@@ -278,7 +309,10 @@ def mentioned_parts(prompt: str) -> list[str]:
             if len(key) < 4 or not re.fullmatch(r"[a-z0-9][a-z0-9 -]+", key):
                 continue
             token = key.strip().replace(" ", r"\s+")
-            if re.search(rf"(?<![a-z0-9]){token}(?:e?s)?(?![a-z0-9])", text):
+            match = re.search(rf"(?<![a-z0-9]){token}(?:e?s)?(?![a-z0-9])", text)
+            if match:
+                if _removal_requested(text, match.start()):
+                    continue
                 if spec.id not in found:
                     found.append(spec.id)
                 break

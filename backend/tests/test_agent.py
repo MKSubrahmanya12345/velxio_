@@ -202,6 +202,36 @@ def test_mentioned_parts_are_found_and_missing_parts_rejected():
     assert "servo" in envelope["error"]
 
 
+@pytest.mark.parametrize("prompt", [
+    "remove the servo and put an led there instead",
+    "delete the servo, add a led",
+    "drop the servo and use an led",
+    "instead of the servo use an led",
+    "quita el servo y pon un led",
+    "en vez de servo pon un led",
+])
+def test_a_part_the_user_asked_to_remove_is_not_required(prompt):
+    """Otherwise done() is unsatisfiable: the gate demands the part the user
+    just deleted, and the run rejects done() until the turn cap."""
+    assert "servo" not in wsmod.mentioned_parts(prompt)
+    ws = wsmod.Workspace(Project(), prompt)
+    for name, content in blink_workspace_files().items():
+        ws.write_file(name, content)
+    try:
+        ws.done("swapped the servo for an led")
+    except wsmod.DoneSignal as sig:
+        assert sig.kind == "submit"  # the gate let it through
+    else:  # pragma: no cover - the gate must not reject a removal request
+        raise AssertionError("done() rejected a removal request")
+
+
+def test_removal_cue_does_not_erase_other_requirements():
+    """The cue window is local: only the part being removed is excused."""
+    found = wsmod.mentioned_parts("remove the servo but keep the pushbutton")
+    assert "servo" not in found
+    assert "pushbutton" in found
+
+
 def test_done_on_untouched_workspace_is_an_explanation():
     ws = wsmod.Workspace(Project(), "what is a pull-up resistor")
     envelope = ws.done("A pull-up resistor holds the pin high when nothing drives it.")
