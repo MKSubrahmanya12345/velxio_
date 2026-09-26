@@ -1,20 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- Background -->
-  <rect width="32" height="32" rx="6" fill="#0d0d0f"/>
-  <!-- IC body (filled, high contrast) -->
-  <rect x="8" y="8" width="16" height="16" rx="2" fill="#007acc"/>
-  <!-- Die (darker inset) -->
-  <rect x="11" y="11" width="10" height="10" rx="1" fill="#005fa3"/>
-  <!-- Top pins -->
-  <rect x="12" y="3" width="3" height="5" rx="1" fill="#007acc"/>
-  <rect x="17" y="3" width="3" height="5" rx="1" fill="#007acc"/>
-  <!-- Bottom pins -->
-  <rect x="12" y="24" width="3" height="5" rx="1" fill="#007acc"/>
-  <rect x="17" y="24" width="3" height="5" rx="1" fill="#007acc"/>
-  <!-- Left pins -->
-  <rect x="3" y="12" width="5" height="3" rx="1" fill="#007acc"/>
-  <rect x="3" y="17" width="5" height="3" rx="1" fill="#007acc"/>
-  <!-- Right pins -->
-  <rect x="24" y="12" width="5" height="3" rx="1" fill="#007acc"/>
-  <rect x="24" y="17" width="5" height="3" rx="1" fill="#007acc"/>
+  <rect width="32" height="32" rx="7" fill="#070a0c"/>
+  <path d="M7 8.5h5.1l3.9 15 3.9-15H25L19.1 25H12.9L7 8.5Z" fill="#d1ff61"/>
+  <path d="M8 6.5h16" stroke="#61e8ff" stroke-width="1.2" opacity=".8"/>
+  <circle cx="6.5" cy="25.5" r="1.4" fill="#61e8ff"/>
+  <circle cx="25.5" cy="25.5" r="1.4" fill="#d1ff61"/>
+  <path d="M5 14h3M24 14h3M16 4v3M16 25v3" stroke="#d1ff61" stroke-width="1.2" stroke-linecap="round" opacity=".65"/>
 </svg>
