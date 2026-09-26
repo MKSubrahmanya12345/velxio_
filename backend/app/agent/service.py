@@ -64,6 +64,46 @@ MODE_RULES = {
     "agent": "MODE agent: build the requested circuit and firmware in the workspace, verify, done().",
 }
 
+# A tight allow-list, not a keyword heuristic: the ENTIRE trimmed message
+# (trailing punctuation aside) must be one of these greeting/ack phrases,
+# under 40 chars. This exists because the UI's Agent/Composer toggle
+# defaults to (and is often left on) a build mode, so "hi" was paying full
+# price - forge's project-memory decision call, tool availability, the
+# build-mode system prompt - for a message with zero build intent. A real
+# request, however short ("add led", "wire it up"), never fully matches
+# this pattern, so it always falls through to the normal path unaffected.
+# A false negative here just costs the old latency back; a false positive
+# would silently ignore a real build ask, so the match stays whole-message
+# and fixed-list rather than guessed from words inside a longer prompt.
+_TRIVIAL_CHAT_RE = re.compile(r"""
+    ^(
+        hi+ | hey+ | hello+ | yo+ | sup | howdy | hola |
+        good\s?(morning|afternoon|evening|night) |
+        how\s+are\s+you | how'?s\s+it\s+going | what'?s\s+up |
+        thanks?(\s+you)?(\s+so\s+much)? | thx | ty |
+        ok(ay)? | k | cool | nice | great | awesome |
+        sounds\s+good | got\s+it | sure | yep | yeah | nope |
+        bye | goodbye | see\s+ya | later |
+        test | ping | hello\s?world
+    )[\s!.?,]*$
+""", re.IGNORECASE | re.VERBOSE)
+
+
+def is_trivial_chat(prompt: str) -> bool:
+    """True for a bare greeting/ack with no build intent in it."""
+    text = prompt.strip()
+    if not text or len(text) > 40:
+        return False
+    return bool(_TRIVIAL_CHAT_RE.match(text))
+
+
+def effective_mode(request: "AgentRequest") -> str:
+    """request.mode, downgraded to chat for a trivial message even when the
+    UI is left on Agent/Composer - see is_trivial_chat()."""
+    if request.mode == "chat" or is_trivial_chat(request.prompt):
+        return "chat"
+    return request.mode
+
 SYSTEM_TEMPLATE = """You are Velxio's hardware agent. You work on a real file workspace like a developer:
 
   list_files / read_file   see the workspace
@@ -976,7 +1016,7 @@ def _base_messages(request: AgentRequest, workspace: Workspace) -> list[dict]:
     # history there is nothing stable above the state — a cachePoint there
     # would only buy 1.25x writes on a prefix that never repeats.
     head: list[dict] = [
-        {"role": "system", "content": system_prompt(request.mode)},
+        {"role": "system", "content": system_prompt(effective_mode(request))},
         *[{"role": m.role, "content": scrub_secrets(m.content)} for m in request.messages],
     ]
     state: dict = {"role": "user", "content": _workspace_summary(workspace)}
@@ -1000,7 +1040,7 @@ async def run_agent(request: AgentRequest):
             request.fast_mode) - 2.0)
 
     forge_task: asyncio.Task | None = None
-    if request.mode != "chat":
+    if effective_mode(request) != "chat":
         try:
             from app.agent import forge as forge_bridge
             if forge_bridge.is_enabled():
@@ -1077,7 +1117,7 @@ async def _run(request: AgentRequest, run_id: str, started: float,
     workspace.compile_fn = _compile_tool
     workspace.simulate_fn = _simulate_tool
     messages = _base_messages(request, workspace)
-    use_tools = request.mode != "chat"
+    use_tools = effective_mode(request) != "chat"
     max_tokens = settings.AGENT_MAX_TOKENS
 
     async def propose_counted(stage: str) -> ChatResult:
