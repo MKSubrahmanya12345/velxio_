@@ -1,0 +1,119 @@
+/* Final Wireup polish: high-signal motion, depth, focus and responsive cleanup. */
+
+@keyframes wireup-glow-pulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(199,243,107,0); }
+  50% { box-shadow: 0 0 0 4px rgba(199,243,107,.07), 0 0 28px rgba(199,243,107,.08); }
+}
+@keyframes wireup-caret {
+  0%,49% { opacity:1; }
+  50%,100% { opacity:0; }
+}
+@keyframes wireup-drift {
+  0%,100% { transform:translate3d(0,0,0); }
+  50% { transform:translate3d(0,-3px,0); }
+}
+@keyframes wireup-line {
+  from { transform:scaleX(0); transform-origin:left; }
+  to { transform:scaleX(1); transform-origin:left; }
+}
+
+/* Global surface polish */
+::selection { background:rgba(199,243,107,.22); color:var(--text); }
+:focus-visible { outline:1px solid var(--accent); outline-offset:2px; }
+body { scrollbar-color:#303936 #0a0c0e; scrollbar-width:thin; }
+
+.topbar { position:relative; }
+.topbar::after {
+  content:""; position:absolute; left:0; right:0; bottom:-1px; height:1px;
+  background:linear-gradient(90deg,transparent 0%,rgba(199,243,107,.45) 22%,rgba(199,243,107,.08) 72%,transparent 100%);
+  animation:wireup-line .8s ease-out both;
+}
+.brand:hover .brand-mark { animation:wireup-glow-pulse 1.1s ease-in-out; }
+.brand-name { position:relative; }
+
+/* Make the launcher feel like a tool, not a marketing page. */
+.home-chat { position:relative; }
+.home-chat::before {
+  content:"WIREUP / LOCAL WORKSPACE";
+  position:absolute; top:22px; right:32px; color:var(--faint);
+  font:9px var(--mono); letter-spacing:1.2px; opacity:.7;
+}
+.hero { animation:wireup-boot .45s cubic-bezier(.2,.8,.2,1) both; }
+.hero-badge { animation:wireup-drift 4s ease-in-out infinite; }
+.hero h1 { text-wrap:balance; }
+.hero h1 .grad { text-shadow:0 0 30px rgba(199,243,107,.08); }
+.home-composer {
+  position:relative; overflow:hidden;
+  box-shadow:0 16px 60px rgba(0,0,0,.18);
+  animation:wireup-boot .5s .07s cubic-bezier(.2,.8,.2,1) both;
+}
+.home-composer::before {
+  content:""; position:absolute; top:0; left:12%; right:12%; height:1px;
+  background:linear-gradient(90deg,transparent,var(--accent),transparent); opacity:.45;
+}
+.home-composer:focus-within { border-color:#4a5839; box-shadow:0 16px 60px rgba(0,0,0,.2),0 0 0 1px rgba(199,243,107,.05); }
+
+/* Existing cards get depth without reverting to AI-card aesthetics. */
+.panel { transition:border-color .18s ease,background-color .18s ease,transform .18s ease; }
+.panel:hover { border-color:#303a3f; }
+.project-list li { animation:wireup-boot .3s ease both; }
+.project-list li:nth-child(2){animation-delay:.04s}.project-list li:nth-child(3){animation-delay:.08s}.project-list li:nth-child(4){animation-delay:.12s}.project-list li:nth-child(5){animation-delay:.16s}
+.project-open { position:relative; }
+.project-open::before { content:""; position:absolute; left:0; top:0; bottom:0; width:2px; background:var(--accent); transform:scaleY(0); transition:transform .16s ease; }
+.project-open:hover::before { transform:scaleY(1); }
+
+/* Workspace: clearer hierarchy around the already-existing project state. */
+.project-workspace { background:var(--bg); }
+.workspace-head { position:relative; }
+.workspace-head::after {
+  content:""; position:absolute; left:0; right:0; bottom:-1px; height:1px;
+  background:linear-gradient(90deg,var(--accent),transparent 35%); opacity:.18;
+}
+.workspace-toolbar span:not(.mono) { transition:color .15s ease; }
+.workspace-toolbar span:not(.mono):hover { color:var(--accent); }
+.workspace-state { font-family:var(--mono); letter-spacing:.5px; }
+
+.system-canvas { background:#080b0d; }
+.system-canvas .node-grid { position:relative; z-index:3; }
+.system-node {
+  border-color:#2a3236;
+  box-shadow:0 8px 24px rgba(0,0,0,.16);
+}
+.system-node:hover { border-color:#53613f; box-shadow:0 10px 32px rgba(0,0,0,.25),0 0 0 1px rgba(199,243,107,.06); }
+.system-node.node-active { animation:wireup-boot .34s cubic-bezier(.2,.8,.2,1) both, wireup-glow-pulse 2.2s ease-in-out infinite; }
+.system-node.node-error { border-color:#613234; }
+.system-node.node-done .node-status { box-shadow:0 0 8px rgba(120,217,139,.35); }
+.node-type,.node-index,.node-footer { font-family:var(--mono); }
+.node-type { letter-spacing:.5px; }
+
+.runtime-card { transition:border-color .18s ease,background-color .18s ease; }
+.runtime-card:hover { border-color:#303a3f; background:#13181b; }
+.runtime-row b { font-family:var(--mono); }
+.progress-big strong { font-variant-numeric:tabular-nums; }
+.workspace-progress i { transition:width .45s cubic-bezier(.2,.8,.2,1); }
+
+/* Existing build activity gets a terminal-like rhythm. */
+.activity li { position:relative; }
+.activity li::before { content:"›"; color:var(--faint); margin-right:2px; }
+.activity li.lvl-success::before { color:var(--good); }
+.activity li.lvl-error::before { color:var(--bad); }
+.bubble.working { box-shadow:inset 2px 0 0 rgba(199,243,107,.45); }
+.spinner { box-shadow:0 0 10px rgba(199,243,107,.12); }
+
+/* Empty states are deliberate, not blank. */
+.canvas-empty { animation:wireup-boot .4s ease both; }
+.empty-mark { animation:wireup-drift 3s ease-in-out infinite; }
+
+/* Mobile: remove decorative launcher label and tighten chrome. */
+@media (max-width:900px) {
+  .home-chat::before { display:none; }
+  .topbar { padding:0 10px; gap:8px; }
+  .topbar-project { padding-left:8px; }
+  .topbar-project .goal { max-width:28vw; }
+  .home-composer { box-shadow:0 10px 35px rgba(0,0,0,.18); }
+}
+
+@media (prefers-reduced-motion:reduce) {
+  .home-chat::before,.topbar::after { animation:none; }
+  .panel,.project-open,.runtime-card { transition:none; }
+}
