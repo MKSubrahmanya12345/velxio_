@@ -86,6 +86,16 @@ WORK LIKE A DEVELOPER, no ceremony:
   4. fix what the errors say; 5. on AVR, simulate() the behaviour; 6. done().
   compile errors and check() problems are data - read them, fix them, compile again.
 
+ORDERED / ONE-BY-ONE REQUESTS:
+  * If the user explicitly asks for one-by-one, step-by-step, a sequence,
+    "first X then Y", or gives an ordered workflow, follow that order exactly.
+  * In that mode, perform AT MOST ONE MUTATING TOOL CALL per turn.
+  * After the mutation returns, inspect its result and stop the turn. Do not
+    jump ahead to the next stage in the same turn.
+  * Use read_file/catalog/check as needed to observe the current state, but do
+    not perform a later mutation until the requested earlier stage has completed.
+  * Never output pseudo tool-call markup as prose. Use native tool calls.
+
 BOARDS: {board_count} catalog boards. Set diagram.json boardKind to the user's board (or the best fit); catalog("") returns its pinout.
 
 RULES that are always true:
@@ -267,6 +277,55 @@ def agent_run_budget_s(board_kind: str | None, fast: bool = False) -> float:
 
 
 # --- ChatResult: what one provider call returns ------------------------------
+
+
+_COMPAT_TOOL_RE = re.compile(
+    r"(?:<\\|tool_calls_section_begin\\|>\\s*)?"
+    r"(?:<\\|tool_call_begin\\|>\\s*)?"
+    r"(?:functions\\.)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"\\s*:\\s*"
+    r"(?P<args>\\{.*?\\})"
+    r"(?:\\s*<\\|tool_call_end\\|>)?",
+    re.DOTALL,
+)
+
+
+def _recover_provider_tool_calls(content: str) -> list[dict]:
+    """Conservatively recover an explicitly emitted tool call from providers
+    that serialize native tool use as text.
+
+    This is NOT a planning wrapper: no action is inferred. A call is recovered
+    only when the provider explicitly names one of our registered tools and
+    emits a JSON object for its arguments.
+    """
+    text = str(content or "")
+    if "tool_call" not in text and "functions." not in text:
+        return []
+
+    recovered: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _COMPAT_TOOL_RE.finditer(text):
+        name = match.group("name")
+        spec = toolspecs.by_name(name)
+        if spec is None:
+            continue
+        raw_args = match.group("args")
+        try:
+            args = json.loads(raw_args)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(args, dict):
+            continue
+        key = (name, json.dumps(args, sort_keys=True, separators=(",", ":")))
+        if key in seen:
+            continue
+        seen.add(key)
+        recovered.append({
+            "id": f"compat-{uuid.uuid4().hex[:10]}",
+            "name": name,
+            "arguments": json.dumps(args, separators=(",", ":")),
+        })
+    return recovered
 
 class ChatResult:
     def __init__(self, content: str = "", tool_calls: list[dict] | None = None,
@@ -1178,14 +1237,41 @@ async def _run(request: AgentRequest, run_id: str, started: float,
             yield event({"type": "answer", "summary": chat.content or "(empty response)"})
             return
 
-        # ---- text without tool calls: point back at the tools -----------
+        # ---- text without native tool calls ------------------------------
+        # Some OpenAI-shaped gateways/models emit the exact tool call as text
+        # (for example "functions.write_file: {...}") instead of populating the
+        # native field. Recover ONLY that explicit, registered call; never infer
+        # an action from ordinary prose.
         if not chat.tool_calls:
-            messages.append({"role": "assistant", "content": chat.content})
-            messages.append({"role": "user", "content": (
-                "Respond with tool calls: edit the workspace, or finish with the "
-                "done tool. Text alone changes nothing.")})
-            stage = "working"
-            continue
+            recovered = _recover_provider_tool_calls(chat.content)
+            if recovered:
+                record.calls.append({
+                    "stage": "compat_tool_recovery",
+                    "ms": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cache_read_tokens": 0,
+                })
+                yield event({
+                    "type": "tool_compat",
+                    "stage": "recovered",
+                    "tools": [c["name"] for c in recovered],
+                    "message": (
+                        "Recovered an explicitly emitted tool call from the provider; "
+                        "executing it through the real workspace tool interface."
+                    ),
+                })
+                chat.tool_calls = recovered
+                chat.content = ""
+            else:
+                messages.append({"role": "assistant", "content": chat.content})
+                messages.append({"role": "user", "content": (
+                    "Use the native workspace tools. Text alone changes nothing. "
+                    "Call list_files/read_file/catalog first when you need state; "
+                    "then make the smallest edit with write_file/edit_file, or "
+                    "finish with done(). Do not print pseudo tool-call syntax.")})
+                stage = "working"
+                continue
 
         # ---- execute this turn's tool calls, in order -------------------
         messages.append({"role": "assistant", "content": chat.content,
