@@ -40,8 +40,8 @@ import type { CompilationLog } from '../utils/compilationLogger';
 import '../App.css';
 import { AgentPanel } from '../components/agent/AgentPanel';
 import { CursorCommandPalette } from '../components/editor/CursorCommandPalette';
-import { WireupAtmosphere } from '../components/layout/WireupAtmosphere';
 import '../styles/wireup-overdrive.css';
+import '../styles/wireup-clean.css';
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -562,7 +562,6 @@ export const EditorPage: React.FC = () => {
 
   return (
     <div className="app wireup-editor-shell">
-      <WireupAtmosphere />
       <AppHeader
         editorMenu={!isMobile ? <EditorMenuBar /> : undefined}
         editorToolbar={unifiedToolbar}
