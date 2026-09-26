@@ -73,3 +73,93 @@ export const AgentTypingOverlay: React.FC = () => {
     </div>
   );
 };
+
+/**
+ * AgentLiveTyping — the SAME curtain, but driven by the model AS it writes.
+ *
+ * While the run is streaming, the server extracts in-progress write_file
+ * content from the tool-call deltas and ships it on every heartbeat; this
+ * overlay types it into the editor pane live (content-so-far, rAF catch-up
+ * ~0.6s behind the arriving text). It holds no store truth: the workspace is
+ * untouched until the checkpoint applies, and the post-result reveal skips
+ * files that were already live-typed (see reveal.ts). The header says "live"
+ * instead of the skip hint — there is nothing to skip; this IS the run.
+ */
+import { useAgentLiveType } from './reveal';
+
+const LIVE_CODE_FILE = /\.(ino|py|cpp|c|h)$/;
+
+function LiveTypeBody({ name, content }: { name: string; content: string }) {
+  const targetRef = useRef(content);
+  targetRef.current = content;
+  const fileRef = useRef(name);
+  const [chars, setChars] = useState(0);
+
+  useEffect(() => {
+    let raf = 0;
+    let count = 0;
+    let last = performance.now();
+    const step = (now: number) => {
+      if (fileRef.current !== name) {
+        // The model moved on to another file — restart the counter.
+        fileRef.current = name;
+        count = 0;
+      }
+      const target = targetRef.current.length;
+      const dt = Math.min(100, now - last);
+      last = now;
+      if (count < target) {
+        // Catch up within ~600ms of each arriving batch, but never slower
+        // than 40 chars/s so the tail of a fast burst still animates.
+        const rate = Math.max(40 / 1000, (target - count) / 600);
+        count = Math.min(target, count + rate * dt);
+        setChars(Math.floor(count));
+      }
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [name]);
+
+  const shown = content.slice(0, chars);
+  return (
+    <div className="velxio-typing-overlay" title="The agent is writing this file right now">
+      <div className="velxio-typing-header">
+        <span className="velxio-typing-dot" />
+        <span>Agent is writing</span>
+        <strong>{name}</strong>
+        <span className="velxio-typing-hint">live</span>
+      </div>
+      <div className="velxio-typing-body">
+        {shown}
+        <span className="velxio-typing-caret" />
+      </div>
+    </div>
+  );
+}
+
+export const AgentLiveTyping: React.FC = () => {
+  const active = useAgentLiveType((s) => s.active);
+  const files = useAgentLiveType((s) => s.files);
+  const order = useAgentLiveType((s) => s.order);
+  const [hidden, setHidden] = useState(false);
+
+  useEffect(() => {
+    if (active) setHidden(false);
+  }, [active]);
+
+  if (!active || hidden) return null;
+
+  // Prefer the code file (the editor's subject); fall back to the most
+  // recently updated file (diagram.json during layout work).
+  const codeName = [...order].reverse().find((n) => LIVE_CODE_FILE.test(n));
+  const name = codeName ?? order[order.length - 1];
+  if (!name) return null;
+  const content = files[name] ?? '';
+
+  return (
+    <div onDoubleClick={() => setHidden(true)}>
+      <LiveTypeBody name={name} content={content} />
+    </div>
+  );
+};

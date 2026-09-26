@@ -12,17 +12,17 @@ from app.agent import service
 def no_forge_memory(monkeypatch):
     from app.agent import forge
     monkeypatch.setattr(forge, "is_enabled", lambda: False)
-from app.agent.models import AgentRequest, Proposal, Project
+from app.agent.models import AgentRequest, Project
 from app.agent.runlog import snapshot, start
 from app.api.routes import agent
 
 
-def proposal_with_usage(prompt_tokens: int, completion_tokens: int) -> Proposal:
-    proposal = Proposal(summary="ok")
-    proposal._usage = {"prompt_tokens": prompt_tokens,
-                       "completion_tokens": completion_tokens,
-                       "total_tokens": prompt_tokens + completion_tokens}
-    return proposal
+def chat_with_usage(prompt_tokens: int, completion_tokens: int,
+                   **extra) -> "service.ChatResult":
+    usage = {"prompt_tokens": prompt_tokens,
+             "completion_tokens": completion_tokens,
+             "total_tokens": prompt_tokens + completion_tokens, **extra}
+    return service.ChatResult(content="ok", usage=usage)
 
 
 # ── secret scrubbing ─────────────────────────────────────────────────────────
@@ -52,9 +52,11 @@ def test_scrub_leaves_normal_code_alone():
 def test_prompt_payload_is_scrubbed(monkeypatch):
     captured = {}
 
-    async def llm(messages, spec=None, max_tokens=None):
+    async def llm(messages, spec, max_tokens, tools=True):
         captured["user"] = messages[-1]["content"]
-        return Proposal(summary="ok")
+        # An untouched workspace + done() = an explanation run (answer event).
+        return service.ChatResult(tool_calls=[
+            {"id": "t1", "name": "done", "arguments": '{"summary": "ok"}'}])
 
     monkeypatch.setattr(service, "propose", llm)
 
@@ -86,19 +88,33 @@ async def test_run_record_counts_provider_usage(monkeypatch):
     monkeypatch.setattr(service, "_propose_once",
                         AsyncMock(side_effect=[
                             service.ProviderTransientError("429"),
-                            proposal_with_usage(111, 22),
+                            chat_with_usage(111, 22),
                         ]))
     monkeypatch.setattr(service.asyncio, "sleep", AsyncMock())
-    proposal = await service.propose([])
-    assert proposal.usage["prompt_tokens"] == 111
+    chat = await service.propose([], service._resolve_provider("bedrock"), 1000)
+    assert chat.usage["prompt_tokens"] == 111
 
-    monkeypatch.setattr(service, "propose", AsyncMock(return_value=proposal_with_usage(50, 5)))
+    monkeypatch.setattr(service, "propose", AsyncMock(return_value=chat_with_usage(50, 5)))
     events = [e async for e in service.run_agent(AgentRequest(prompt="explain", project=Project()))]
     assert events[-1]["type"] == "answer"
     record = next(s for s in snapshot() if s["run_id"] == events[-1]["run_id"])
     assert record["outcome"] == "explained"
     assert record["prompt_tokens"] == 50 and record["completion_tokens"] == 5
     assert record["provider_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_record_counts_measured_cache_tokens(monkeypatch):
+    """Measured cache activity lands in the record; prompt_tokens stays the
+    full input basis (the adapter already sums cache into it)."""
+    monkeypatch.setattr(service, "propose", AsyncMock(return_value=chat_with_usage(
+        2000, 30, cache_read_tokens=1500, cache_write_tokens=500)))
+    events = [e async for e in service.run_agent(AgentRequest(prompt="explain", project=Project()))]
+    assert events[-1]["type"] == "answer"
+    record = next(s for s in snapshot() if s["run_id"] == events[-1]["run_id"])
+    assert record["cache_read_tokens"] == 1500
+    assert record["cache_write_tokens"] == 500
+    assert record["prompt_tokens"] == 2000  # full basis, not net of cache
 
 
 # ── records endpoint ─────────────────────────────────────────────────────────

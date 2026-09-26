@@ -92,7 +92,7 @@ const result = {
 const options = () => ({
   prompt: 'build',
   messages: [],
-  provider: 'groq',
+  provider: 'bedrock',
   signal: new AbortController().signal,
   onEvent: vi.fn(),
 });

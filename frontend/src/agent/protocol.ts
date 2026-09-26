@@ -154,7 +154,9 @@ export const eventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('note'), message: z.string(), ...runId }),
   z.object({
     type: z.literal('stage'),
-    stage: z.enum(['planning', 'repairing', 'validating', 'compiling', 'research', 'testing', 'verifying']),
+    // v2 loop stages: the run decides (planning), then works in the workspace
+    // (designing/working), runs the done() gates (validating, compiling).
+    stage: z.enum(['planning', 'designing', 'working', 'validating', 'compiling']),
     message: z.string(),
     attempt: z.number().optional(),
     ...runId,
@@ -212,6 +214,10 @@ export const eventSchema = z.discriminatedUnion('type', [
     /** Tail of the actual streamed reply — rendered live so the user watches
      *  the code arrive, not just a character counter. */
     text: z.string().optional(),
+    /** In-progress write_file contents (name -> content so far), extracted
+     *  from the model's tool-call deltas server-side. Rendered as the LIVE
+     *  typing animation in the editor pane while the model works. */
+    files: z.record(z.string()).optional(),
     provider: z.string().optional(),
     message: z.string(),
     ...runId,

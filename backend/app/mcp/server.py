@@ -728,6 +728,76 @@ async def simulate_firmware(
 # ---------------------------------------------------------------------------
 
 
+PHYSICS_CAPABILITIES: dict[str, Any] = {
+    "what": (
+        "Velxio physics scene layer — a generic rigid-body simulation shared by the "
+        "simulator, agents and (later) a 3D renderer. Nothing here is drone-specific: "
+        "a quadrotor is one body + four thrust actuators in a scene document."
+    ),
+    "scene": {
+        "version": 1,
+        "name": "optional label",
+        "environment": {
+            "gravity": "{x,y,z} m/s² — default {0,-9.81,0}; {0,0,0} for space",
+            "wind": "{x,y,z} m/s constant — default 0",
+            "linearDrag": "N·s/m — F = -k·(v−wind). Default 0",
+            "quadraticDrag": "N·s²/m² — F = -k·|v−wind|·(v−wind), the ½ρCdA term. Default 0",
+            "angularDrag": "N·m·s — default 0",
+            "floorY": "ground plane at world Y (default 0) or null for an open world",
+            "restitution": "bounce 0..1 — default 0.1",
+            "groundDamping": "contact stick while touching the floor, 1/s. Default 8 (a dropped body rests). A driven vehicle sets this near 0 or the floor eats its speed",
+        },
+        "bodies": [{
+            "id": "string",
+            "label": "optional",
+            "position": "{x,y,z} m — X=east, Y=up, Z=north",
+            "orientation": "{x,y,z,w} quaternion (default identity)",
+            "velocity": "{x,y,z} m/s",
+            "angularVelocity": "{x,y,z} rad/s body frame",
+            "mass": "kg (0.001..1e6)",
+            "inertia": "{ix,iy,iz} kg·m² principal moments, body frame",
+            "shape": "point | {type:'sphere',radius} | {type:'box',halfExtents:{x,y,z}}",
+        }],
+        "actuators": [{
+            "id": "string",
+            "name": "optional",
+            "bodyId": "body it is mounted on",
+            "kind": "thrust (force along axis) | torque (body-frame torque about axis)",
+            "axis": "body-local direction, default {0,1,0}",
+            "maxForce": "N at input 1 (thrust). Output = maxForce × lagged input — linear, not rpm²",
+            "maxTorque": "N·m at input 1 (torque)",
+            "timeConstantMs": "first-order motor lag, default 15",
+            "inputDefault": "0..1, or −1..1 when signed",
+            "signed": "true lets the command be −1..1 (a wheel or a torque that must reverse). Thrust stays unipolar unless you set this",
+            "offset": "{x,y,z} m, body frame, from the centre of mass. Non-zero thrust there applies τ = r × F. Default {0,0,0} is the historical CoM thrust",
+            "reactionNmPerN": "prop-drag torque along the thrust axis, N·m per N, already signed. Default 0",
+            "inputPin": "{componentId,pin} — optional live circuit PWM binding (browser only)",
+        }],
+        "sensorLinks": [{
+            "sensorId": "canvas component id of the virtual sensor (e.g. an mpu6050 or gps-neo6m instance)",
+            "bodyId": "body whose state feeds it",
+            "kind": "imu (accel g + gyro deg/s, body frame) | gps (lat/lng/alt around ref)",
+            "refLat": "WGS84 degrees, default 0",
+            "refLng": "WGS84 degrees, default 0",
+            "refAltitude": "m, default 0",
+        }],
+    },
+    "limits": "8 bodies, 16 actuators, 8 sensor links per scene",
+    "integrator": (
+        "deterministic fixed 1 ms substep; semi-implicit Euler; first-order actuator lag; "
+        "offset moment and reaction torque; linear and quadratic drag; "
+        "ground plane with restitution + contact damping (groundDamping, default 8/s). "
+        "step() clamps to 50 ms per call. Signed actuator commands are −1..1; unsigned stay 0..1."
+    ),
+    "verify": (
+        "physics_simulate runs a scene headlessly and returns telemetry samples plus "
+        "check results — design a scene, run it, read the numbers, iterate. This is how "
+        "you prove a mechanical design behaves (hovering, resting, escaping a floor) "
+        "before it is wired to a circuit."
+    ),
+}
+
+
 @mcp.tool()
 def physics_capabilities() -> dict[str, Any]:
     """
@@ -742,7 +812,6 @@ def physics_capabilities() -> dict[str, Any]:
     a rover a body + drive actuators on a floor, a spacecraft a body with
     zero gravity. Call physics_simulate with a scene to verify it behaves.
     """
-    from app.agent.tools import PHYSICS_CAPABILITIES  # lazy: keep import graph light
     return {"ok": True, **PHYSICS_CAPABILITIES}
 
 

@@ -1,0 +1,262 @@
+# Golden prompts — the outcome eval (docs/agent-architecture-v2.md C.7).
+#
+# Run nightly against real Bedrock with a small token budget (eval_runner.py).
+# These check OUTCOMES, never implementation:
+#   1. the run must end in a compiled `result` (build + lint + compile passed),
+#   2. declared behavioral expectations must hold in the headless AVR sim.
+#
+# Behavioral expectations are the gate's teeth. Part-presence (`must_mention`)
+# is a non-gating diagnostic only: "servo mentioned, servo present" is exactly
+# the failure mode this suite exists to catch, so prompts that can be satisfied
+# by the WRONG behavior carry a behavioral discriminator — e.g. servo-sweep
+# demands >=25 distinct printed angles (a smooth sweep), which a 5-position
+# select servo can never produce.
+#
+# Per prompt:
+#   prompt      exactly what a user would type (specific enough to falsify)
+#   must_mention catalog ids/tokens that should appear — DIAGNOSTIC, non-gating
+#   expect      behavioral gate (AVR only; other targets gate on compile):
+#     observe_ms         headless observation window (default 3000, max 10000)
+#     pins               [{pin, transitions_min, period_ms: [lo,hi], last_state}]
+#     serial_matches     regexes that must occur in serial output (case-insens.)
+#     serial_distinct_min  count of DISTINCT integers printed (smoothness check)
+#     interactions       stimuli to drive: {kind, part, at_ms?, hold_ms?, value?,
+#                        closed?, delta?, values?} — `part` resolves to whatever
+#                        component the model actually placed with that metadataId
+#   max_turns   failure if the run exceeds this
+
+suite: velxio-agent-golden
+defaults:
+  provider: bedrock
+  mode: agent
+
+prompts:
+  # --- the advertised examples -------------------------------------------
+  - id: blink-led
+    prompt: blink an LED on pin 13, half a second on and half a second off
+    board: arduino-uno
+    must_mention: [led]
+    expect:
+      observe_ms: 4000
+      pins: [{pin: "13", transitions_min: 3, period_ms: [700, 1300]}]
+    max_turns: 8
+
+  - id: blink-led-pin8
+    prompt: blink an LED on pin 8, one second on, one second off
+    board: arduino-uno
+    must_mention: [led]
+    expect:
+      observe_ms: 10000
+      pins: [{pin: "8", transitions_min: 4, period_ms: [1500, 2500]}]
+    max_turns: 8
+
+  - id: button-led
+    prompt: >-
+      a pushbutton wired to pin 2 lights an LED on pin 13 while held;
+      print the word pressed over serial each time it goes down
+    board: arduino-uno
+    must_mention: [led, pushbutton]
+    expect:
+      observe_ms: 3000
+      interactions: [{kind: press, part: pushbutton, at_ms: 500, hold_ms: 400}]
+      serial_matches: ["pressed"]
+    max_turns: 10
+
+  - id: potentiometer
+    prompt: >-
+      read a potentiometer on A0 and print its value over serial twice a second;
+      when I turn it up, the printed value should rise with it
+    board: arduino-uno
+    must_mention: [potentiometer]
+    expect:
+      observe_ms: 4000
+      interactions: [{kind: pot, part: potentiometer, at_ms: 600, value: 1000}]
+      serial_matches: ["\\d+"]
+      serial_distinct_min: 2
+    max_turns: 8
+
+  - id: hc-sr04
+    prompt: >-
+      HC-SR04 ultrasonic sensor; print the measured distance followed by cm
+      over serial twice a second
+    board: arduino-uno
+    must_mention: [hc-sr04]
+    expect:
+      observe_ms: 3000
+      serial_matches: ["cm"]
+    max_turns: 8
+
+  - id: dht22
+    prompt: read a DHT22 on pin 2 and print the temperature and humidity over serial
+    board: arduino-uno
+    must_mention: [dht22]
+    expect:
+      observe_ms: 5000
+      serial_matches: ["temp"]
+    max_turns: 8
+
+  # THE discriminator pair. sweep passes only with a smooth ramp
+  # (>=25 distinct angles); a select-style servo (5 fixed positions) or a
+  # firmware that jumps between endpoints fails it. This is the exact bug
+  # class "servo mentioned, servo present" could never see.
+  - id: servo-sweep
+    prompt: >-
+      sweep a servo back and forth smoothly between 0 and 180 degrees,
+      about one second each way, and print the current angle over serial
+      as it moves
+    board: arduino-uno
+    must_mention: [servo]
+    expect:
+      observe_ms: 10000
+      serial_matches: ["\\d+"]
+      serial_distinct_min: 25
+    max_turns: 8
+
+  - id: servo-two-positions
+    prompt: >-
+      move a servo to 30 degrees, wait a second, move it to 150 degrees,
+      and print the angle over serial every time it moves
+    board: arduino-uno
+    must_mention: [servo]
+    expect:
+      observe_ms: 6000
+      serial_matches: ["\\d+"]
+      serial_distinct_min: 2
+    max_turns: 8
+
+  - id: neopixel
+    prompt: light the first pixel of a NeoPixel strip on pin 6 in red
+    board: arduino-uno
+    must_mention: [neopixel]
+    expect: null
+    max_turns: 10
+
+  - id: i2c-oled
+    prompt: show the text Velxio on an I2C OLED
+    board: arduino-uno
+    must_mention: [ssd1306-i2c-4pin]
+    expect: null
+    max_turns: 8
+
+  # --- the hard ones -------------------------------------------------------
+  - id: traffic-light
+    prompt: >-
+      a traffic light with red, yellow and green LEDs; cycle green for two
+      seconds, yellow for half a second, red for two seconds, and print the
+      active color name over serial on every change
+    board: arduino-uno
+    must_mention: [led]
+    expect:
+      observe_ms: 10000
+      serial_matches: ["red", "green", "yellow"]
+      serial_distinct_min: 3
+    max_turns: 12
+
+  - id: weather-station-phone
+    prompt: an esp32 weather station, connect to phone, esp32
+    board: esp32-devkit-c-v4
+    must_mention: [dht22]
+    expect: null
+    max_turns: 16
+
+  - id: rgb-fade
+    prompt: >-
+      fade an RGB led smoothly through colors using PWM and print the three
+      channel values over serial as they change
+    board: arduino-uno
+    must_mention: [rgb-led]
+    expect:
+      observe_ms: 8000
+      serial_matches: ["\\d+"]
+      serial_distinct_min: 15
+    max_turns: 10
+
+  - id: two-buttons-one-led
+    prompt: >-
+      two pushbuttons; pressing either one lights the LED on pin 13, and the
+      serial monitor shows button 1 or button 2 for whichever was pressed
+    board: arduino-uno
+    must_mention: [led, pushbutton]
+    expect:
+      observe_ms: 4000
+      interactions: [{kind: press, part: pushbutton, at_ms: 500, hold_ms: 300}]
+      serial_matches: ["button"]
+    max_turns: 12
+
+  - id: lcd-hello
+    prompt: print hello from velxio on an LCD 16x2
+    board: arduino-uno
+    must_mention: [lcd1602]
+    expect: null
+    max_turns: 10
+
+  - id: pir-alarm
+    prompt: >-
+      a PIR motion sensor arms a buzzer and prints MOTION DETECTED over serial
+      when it sees movement
+    board: arduino-uno
+    must_mention: [pir-motion-sensor, buzzer]
+    expect:
+      observe_ms: 4000
+      interactions: [{kind: stimulus, part: pir-motion-sensor, at_ms: 500, values: {motion: 1}}]
+      serial_matches: ["motion"]
+    max_turns: 12
+
+  - id: seven-segment-counter
+    prompt: >-
+      count from 0 to 9 on a seven segment display, one digit per second,
+      and print each digit over serial as it shows it
+    board: arduino-uno
+    must_mention: [7segment]
+    expect:
+      observe_ms: 10000
+      serial_matches: ["\\b\\d\\b"]
+      serial_distinct_min: 7
+    max_turns: 14
+
+  - id: parking-sensor
+    prompt: >-
+      an ultrasonic parking sensor that beeps a buzzer and prints the distance
+      over serial when something comes closer than 20 cm
+    board: arduino-uno
+    must_mention: [hc-sr04, buzzer]
+    expect:
+      observe_ms: 4000
+      interactions: [{kind: stimulus, part: hc-sr04, at_ms: 500, values: {distance: 10}}]
+      serial_matches: ["\\d+"]
+    max_turns: 12
+
+  - id: pot-fade-led
+    prompt: >-
+      fade an LED with a potentiometer — the knob sets the brightness — and
+      print the brightness value over serial
+    board: arduino-uno
+    must_mention: [led, potentiometer]
+    expect:
+      observe_ms: 4000
+      interactions: [{kind: pot, part: potentiometer, at_ms: 600, value: 1023}]
+      serial_matches: ["\\d+"]
+      serial_distinct_min: 3
+    max_turns: 10
+
+  - id: joystick-servo
+    prompt: >-
+      a joystick's vertical axis sets a servo's angle and the serial monitor
+      prints the angle
+    board: arduino-uno
+    must_mention: [analog-joystick, servo]
+    expect:
+      observe_ms: 4000
+      interactions: [{kind: pot, part: analog-joystick, at_ms: 600, value: 1000}]
+      serial_matches: ["\\d+"]
+      serial_distinct_min: 5
+    max_turns: 12
+
+  - id: mpu6050
+    prompt: read an MPU6050 accelerometer over I2C and print the x y z values over serial
+    board: arduino-uno
+    must_mention: [mpu6050]
+    expect:
+      observe_ms: 3000
+      serial_matches: ["\\d+"]
+    max_turns: 10

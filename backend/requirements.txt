@@ -13,6 +13,8 @@ httpx>=0.27.1
 # botocore is pulled in transitively but pinned here for AWS credential errors.
 boto3>=1.34.0
 botocore>=1.34.0
+# eval/golden.yaml parsing for the nightly eval runner (backend/eval_runner.py).
+pyyaml>=6.0
 # Capped below 2.0: mcp 2.0.0 (2026-07-28) deleted mcp.server.fastmcp, which
 # app/mcp/server.py imports. The unbounded `>=1.0.0` meant CI resolved the new
 # major the next day and every Backend Unit Tests run since 2026-07-29 died at

@@ -10,13 +10,12 @@ import shutil
 
 import pytest
 
-from app.agent import tools
-from app.agent.models import DRAFT_TOOLS, TOOL_NAMES
-from app.agent.tools import physics_capabilities, physics_simulate
+from app.mcp import server as mcp_server
+from app.mcp.server import physics_capabilities, physics_simulate
 
 HAS_NODE = shutil.which("node") is not None
-CORE = tools._PHYSICS_SIM_SCRIPT.with_name("physics-core.cjs")
-RUNNER_AVAILABLE = HAS_NODE and tools._PHYSICS_SIM_SCRIPT.exists() and CORE.exists()
+CORE = mcp_server._PHYSICS_SIM_SCRIPT.with_name("physics-core.cjs")
+RUNNER_AVAILABLE = HAS_NODE and mcp_server._PHYSICS_SIM_SCRIPT.exists() and CORE.exists()
 
 QUAD_SCENE = {
     "version": 1,
@@ -35,15 +34,18 @@ QUAD_SCENE = {
 }
 
 
-def test_tool_names_cover_physics_tools():
-    assert "physics_capabilities" in TOOL_NAMES
-    assert "physics_simulate" in TOOL_NAMES
-    assert "physics_simulate" in DRAFT_TOOLS
-    assert set(tools.TOOLS) == set(TOOL_NAMES)
+def test_physics_lives_on_the_mcp_bridge_not_the_agent_tools():
+    """v2: the agent's schema set is the 9 workspace tools; physics scenes are
+    exposed to external agents (WireGI) through the MCP bridge instead."""
+    from app.agent import toolspecs
+    names = {spec["name"] for spec in toolspecs.SPECS}
+    assert "physics_simulate" not in names
+    assert {"write_file", "read_file", "edit_file", "list_files", "remove_file",
+            "check", "compile", "simulate", "done"} <= names
 
 
 def test_physics_capabilities_is_static_reference():
-    result = physics_capabilities(None, {})
+    result = physics_capabilities()
     assert result["ok"] is True
     assert "bodies" in result["scene"]
     assert "actuators" in result["scene"]
@@ -52,7 +54,7 @@ def test_physics_capabilities_is_static_reference():
 
 
 def test_physics_simulate_requires_scene_object():
-    result = asyncio.run(physics_simulate(None, {"scene": "nope"}))
+    result = asyncio.run(physics_simulate(scene="nope"))
     assert result["ok"] is False
     assert "physics_capabilities" in result["error"]
 

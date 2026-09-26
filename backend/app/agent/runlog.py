@@ -21,12 +21,17 @@ class RunRecord:
     started_at: float = field(default_factory=time.time)  # wall clock (epoch s)
     finished: float | None = None
     outcome: str = "running"  # compiled | explained | failed | error | cancelled
-    provider: str = ""  # which provider spec routed this run (opencode | gemini | bedrock)
+    provider: str = ""  # which provider spec routed this run (bedrock is the only one)
     attempts: int = 0
     provider_calls: int = 0
     tool_calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Measured cache activity (Bedrock prompt caching). prompt_tokens above is
+    # the TRUE full input basis (inputTokens + cacheRead + cacheWrite); these
+    # two carry the split so the cost model can price real spend.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     # Per-call trace (stage, attempt, ms, tokens incl. cached) — the answer
     # to "which round was slow". JSON-fix sub-calls are best-effort and are
     # not tracked individually; provider_calls/provider_ms cover them only in

@@ -126,8 +126,9 @@ class Source(StrictModel):
 
 
 class Project(StrictModel):
-    # Set by apply_patch: the deterministic analysis findings for THIS candidate.
-    # Private so it never reaches the wire format or the prompt schema.
+    # Attached by analysis consumers (workspace.check()/done()): the
+    # deterministic findings for THIS candidate. Private so it never reaches
+    # the wire format or the prompt schema.
     _findings: list = PrivateAttr(default_factory=list)
 
     @property
@@ -220,17 +221,6 @@ def describe_error(exc: BaseException, limit: int = 8) -> str:
     return "\n".join(lines) or str(exc)
 
 
-class Patch(StrictModel):
-    # Full replacement ONLY for explicitly named items. Everything else survives.
-    board: Board | None = None
-    upsert_components: list[Part] = Field(default_factory=list, max_length=40)
-    remove_components: list[Id] = Field(default_factory=list, max_length=40)
-    upsert_wires: list[Connection] = Field(default_factory=list, max_length=100)
-    remove_wires: list[Id] = Field(default_factory=list, max_length=100)
-    upsert_files: list[Source] = Field(default_factory=list, max_length=12)
-    remove_files: list[str] = Field(default_factory=list, max_length=12)
-
-
 class Interaction(StrictModel):
     """An input the verifier drives on the live simulation before sampling.
 
@@ -318,74 +308,6 @@ class Expectations(StrictModel):
     interactions: list[Interaction] = Field(default_factory=list, max_length=8)
 
 
-TOOL_NAMES = (
-    "read_file",
-    "list_files",
-    "board_pinout",
-    "component_info",
-    "search_catalog",
-    "netlist",
-    "check_design",
-    "draft_validate",
-    "draft_compile",
-    "draft_simulate",
-    "search_libraries",
-    "library_api",
-    "physics_capabilities",
-    "physics_simulate",
-)
-ToolName = Literal[TOOL_NAMES]
-
-# Tools that take a candidate patch instead of plain scalars. They never mutate
-# the workspace: they build the candidate, run the deterministic stack (and, for
-# `draft_simulate`, the real emulator) and hand the observations back, so the
-# model can debug its own proposal before the user ever sees it.
-# `physics_simulate` follows the same pattern with an inline scene document
-# instead of a project patch.
-DRAFT_TOOLS = ("draft_validate", "draft_compile", "draft_simulate", "physics_simulate")
-
-
-class ToolCall(StrictModel):
-    """A tool the model wants run before it commits to a patch.
-
-    Tool use rides on the same JSON response as the patch rather than the
-    provider's native tool-calling API, so any OpenAI-compatible
-    chat-completions endpoint (the only shape this adapter supports) works.
-    """
-
-    tool: ToolName
-    # Scalars for the read-only tools; a nested `patch` object (same shape as
-    # Proposal.patch) for the draft_* tools. Bounded so a runaway model cannot
-    # stuff a megabyte into a tool call.
-    args: dict = Field(default_factory=dict, max_length=12)
-
-    @model_validator(mode="after")
-    def bounded_args(self):
-        import json as _json
-
-        if len(_json.dumps(self.args, default=str)) > 24000:
-            raise ValueError("Tool call arguments are too large")
-        return self
-
-
-class Proposal(StrictModel):
-    summary: str = Field(min_length=1, max_length=5000)
-    plan: list[str] = Field(default_factory=list, max_length=8)
-    patch: Patch | None = None
-    # Attached by the provider adapter (never sent by the model): token usage
-    # of the call that produced this proposal, for run records.
-    _usage: dict | None = PrivateAttr(default=None)
-
-    @property
-    def usage(self) -> dict | None:
-        return self._usage
-    # Falsifiable success criteria for the patch; checked by the live simulator.
-    expectations: Expectations | None = None
-    # When non-empty the run executes these tools and asks again; no patch is
-    # applied on a tool round. Bounded by AGENT_MAX_TOOL_ROUNDS.
-    tool_calls: list[ToolCall] = Field(default_factory=list, max_length=4)
-
-
 class Message(StrictModel):
     role: Literal["user", "assistant"]
     content: str = Field(max_length=6000)
@@ -395,10 +317,9 @@ class AgentRequest(StrictModel):
     prompt: str = Field(min_length=1, max_length=6000)
     project: Project
     messages: list[Message] = Field(default_factory=list, max_length=12)
-    # Which server-side provider routes this run. Only ids listed in
-    # Settings.providers() are accepted; the id never carries credentials.
-    # "local" is the built-in planner: no endpoint, no key, no cost.
-    provider: Literal["opencode", "gemini", "bedrock", "local"] = "bedrock"
+    # Which server-side provider routes this run. Bedrock is the only model
+    # provider; the id never carries credentials.
+    provider: Literal["bedrock"] = "bedrock"
     # chat explains, composer edits, agent may use tools, inline edits the selection.
     mode: Literal["agent", "chat", "composer", "inline"] = "agent"
     # User already chose to build. Do not stop on a JEV clarify-first decision.
@@ -421,97 +342,6 @@ def _number(key: str, value) -> float:
         return float(value)
     except (ValueError, TypeError):
         raise ValueError(f"{key} must be numeric") from None
-
-
-def merge_items(old, new, removed, key):
-    # Resolve deterministically instead of rejecting: an upsert is a full
-    # replacement, so it wins over a removal of the same key, and a duplicate
-    # upsert resolves to the last occurrence. Models often express "replace
-    # this part" as remove+upsert or repeat an upsert while repairing; a hard
-    # conflict error would silently burn every repair attempt.
-    upserted = {}
-    for item in new:
-        upserted[getattr(item, key)] = item
-    if set(removed) - {getattr(item, key) for item in old}:
-        raise ValueError(f"Cannot remove unknown {key}")
-    removed = [k for k in removed if k not in upserted]
-    result = {getattr(item, key): item for item in old if getattr(item, key) not in removed}
-    result.update(upserted)
-    return list(result.values())
-
-
-def apply_patch(project: Project, patch: Patch, expectations=None, board_hint: str | None = None) -> Project:
-    if patch.board and project.board and patch.board.id != project.board.id:
-        # Board kind may change in place, but changing the instance id would
-        # orphan every existing wire and file group. Reject it instead of
-        # silently rewriting the model's patch.
-        raise ValueError(
-            f"Cannot change the existing board ID from {project.board.id!r} to "
-            f"{patch.board.id!r}; change boardKind in place.")
-
-    components = merge_items(project.components, patch.upsert_components, patch.remove_components, "id")
-    wires = merge_items(project.wires, patch.upsert_wires, patch.remove_wires, "id")
-    files = merge_items(project.files, patch.upsert_files, patch.remove_files, "name")
-    board = patch.board or project.board
-
-    # A blank canvas has no board id for the model to copy. The model is told to
-    # return `patch.board`, but a first draft that only supplies files/wires used
-    # to die with the opaque "A build needs a board" error. Create the same
-    # deterministic first-board shape as the browser (kind as id), using the
-    # request/source only for an unambiguous family hint. An explicit board
-    # always wins, including an explicitly selected Uno with no WiFi support.
-    if board is None and (components or wires or files):
-        hint = "\n".join([board_hint or "", *(file.content for file in files)])
-        board_kind = catalog.infer_board_kind(hint)
-        board_id = board_kind
-        for endpoint in [end for wire in wires for end in (wire.start, wire.end)]:
-            if catalog.normalize_board_kind(endpoint.componentId) == board_kind:
-                board_id = endpoint.componentId
-                break
-        board = Board(id=board_id, boardKind=board_kind)
-
-    candidate = Project(
-        board=board,
-        components=components,
-        wires=wires,
-        files=files,
-    )
-    # Velxio = Cursor: support every catalog board and source type. A project
-    # has one entry file (.ino/.cpp/.c for Arduino-style targets or .py for
-    # Linux/Pi) and may add flat headers beside it.
-    if not candidate.board:
-        raise ValueError(
-            "A build needs at least one board. Return patch.board with a boardKind "
-            f"from the {len(catalog.BOARDS)} supported Velxio boards.")
-    sketch_entries = [f for f in candidate.files if f.name.endswith((".ino", ".py"))]
-    native_entries = [f for f in candidate.files if f.name.endswith((".cpp", ".c"))]
-    # A sketch may have helper .cpp/.c files; when there is no sketch entry,
-    # the native C/C++ file itself is the entry (Pi/Linux projects use this).
-    entry_files = sketch_entries if sketch_entries else native_entries
-    if len(entry_files) != 1:
-        raise ValueError(
-            "A build needs exactly one entry source file (.ino, .py, .cpp, or .c); "
-            f"received {[f.name for f in entry_files] or 'none'}.")
-    has_code = any(f.name.endswith((".ino", ".py", ".cpp", ".c", ".h")) for f in candidate.files)
-    if not has_code:
-        raise ValueError("A build needs at least one source file (.ino, .py, .cpp)")
-    # Restrict user includes to the common core, this board's native core APIs,
-    # catalog part drivers, or explicit workspace headers. This is a capability
-    # check, NOT a substitute for an OS compiler sandbox.
-    filenames = {f.name for f in candidate.files}
-    board_kind = candidate.board.boardKind if candidate.board else catalog.DEFAULT_BOARD
-    for source in candidate.files:
-        validate_includes(source.content, filenames, board_id=board_kind)
-    # Coherence/short analysis runs BEFORE validate_electrical so a shorted LED
-    # is reported as shorted, not as the vaguer downstream "needs a series
-    # resistor". The compiler cannot see that the sketch drives pin 7 while the
-    # LED sits on pin 13, and the electrical pre-flight cannot either (it
-    # forces every wired GPIO HIGH). This pass can.
-    from app.agent.analysis import assert_clean  # local import: analysis imports models
-
-    candidate._findings = assert_clean(candidate, expectations)
-    validate_electrical(candidate)
-    return candidate
 
 
 def allowed_include_headers(board_id: str = catalog.DEFAULT_BOARD) -> set[str]:

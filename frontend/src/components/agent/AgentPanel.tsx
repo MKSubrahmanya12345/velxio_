@@ -41,6 +41,7 @@ import {
   loadWorkspace,
   scopeKey,
 } from '../../agent/workspace';
+import { beginAgentLiveType, endAgentLiveType } from '../../agent/reveal';
 import type { AgentEvent } from '../../agent/protocol';
 import { triggerDownloadVlx } from '../../utils/vlxFile';
 import { CreativePanel } from '../creative/CreativePanel';
@@ -51,14 +52,14 @@ interface ProviderInfo {
   label: string;
   model: string;
   configured: boolean;
-  /** The built-in offline planner: no key, no network, no cost. */
-  local?: boolean;
 }
 interface Status {
   configured: boolean;
   model: string | null;
   providers: ProviderInfo[];
   scope: string;
+  /** Measured Bedrock prompt-cache state (see BEDROCK_PROMPT_CACHE). */
+  prompt_cache?: { requested: boolean; active: boolean | null; note: string };
 }
 async function fetchAgentStatus(signal?: AbortSignal): Promise<Status> {
   const response = await fetch(`${getApiBase()}/agent/status`, { signal });
@@ -165,7 +166,7 @@ const suggestions = [
 
 function stepFor(stage: string): 'think' | 'parts' | 'check' | 'code' {
   if (stage === 'validating') return 'parts';
-  if (stage === 'testing' || stage === 'repairing') return 'check';
+  if (stage === 'testing' || stage === 'repairing' || stage === 'working') return 'check';
   if (stage === 'compiling' || stage === 'verifying') return 'code';
   return 'think';
 }
@@ -430,7 +431,9 @@ export function AgentPanel() {
     feedbackSent.current = new Set();
     const abort = new AbortController();
     controller.current = abort;
-    const timeout = setTimeout(() => abort.abort(), 260000);
+    // The run budget is server-side (AGENT_RUN_TIMEOUT_S + compile headroom,
+    // up to ~10 min for ESP32/STM32); the client must never give up first.
+    const timeout = setTimeout(() => abort.abort(), 620000);
     let failed = false;
     try {
       const answer = await runAgent({
@@ -456,6 +459,11 @@ export function AgentPanel() {
             setHeartbeat(event.message);
             if (typeof event.text === 'string' && event.text.length > 0) {
               setLiveText(event.text);
+            }
+            // The model is writing a file RIGHT NOW: type it live in the
+            // editor pane instead of showing a character counter.
+            if (event.files && Object.keys(event.files).length > 0) {
+              beginAgentLiveType(event.files);
             }
           }
           if (event.type === 'retry') {
@@ -493,10 +501,19 @@ export function AgentPanel() {
             }
           }
           if (event.type === 'error' && event.diagnostics) pushDiagnostic(event.diagnostics);
+          // End the live typing on the FIRST terminal event — runner.ts starts
+          // the post-result reveal while handling `result`, and the reveal
+          // must see which files were already live-typed before it decides
+          // what (not) to replay.
+          if (event.type === 'result' || event.type === 'answer') {
+            endAgentLiveType();
+          }
         },
       });
+      endAgentLiveType();
       journal.addMessage({ role: 'assistant', content: answer, scope: requestScope });
     } catch (error) {
+      endAgentLiveType();
       failed = true;
       const message = abort.signal.aborted
         ? 'Agent stopped. No further edits will be applied. If a compiled checkpoint was already applied, it remains available in Checkpoints for undo.'
@@ -800,11 +817,24 @@ export function AgentPanel() {
           <details>
             <summary>Server setup</summary>
             <pre>
-              AGENT_ENABLED=true{'\n'}AGENT_OPENCODE_BASE_URL=http://127.0.0.1:4096{'\n'}AGENT_OPENCODE_MODEL=big-pickle{'\n'}
+              AGENT_ENABLED=true{'\n'}
               BEDROCK_MODEL_ID=your-bedrock-model-id{'\n'}AWS_REGION=us-east-1{'\n'}
             </pre>
           </details>
         </section>
+      )}
+
+      {status?.prompt_cache && status.prompt_cache.requested && (
+        <div className="agent-connection-note" title={status.prompt_cache.note || ''}>
+          <Sparkles size={15} />
+          <span>
+            {status.prompt_cache.active === true
+              ? 'Prompt caching active (measured).'
+              : status.prompt_cache.active === false
+                ? 'Prompt caching requested but not reported by the model — running uncached.'
+                : 'Prompt caching: unverified (no probe run yet).'}
+          </span>
+        </div>
       )}
 
       {(statusError || status?.configured === false) && (

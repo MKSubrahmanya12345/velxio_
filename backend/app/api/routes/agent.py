@@ -11,7 +11,7 @@ from app.agent.feedback import push as push_feedback
 from app.agent.models import AgentRequest
 from app.agent.runlog import snapshot as run_snapshot
 from app.agent.service import (
-    ProviderError, agent_run_budget_s, provider_available, run_agent)
+    ProviderError, agent_run_budget_s, cache_state, provider_available, run_agent)
 from app.core.config import settings
 
 router = APIRouter()
@@ -21,13 +21,12 @@ _slots = asyncio.Semaphore(2)
 def configured():
     """Whether the agent can serve a run at all.
 
-    The built-in planner is local and deterministic — no endpoint, no key, no
-    cost — so it works with nothing configured. AGENT_ENABLED still gates every
-    *keyed* provider, so a shared deployment cannot leak paid credits to
-    anonymous users.
+    Bedrock is the only provider: the agent is available when AGENT_ENABLED is
+    on AND Bedrock is configured. AGENT_ENABLED gates the shared credits, so a
+    deployment without it never exposes the key to anonymous users.
     """
     if not settings.AGENT_ENABLED:
-        return settings.provider("local") is not None
+        return False
     return any(provider_available(spec) for spec in settings.providers())
 
 
@@ -81,21 +80,15 @@ async def tools_invoke(body: ToolInvokeBody):
 @router.get("/status")
 async def status():
     # The browser reads model names/ids only; credentials never leave the server.
-    # `configured` here means usable NOW: a local-server provider (OpenCode)
-    # that is not listening reports false, so the browser does not auto-select
-    # it and then fail every run on a refused connection.
+    # Bedrock is the only model provider and the only default.
     providers = [{"id": p.id, "label": p.label, "model": p.model,
-                  "configured": provider_available(p), "local": p.kind == "local"}
+                  "configured": provider_available(p)}
                  for p in settings.providers()]
     default = settings.provider("bedrock")
-    if default is None or not provider_available(default):
-        default = next((spec for spec in settings.providers()
-                        if spec.kind != "local" and provider_available(spec)), None)
-    if default is None:
-        default = settings.provider("local")
     return {"configured": configured(),
             "providers": providers,
-            "model": default.model if configured() else None,
+            "model": default.model if configured() and default else None,
+            "prompt_cache": cache_state(),
             "scope": f"Velxio agent · {len(catalog.BOARDS)} boards · {len(catalog.PARTS)} catalog components · board-aware libraries"}
 
 
@@ -116,9 +109,9 @@ async def run(body: AgentRequest, request: Request):
     await _slots.acquire()
 
     async def stream():
-        # Board-aware deadline: an ESP32/STM32 run compiles for minutes, so
-        # the flat AGENT_RUN_TIMEOUT_S cap used to kill the run mid-compile
-        # while the (longer) inner compile window was still legal.
+        # Board-aware deadline: an ESP32/STM32 run may wait on one pooled
+        # compile, so the flat AGENT_RUN_TIMEOUT_S cap must not kill the run
+        # while the (longer) pooled compile window is still legal.
         budget = agent_run_budget_s(
             body.project.board.boardKind if body.project.board else None,
             body.fast_mode)

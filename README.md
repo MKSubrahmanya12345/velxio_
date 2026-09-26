@@ -57,15 +57,12 @@ A VS Code-style agent sidebar turns a prompt into an automatically wired,
 programmed simulation — board, parts, pin assignment, wiring and firmware — then
 makes follow-up edits with checkpoints and undo.
 
-**It works with no setup.** The built-in offline planner (`AGENT_BUILTIN`,
-default on) reads the generated catalog and builds real circuits with no
-provider, no API key and no network: "blink an LED", "button and LED", "read a
-potentiometer", "HC-SR04 distance", "DHT22 on pin 2", "sweep a servo",
-"NeoPixel strip", "I2C OLED". Its proposal goes through exactly the same gates
-as a model's — schema validation, deterministic analysis, the real compiler and
-the browser's electrical pre-flight and live-simulation checks (it appears as
-`local` in the provider dropdown). Model integration is **opt-in** and
-server-side; see
+**Amazon Bedrock is the only model provider** — one transport path, no
+provider fallbacks: an unconfigured or failing Bedrock is a clear error, never
+a silent downgrade to something else. The agent researches the catalog, drafts
+the circuit, tests its own firmware against the real compiler, and repairs from
+diagnostics before anything touches your workspace. Setup is **opt-in and
+server-side** (`BEDROCK_MODEL_ID`, region/credentials); see
 [setup, supported scope, and testing instructions](docs/agent-workspace.md).
 An optional [Forge](forge/README.md) memory layer can govern each agent turn with JEV-reviewed
 project rules; toggle it in the agent settings panel (`FORGE_ENABLED` server-side).
