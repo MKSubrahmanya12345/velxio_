@@ -1,5 +1,4 @@
 import { generateJSON } from './llm.js';
-import { makeProject } from '../models/project.js';
 
 const ROUTER_SYSTEM = `You route a user's hardware-agent message.
 Return JSON ONLY:
