@@ -281,11 +281,11 @@ def agent_run_budget_s(board_kind: str | None, fast: bool = False) -> float:
 
 
 _COMPAT_TOOL_MARKER_RE = re.compile(
-    r"<\\|tool_call_begin\\|>\\s*"
-    r"(?:functions\\.)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\s*:\\d+\\s*"
-    r"<\\|tool_call_argument_begin\\|>\\s*"
+    r"<\|tool_call_begin\|>\s*"
+    r"(?:functions\.)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\d+\s*"
+    r"<\|tool_call_argument_begin\|>\s*"
     r"(?P<args>.*?)"
-    r"\\s*<\\|tool_call_end\\|>",
+    r"\s*<\|tool_call_end\|>",
     re.DOTALL,
 )
 
