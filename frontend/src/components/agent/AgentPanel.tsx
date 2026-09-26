@@ -423,6 +423,16 @@ export function AgentPanel() {
     setNotice('');
     setPlan([]);
     setDiagnostics([]);
+    // A reply to forge's clarifying question is just a normal submit — but
+    // the pending-question card only ever cleared via its own two buttons,
+    // so answering by typing + Enter left the OLD question sitting on
+    // screen through the whole new run. Looked exactly like "my answer
+    // didn't go anywhere," which is what sent people to the standalone
+    // forge client instead. Any new submit retires the old card; a fresh
+    // one reappears if this run raises a new question.
+    setForgeClarification(null);
+    setForgeQuestions([]);
+    setShowClarification(false);
     setTab('chat');
     setStep('think');
     setHeartbeat('');

@@ -1230,7 +1230,10 @@ async def _run(request: AgentRequest, run_id: str, started: float,
             if turn.get("clarify") and turn.get("clarification"):
                 payload["clarification"] = str(turn["clarification"])[:1000]
             yield event(payload)
-            if turn.get("clarify") and turn.get("clarification"):
+            # request.skip_clarify was already on the wire (the "Skip and
+            # design" button sends it) but nothing here read it, so that
+            # button just re-asked the same question instead of moving on.
+            if turn.get("clarify") and turn.get("clarification") and not request.skip_clarify:
                 record.finish("explained")
                 yield event(_latency_event(record))
                 yield event({"type": "answer", "summary": str(turn["clarification"])[:4000]})
